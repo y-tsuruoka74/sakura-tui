@@ -12,12 +12,17 @@ use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod apprun;
+mod dedicated;
 mod server;
 
 pub use apprun::{AppRunPane, AppRunView};
+pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
 pub use server::ServerView;
 
 use crate::apprun::{Application, ApplicationDetail, AppRunClient, Traffic, Version};
+use crate::apprun_dedicated::{
+    self as ded, Cluster, DedicatedClient,
+};
 use crate::config::{Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
@@ -72,6 +77,28 @@ pub enum Message {
         id: String,
         label: String,
         result: Result<(), String>,
+    },
+    Clusters(Result<Vec<Cluster>, String>),
+    ClusterDetail {
+        id: String,
+        result: Result<Cluster, String>,
+    },
+    DedicatedApplications {
+        cluster: String,
+        result: Result<Vec<ded::Application>, String>,
+    },
+    ScalingGroups {
+        cluster: String,
+        result: Result<Vec<ded::AutoScalingGroup>, String>,
+    },
+    WorkerNodes {
+        cluster: String,
+        asg: String,
+        result: Result<Vec<ded::WorkerNode>, String>,
+    },
+    Certificates {
+        cluster: String,
+        result: Result<Vec<ded::Certificate>, String>,
     },
     Zones(Result<Vec<Zone>, String>),
     Servers {
@@ -131,9 +158,14 @@ pub enum Pane {
     Users,
     Repositories,
     Tags,
-    // AppRun
+    // AppRun（共用型）
     Applications,
     Versions,
+    // AppRun（専有型）
+    Clusters,
+    DedicatedApplications,
+    ScalingGroups,
+    Certificates,
     // サーバー
     Servers,
     /// 絞り込み対象になるリストが無い（概要タブなど）。
@@ -191,16 +223,23 @@ pub enum Service {
     #[default]
     Registry,
     AppRun,
+    Dedicated,
     Server,
 }
 
 impl Service {
-    pub const ALL: [Service; 3] = [Service::Registry, Service::AppRun, Service::Server];
+    pub const ALL: [Service; 4] = [
+        Service::Registry,
+        Service::AppRun,
+        Service::Dedicated,
+        Service::Server,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Service::Registry => "コンテナレジストリ",
             Service::AppRun => "AppRun",
+            Service::Dedicated => "AppRun専有型",
             Service::Server => "サーバー",
         }
     }
@@ -436,6 +475,7 @@ pub struct RegistryView {
 pub struct App {
     sacloud: Arc<SacloudClient>,
     apprun_client: Arc<AppRunClient>,
+    dedicated_client: Arc<DedicatedClient>,
     tx: UnboundedSender<Message>,
     pub config: Config,
     pub registry_clients: RegistryClients,
@@ -455,8 +495,10 @@ pub struct App {
 
     /// コンテナレジストリ画面の状態。
     pub registry: RegistryView,
-    /// AppRun 画面の状態。
+    /// AppRun（共用型）画面の状態。
     pub apprun: AppRunView,
+    /// AppRun（専有型）画面の状態。
+    pub dedicated: DedicatedView,
     /// サーバー画面の状態。
     pub server: ServerView,
 
@@ -473,6 +515,7 @@ impl App {
     pub fn new(
         sacloud: Arc<SacloudClient>,
         apprun_client: Arc<AppRunClient>,
+        dedicated_client: Arc<DedicatedClient>,
         tx: UnboundedSender<Message>,
         config: Config,
         credential_source: CredentialSource,
@@ -481,6 +524,7 @@ impl App {
         let mut app = Self {
             sacloud,
             apprun_client,
+            dedicated_client,
             tx,
             config,
             registry_clients: RegistryClients::default(),
@@ -495,6 +539,7 @@ impl App {
             zones: Loadable::Idle,
             registry: RegistryView::default(),
             apprun: AppRunView::default(),
+            dedicated: DedicatedView::default(),
             server: ServerView::default(),
             filters: Filters::default(),
             filtering: false,
@@ -625,6 +670,7 @@ impl App {
         match self.service {
             Service::Registry => self.registry_active_pane(),
             Service::AppRun => self.apprun_active_pane(),
+            Service::Dedicated => self.dedicated_active_pane(),
             Service::Server => Pane::Servers,
         }
     }
@@ -725,6 +771,7 @@ impl App {
         match self.service {
             Service::Registry => self.registry_ensure_loaded(),
             Service::AppRun => self.apprun_ensure_loaded(),
+            Service::Dedicated => self.dedicated_ensure_loaded(),
             Service::Server => self.server_ensure_loaded(),
         }
     }
@@ -967,6 +1014,57 @@ impl App {
                     self.set_status(err, StatusKind::Error);
                 }
             },
+            Message::Clusters(Ok(items)) => {
+                let count = items.len();
+                self.dedicated.clusters = Loadable::Ready(items);
+                self.dedicated.cluster_state.select(None);
+                self.dedicated_after_cluster_change();
+                self.set_status(format!("クラスタ {count} 件"), StatusKind::Info);
+                self.ensure_loaded();
+            }
+            Message::Clusters(Err(err)) => {
+                self.dedicated.clusters = Loadable::Failed(err.clone());
+                self.set_status(err, StatusKind::Error);
+            }
+            Message::ClusterDetail { id, result } => {
+                let loadable = match result {
+                    Ok(detail) => Loadable::Ready(detail),
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.dedicated.details.insert(id, loadable);
+            }
+            Message::DedicatedApplications { cluster, result } => {
+                let loadable = self.store_result(result);
+                self.dedicated.applications.insert(cluster, loadable);
+                self.dedicated.application_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::ScalingGroups { cluster, result } => {
+                let loadable = self.store_result(result);
+                self.dedicated.scaling_groups.insert(cluster, loadable);
+                self.dedicated.scaling_group_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::Certificates { cluster, result } => {
+                let loadable = self.store_result(result);
+                self.dedicated.certificates.insert(cluster, loadable);
+                self.dedicated.certificate_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::WorkerNodes {
+                cluster,
+                asg,
+                result,
+            } => {
+                let loadable = match result {
+                    Ok(nodes) => Loadable::Ready(nodes),
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        Loadable::Failed(err)
+                    }
+                };
+                self.dedicated.worker_nodes.insert((cluster, asg), loadable);
+            }
             Message::Zones(Ok(zones)) => self.zones = Loadable::Ready(zones),
             Message::Zones(Err(err)) => {
                 self.zones = Loadable::Failed(err.clone());
@@ -1061,6 +1159,17 @@ impl App {
         }
     }
 
+    /// 取得結果を `Loadable` に変換しつつ、失敗ならステータス行にも出す。
+    fn store_result<T>(&mut self, result: Result<Vec<T>, String>) -> Loadable<Vec<T>> {
+        match result {
+            Ok(items) => Loadable::Ready(items),
+            Err(err) => {
+                self.set_status(err.clone(), StatusKind::Error);
+                Loadable::Failed(err)
+            }
+        }
+    }
+
     pub fn set_status(&mut self, text: impl Into<String>, kind: StatusKind) {
         self.status = Some((text.into(), kind));
     }
@@ -1092,6 +1201,7 @@ impl App {
         match self.service {
             Service::Registry => self.on_key_registry(key),
             Service::AppRun => self.on_key_apprun(key),
+            Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
         }
     }
@@ -1298,6 +1408,17 @@ impl App {
         }
     }
 
+    /// 読み込み済みなのに未選択なら先頭を選ぶ。
+    pub(super) fn fill_selection(&mut self, pane: Pane) {
+        let len = self.visible_len(pane);
+        if let Some(state) = self.list_state(pane)
+            && len > 0
+            && state.selected().is_none()
+        {
+            state.select(Some(0));
+        }
+    }
+
     fn visible_len(&self, pane: Pane) -> usize {
         match pane {
             Pane::Registries => self.visible_registries().len(),
@@ -1307,6 +1428,12 @@ impl App {
             Pane::Applications => self.visible_applications().len(),
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
+            Pane::Clusters => self.visible_clusters().len(),
+            Pane::DedicatedApplications => {
+                self.visible_dedicated_applications().ready().map_or(0, Vec::len)
+            }
+            Pane::ScalingGroups => self.visible_scaling_groups().ready().map_or(0, Vec::len),
+            Pane::Certificates => self.visible_certificates().ready().map_or(0, Vec::len),
             Pane::None => 0,
         }
     }
@@ -1320,6 +1447,10 @@ impl App {
             Pane::Applications => Some(&mut self.apprun.application_state),
             Pane::Versions => Some(&mut self.apprun.version_state),
             Pane::Servers => Some(&mut self.server.server_state),
+            Pane::Clusters => Some(&mut self.dedicated.cluster_state),
+            Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
+            Pane::ScalingGroups => Some(&mut self.dedicated.scaling_group_state),
+            Pane::Certificates => Some(&mut self.dedicated.certificate_state),
             Pane::None => None,
         }
     }
@@ -1363,6 +1494,20 @@ impl App {
                 .filter(|url| !url.is_empty()),
             Pane::Versions => self.selected_version().map(|version| version.name),
             // サーバーは SSH 先として使える IP を優先する。
+            Pane::Clusters => self.selected_cluster().map(|c| c.id.clone()),
+            Pane::DedicatedApplications => self
+                .visible_dedicated_applications()
+                .ready()
+                .and_then(|apps| {
+                    apps.get(self.dedicated.application_state.selected()?)
+                        .map(|app| app.name.clone())
+                }),
+            Pane::ScalingGroups => self.selected_scaling_group().map(|g| g.id),
+            Pane::Certificates => self.visible_certificates().ready().and_then(|certs| {
+                certs
+                    .get(self.dedicated.certificate_state.selected()?)
+                    .map(|cert| cert.common_name.clone())
+            }),
             Pane::Servers => self.selected_server().map(|server| {
                 server
                     .ip_addresses
@@ -1437,6 +1582,7 @@ impl App {
         match self.service {
             Service::Registry => self.registry_refresh(),
             Service::AppRun => self.apprun_refresh(),
+            Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
         }
     }
@@ -1471,6 +1617,7 @@ impl App {
         self.registry.tags.clear();
         self.registry.tag_details.clear();
         self.apprun_invalidate();
+        self.dedicated_invalidate();
         self.server_invalidate();
     }
 
@@ -1542,6 +1689,13 @@ impl App {
         if pane == Pane::Applications {
             self.apprun.version_state.select(None);
             self.apprun.pane = AppRunPane::Applications;
+        }
+        // 専有型はクラスタが親、ASG がワーカーノードの親。
+        if pane == Pane::Clusters {
+            self.dedicated_after_cluster_change();
+        }
+        if pane == Pane::ScalingGroups {
+            self.dedicated.worker_node_state.select(None);
         }
         if self.service != Service::Registry {
             return;

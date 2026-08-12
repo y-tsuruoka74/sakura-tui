@@ -1,6 +1,7 @@
 //! 画面描画。
 
 mod apprun;
+mod dedicated;
 mod detail;
 mod overlay;
 mod registries;
@@ -96,6 +97,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.service {
         Service::Registry => draw_registry(frame, area, app),
         Service::AppRun => apprun::draw(frame, area, app),
+        Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
     }
 }
@@ -205,6 +207,8 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 hints.push("t トラフィック切替");
             }
         }
+        // 専有型は閲覧のみなので書き込み系のヒントは無い。
+        Service::Dedicated => hints.push("Tab タブ"),
         Service::Server => {
             hints.push("z ゾーン");
             if app.mode == Mode::Write {
@@ -300,6 +304,24 @@ pub fn status_color(status: &str) -> Color {
         }
         _ => Color::Gray,
     }
+}
+
+pub fn error_paragraph(err: &str) -> Paragraph<'static> {
+    Paragraph::new(err.to_string())
+        .style(Style::default().fg(Color::Red))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+}
+
+/// Unix 秒を `YYYY-MM-DD HH:MM` に整形する。
+/// （専有型 API は日時を文字列ではなく整数で返す）
+pub fn format_unix(seconds: i64) -> String {
+    chrono::DateTime::from_timestamp(seconds, 0)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 /// 日時文字列を `YYYY-MM-DD HH:MM` に整形する。解析できなければそのまま返す。

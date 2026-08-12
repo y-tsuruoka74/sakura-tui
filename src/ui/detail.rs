@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 
-use super::{DIM, SAKURA, border_style, field, format_datetime, placeholder};
+use super::{DIM, SAKURA, border_style, error_paragraph, field, format_datetime, placeholder};
 use crate::app::{App, Focus, ImagePane, Loadable, Tab};
 use crate::sacloud::ContainerRegistry;
 
@@ -350,12 +350,6 @@ fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
             frame.render_stateful_widget(list, area, &mut app.registry.tag_state);
         }
     }
-}
-
-fn error_paragraph(err: &str) -> Paragraph<'static> {
-    Paragraph::new(err.to_string())
-        .style(Style::default().fg(Color::Red))
-        .wrap(Wrap { trim: false })
 }
 
 fn highlight_style(focused: bool) -> Style {
