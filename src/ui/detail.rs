@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 
-use super::{DIM, SAKURA, border_style, error_paragraph, field, format_datetime, placeholder};
+use super::{DIM, accent, border_style, error_paragraph, field, format_datetime, placeholder};
 use crate::app::{App, Focus, ImagePane, Loadable, Tab};
 use crate::sacloud::ContainerRegistry;
 
@@ -64,7 +64,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App, registry: &ContainerR
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "docker コマンド",
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD),
     )));
     if host.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -160,7 +160,7 @@ fn draw_images(frame: &mut Frame, area: Rect, app: &mut App, registry: &Containe
             Line::from(vec![
                 Span::styled(
                     "L",
-                    Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" キーでログインしてください。"),
             ]),
@@ -367,7 +367,7 @@ fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn highlight_style(focused: bool) -> Style {
     if focused {
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().add_modifier(Modifier::BOLD)
     }

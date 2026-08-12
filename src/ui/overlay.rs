@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
-use super::{DIM, SAKURA};
+use super::{DIM, accent};
 use crate::app::{
     App, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
     StatusKind, UserForm, UserFormMode,
@@ -58,7 +58,7 @@ fn choice_line<T: Copy + PartialEq>(
     let mut spans = vec![Span::styled(
         super::pad(label, 14),
         if focused {
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(DIM)
         },
@@ -71,7 +71,7 @@ fn choice_line<T: Copy + PartialEq>(
             format!(" {} ", title(*option)),
             if *option == selected {
                 Style::default()
-                    .fg(SAKURA)
+                    .fg(accent())
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default().fg(DIM)
@@ -124,7 +124,7 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
     if form.verifying {
         lines.push(Line::from(Span::styled(
             "トークンを検証しています…",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         )));
     } else {
         lines.push(Line::from(Span::styled(
@@ -138,7 +138,7 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
             Span::raw(" 選択   "),
             Span::styled(
                 "Enter",
-                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" 作成   "),
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -151,7 +151,7 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("資格情報の新規作成", SAKURA)),
+            .block(dialog("資格情報の新規作成", accent())),
         area,
     );
 }
@@ -169,7 +169,7 @@ fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("サービスの切り替え", SAKURA)),
+            .block(dialog("サービスの切り替え", accent())),
         area,
     );
 }
@@ -191,16 +191,16 @@ fn draw_zone_picker(frame: &mut Frame, app: &App, zones: &[Zone], index: usize) 
         let mut spans = vec![
             Span::styled(
                 if selected { "▌ " } else { "  " },
-                Style::default().fg(SAKURA),
+                Style::default().fg(accent()),
             ),
             Span::styled(
                 if is_current { "● " } else { "○ " },
-                Style::default().fg(if is_current { SAKURA } else { DIM }),
+                Style::default().fg(if is_current { accent() } else { DIM }),
             ),
             Span::styled(
                 super::pad(&zone.label(), 22),
                 if selected {
-                    Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 },
@@ -224,7 +224,7 @@ fn draw_zone_picker(frame: &mut Frame, app: &App, zones: &[Zone], index: usize) 
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("ゾーンの切り替え", SAKURA)),
+            .block(dialog("ゾーンの切り替え", accent())),
         area,
     );
 }
@@ -247,14 +247,14 @@ fn zone_count_span(app: &App, zone: &str, label: &str) -> Span<'static> {
 /// ピッカーの 1 行（選択中は ▌、現在値は ●）。
 fn picker_row(selected: bool, is_current: bool, label: &str) -> Line<'static> {
     let style = if selected {
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
     let mut spans = vec![
         Span::styled(
             if selected { "▌ " } else { "  " },
-            Style::default().fg(SAKURA),
+            Style::default().fg(accent()),
         ),
         Span::styled(
             format!("{} {label}", if is_current { "●" } else { "○" }),
@@ -273,7 +273,7 @@ fn picker_hint(action: &str) -> Line<'static> {
         Span::raw(" 移動   "),
         Span::styled(
             "Enter",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(" {action}   ")),
         Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -305,18 +305,18 @@ fn draw_profile_picker(
         if selected {
             name_style = name_style.add_modifier(Modifier::BOLD);
             if assigned.is_none() {
-                name_style = name_style.fg(SAKURA);
+                name_style = name_style.fg(accent());
             }
         }
 
         let mut spans = vec![
             Span::styled(
                 if selected { "▌ " } else { "  " },
-                Style::default().fg(SAKURA),
+                Style::default().fg(accent()),
             ),
             Span::styled(
                 if is_current { "● " } else { "○ " },
-                Style::default().fg(if is_current { SAKURA } else { DIM }),
+                Style::default().fg(if is_current { accent() } else { DIM }),
             ),
             // 名前は先頭が同じことが多いので、幅を揃えて末尾の違いを見やすくする。
             Span::styled(super::pad(&source.label(), 26), name_style),
@@ -352,12 +352,12 @@ fn draw_profile_picker(
     lines.push(Line::from(vec![
         Span::styled(
             if on_new_row { "▌ " } else { "  " },
-            Style::default().fg(SAKURA),
+            Style::default().fg(accent()),
         ),
         Span::styled(
             "＋ 新規作成…",
             if on_new_row {
-                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             },
@@ -368,12 +368,12 @@ fn draw_profile_picker(
     lines.push(Line::from(vec![
         Span::styled(
             "c",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" 色を割り当て   ", Style::default().fg(DIM)),
         Span::styled(
             "d",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" 削除（キーチェーンのみ）", Style::default().fg(DIM)),
     ]));
@@ -389,7 +389,7 @@ fn draw_profile_picker(
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("認証情報の切り替え", SAKURA)),
+            .block(dialog("認証情報の切り替え", accent())),
         area,
     );
 }
@@ -499,7 +499,7 @@ fn draw_help(frame: &mut Frame) {
         }
         lines.push(Line::from(Span::styled(
             section,
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         )));
         for (key, description) in entries {
             lines.push(Line::from(vec![
@@ -520,7 +520,7 @@ fn draw_help(frame: &mut Frame) {
     let area = centered(frame, 60, dialog_height(&lines, 60));
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(lines).block(dialog("キーバインド", SAKURA)),
+        Paragraph::new(lines).block(dialog("キーバインド", accent())),
         area,
     );
 }
@@ -529,7 +529,7 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, kind: StatusKind, sc
     let color = match kind {
         StatusKind::Error => Color::Red,
         StatusKind::Success => Color::Green,
-        StatusKind::Info => SAKURA,
+        StatusKind::Info => accent(),
     };
 
     // 本文は改行を保って出す。長いものは画面に収まる範囲で高さを取り、残りはスクロールで読む。
@@ -650,7 +650,7 @@ fn draw_user_form(frame: &mut Frame, form: &UserForm) {
         Span::raw(" 権限変更   "),
         Span::styled(
             "Enter",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" 実行   "),
         Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -662,7 +662,7 @@ fn draw_user_form(frame: &mut Frame, form: &UserForm) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog(&title, SAKURA)),
+            .block(dialog(&title, accent())),
         area,
     );
 }
@@ -709,7 +709,7 @@ fn draw_registry_form(frame: &mut Frame, form: &RegistryForm) {
         Span::raw(" 項目移動   "),
         Span::styled(
             "Enter",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" 実行   "),
         Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -721,7 +721,7 @@ fn draw_registry_form(frame: &mut Frame, form: &RegistryForm) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog(&title, SAKURA)),
+            .block(dialog(&title, accent())),
         area,
     );
 }
@@ -739,7 +739,7 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
             Span::styled(
                 super::pad("設定に保存", 14),
                 if form.field == 2 {
-                    Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(DIM)
                 },
@@ -767,7 +767,7 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
             Span::raw(" 保存切替   "),
             Span::styled(
                 "Enter",
-                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" ログイン   "),
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -780,7 +780,7 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("レジストリへログイン", SAKURA)),
+            .block(dialog("レジストリへログイン", accent())),
         area,
     );
 }
@@ -793,7 +793,7 @@ fn input_line(label: &str, value: &str, focused: bool, masked: bool) -> Line<'st
         value.to_string()
     };
     let label_style = if focused {
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(DIM)
     };
@@ -805,7 +805,10 @@ fn input_line(label: &str, value: &str, focused: bool, masked: bool) -> Line<'st
     Line::from(vec![
         Span::styled(super::pad(label, 14), label_style),
         Span::styled(shown, value_style),
-        Span::styled(if focused { "▏" } else { "" }, Style::default().fg(SAKURA)),
+        Span::styled(
+            if focused { "▏" } else { "" },
+            Style::default().fg(accent()),
+        ),
     ])
 }
 
@@ -814,7 +817,7 @@ fn permission_line(selected: usize, focused: bool) -> Line<'static> {
     let mut spans = vec![Span::styled(
         super::pad("権限", 14),
         if focused {
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(DIM)
         },
@@ -825,7 +828,7 @@ fn permission_line(selected: usize, focused: bool) -> Line<'static> {
         }
         let style = if i == selected {
             Style::default()
-                .fg(SAKURA)
+                .fg(accent())
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
             Style::default().fg(DIM)

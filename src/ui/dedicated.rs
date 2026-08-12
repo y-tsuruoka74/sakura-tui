@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
 
 use super::{
-    DIM, SAKURA, border_style, error_paragraph, field, format_unix, placeholder, status_color,
+    DIM, accent, border_style, error_paragraph, field, format_unix, placeholder, status_color,
 };
 use crate::app::{App, DedicatedFocus, DedicatedTab, Loadable};
 
@@ -50,7 +50,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .position(|t| *t == app.dedicated.tab)
         .unwrap_or(0);
     let highlight = if app.dedicated.focus == DedicatedFocus::Detail {
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(DIM).add_modifier(Modifier::BOLD)
     };
@@ -78,7 +78,7 @@ fn draw_clusters(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 format!(" クラスタ ({}) ", clusters.len())
             },
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(focused));
 
@@ -447,7 +447,7 @@ fn pane_block(title: &str, count: usize, focused: bool) -> Block<'static> {
             } else {
                 title.to_string()
             },
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(focused))
 }
@@ -455,7 +455,7 @@ fn pane_block(title: &str, count: usize, focused: bool) -> Block<'static> {
 fn highlight(focused: bool) -> Style {
     if focused {
         Style::default()
-            .fg(SAKURA)
+            .fg(accent())
             .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
         Style::default().add_modifier(Modifier::BOLD)

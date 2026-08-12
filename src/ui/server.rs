@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
-use super::{DIM, SAKURA, border_style, field, format_datetime, placeholder};
+use super::{DIM, accent, border_style, field, format_datetime, placeholder};
 use crate::app::{App, Loadable};
 use crate::iaas::PowerStatus;
 
@@ -41,7 +41,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::bordered()
         .title(Span::styled(
             format!(" サーバー — {} ({count}) ", app.zone),
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(true));
 
@@ -96,7 +96,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
             )
             .row_highlight_style(
                 Style::default()
-                    .fg(SAKURA)
+                    .fg(accent())
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             )
             .block(block);

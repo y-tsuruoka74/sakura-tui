@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Tabs, Wrap};
 
-use super::{DIM, SAKURA, border_style, error_paragraph, field, format_datetime, placeholder};
+use super::{DIM, accent, border_style, error_paragraph, field, format_datetime, placeholder};
 use crate::app::{App, Loadable, MonitoringTab};
 use crate::monitoring::StorageKind;
 
@@ -47,7 +47,7 @@ fn table_pane<T>(
             } else {
                 format!(" {title} ({}) ", rows.len())
             },
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(focused));
 
@@ -65,7 +65,7 @@ fn table_pane<T>(
                 )
                 .row_highlight_style(if focused {
                     Style::default()
-                        .fg(SAKURA)
+                        .fg(accent())
                         .add_modifier(Modifier::BOLD | Modifier::REVERSED)
                 } else {
                     Style::default().add_modifier(Modifier::BOLD)
@@ -509,7 +509,7 @@ fn draw_monitoring_tabs(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Tabs::new(titles)
             .select(selected)
-            .highlight_style(Style::default().fg(SAKURA).add_modifier(Modifier::BOLD))
+            .highlight_style(Style::default().fg(accent()).add_modifier(Modifier::BOLD))
             .divider(Span::styled("│", Style::default().fg(DIM)))
             .block(Block::default().padding(ratatui::widgets::Padding::horizontal(1))),
         area,

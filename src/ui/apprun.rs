@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, List, ListItem, Paragraph, Row, Table, Wrap};
 
-use super::{DIM, SAKURA, border_style, field, format_datetime, placeholder, status_color};
+use super::{DIM, accent, border_style, field, format_datetime, placeholder, status_color};
 use crate::app::{App, AppRunPane, Loadable};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -45,7 +45,7 @@ fn draw_applications(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 format!(" アプリケーション ({}) ", applications.len())
             },
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(focused));
 
@@ -87,7 +87,7 @@ fn draw_applications(frame: &mut Frame, area: Rect, app: &mut App) {
             )
             .row_highlight_style(if focused {
                 Style::default()
-                    .fg(SAKURA)
+                    .fg(accent())
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
@@ -191,7 +191,7 @@ fn draw_versions(frame: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 format!(" バージョン ({}) ", rows.len())
             },
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(focused))
         .padding(ratatui::widgets::Padding::horizontal(1));
@@ -231,7 +231,7 @@ fn draw_versions(frame: &mut Frame, area: Rect, app: &mut App) {
                         Some(percent) if *percent > 0 => spans.push(Span::styled(
                             format!(" {percent:>3}% "),
                             Style::default()
-                                .fg(SAKURA)
+                                .fg(accent())
                                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
                         )),
                         _ => spans.push(Span::raw("      ")),
@@ -248,7 +248,7 @@ fn draw_versions(frame: &mut Frame, area: Rect, app: &mut App) {
             let list = List::new(items)
                 .block(block)
                 .highlight_style(if focused {
-                    Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().add_modifier(Modifier::BOLD)
                 })

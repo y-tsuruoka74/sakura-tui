@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 
-use super::{DIM, SAKURA, border_style};
+use super::{DIM, accent, border_style};
 use crate::app::{App, Focus, Loadable};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -20,7 +20,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::bordered()
         .title(Span::styled(
             title,
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
         .border_style(border_style(focused));
 
@@ -77,7 +77,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
             )
             .row_highlight_style(if focused {
                 Style::default()
-                    .fg(SAKURA)
+                    .fg(accent())
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default().add_modifier(Modifier::BOLD)

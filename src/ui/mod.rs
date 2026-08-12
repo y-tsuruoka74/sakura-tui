@@ -17,14 +17,36 @@ use ratatui::widgets::{Block, Paragraph, Tabs};
 use crate::app::{App, Focus, Mode, Service, StatusKind, Tab};
 use crate::config::CredentialSource;
 
-/// さくらのピンク。
+/// 既定のアクセント色（さくらのピンク）。
 pub const SAKURA: Color = Color::Rgb(0xE9, 0x54, 0x6B);
+
+thread_local! {
+    /// 描画中のアクセント色。
+    ///
+    /// 使用中の認証情報に色を割り当てていればその色を使う。どの契約を見ているかが
+    /// 枠線や見出しの色で分かるようにするため。描画は単一スレッドで、フレームごとに
+    /// `draw` の先頭で設定するだけなので、引数で持ち回らずここに置く。
+    static ACCENT: std::cell::Cell<Color> = const { std::cell::Cell::new(SAKURA) };
+}
+
+/// 現在のアクセント色。
+pub fn accent() -> Color {
+    ACCENT.with(std::cell::Cell::get)
+}
 pub const DIM: Color = Color::DarkGray;
 
 /// 読み込み中に回すスピナー。
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // 認証情報に割り当てた色を、この画面全体のアクセント色にする。
+    let color = app
+        .config
+        .profile_color(&app.credential_source)
+        .and_then(parse_color)
+        .unwrap_or(SAKURA);
+    ACCENT.with(|current| current.set(color));
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -51,15 +73,15 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     };
     let mut spans = vec![
         Span::styled(
-            " 🌸 sakura-tui ",
+            " sakura-tui ",
             Style::default()
-                .fg(SAKURA)
+                .fg(accent())
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ),
         separator(),
         Span::styled(
             app.service.title(),
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" (s)", Style::default().fg(DIM)),
         separator(),
@@ -82,7 +104,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     ));
     spans.push(Span::styled(" (p)", Style::default().fg(DIM)));
     spans.push(Span::raw("  "));
-    spans.push(Span::styled(spinner, Style::default().fg(SAKURA)));
+    spans.push(Span::styled(spinner, Style::default().fg(accent())));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -188,7 +210,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .position(|t| *t == app.registry.tab)
         .unwrap_or(0);
     let highlight = if app.registry.focus == Focus::Detail {
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(DIM).add_modifier(Modifier::BOLD)
     };
@@ -206,10 +228,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let line = Line::from(vec![
             Span::styled(
                 " /",
-                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(app.active_filter().to_string()),
-            Span::styled("▏", Style::default().fg(SAKURA)),
+            Span::styled("▏", Style::default().fg(accent())),
             Span::styled("   Enter 確定 · Esc 解除", Style::default().fg(DIM)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
@@ -221,7 +243,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         let line = Line::from(vec![
             Span::styled(
                 format!(" 絞り込み /{}", app.active_filter()),
-                Style::default().fg(SAKURA),
+                Style::default().fg(accent()),
             ),
             Span::styled("   / で編集", Style::default().fg(DIM)),
         ]);
@@ -296,7 +318,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         let (key, rest) = hint.split_once(' ').unwrap_or((hint, ""));
         spans.push(Span::styled(
             key.to_string(),
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!(" {rest}"),
@@ -309,7 +331,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
 /// フォーカスの有無で枠線の色を変える。
 pub fn border_style(focused: bool) -> Style {
     if focused {
-        Style::default().fg(SAKURA)
+        Style::default().fg(accent())
     } else {
         Style::default().fg(DIM)
     }
