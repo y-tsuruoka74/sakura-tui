@@ -35,6 +35,8 @@ pub struct ApiCredentials {
     pub token: String,
     pub secret: String,
     pub source: CredentialSource,
+    /// プロファイルに書かれた既定ゾーン。
+    pub zone: Option<String>,
 }
 
 fn env_multi(names: &[&str]) -> Option<String> {
@@ -54,6 +56,7 @@ fn credentials_from_env() -> Option<ApiCredentials> {
         token,
         secret,
         source: CredentialSource::Env,
+        zone: env_multi(&["SAKURA_ZONE", "SAKURACLOUD_ZONE"]),
     })
 }
 
@@ -139,6 +142,8 @@ fn load_usacloud_profile(name: Option<&str>) -> Result<ApiCredentials> {
         access_token: String,
         #[serde(rename = "AccessTokenSecret", default)]
         access_token_secret: String,
+        #[serde(rename = "Zone", default)]
+        zone: String,
     }
 
     let dir = usacloud_config_dir()?;
@@ -168,6 +173,7 @@ fn load_usacloud_profile(name: Option<&str>) -> Result<ApiCredentials> {
         token: config.access_token,
         secret: config.access_token_secret,
         source: CredentialSource::Profile(name),
+        zone: Some(config.zone).filter(|z| !z.is_empty()),
     })
 }
 

@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 
-use super::{DIM, SAKURA, border_style, format_datetime};
+use super::{DIM, SAKURA, border_style, field, format_datetime, placeholder};
 use crate::app::{App, Focus, ImagePane, Loadable, Tab};
 use crate::sacloud::ContainerRegistry;
 
@@ -350,20 +350,6 @@ fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
             frame.render_stateful_widget(list, area, &mut app.registry.tag_state);
         }
     }
-}
-
-/// ラベル幅を表示セル数で揃えた `ラベル  値` の行。
-fn field(label: &str, value: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(super::pad(label, 14), Style::default().fg(DIM)),
-        Span::raw(value.to_string()),
-    ])
-}
-
-fn placeholder(text: &str) -> Paragraph<'static> {
-    Paragraph::new(text.to_string())
-        .style(Style::default().fg(DIM))
-        .wrap(Wrap { trim: false })
 }
 
 fn error_paragraph(err: &str) -> Paragraph<'static> {

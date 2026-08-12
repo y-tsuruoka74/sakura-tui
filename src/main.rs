@@ -3,7 +3,9 @@
 //! 現時点ではさくらのクラウドのコンテナレジストリに対応している。
 
 mod app;
+mod apprun;
 mod config;
+mod iaas;
 mod registry;
 mod sacloud;
 mod ui;
@@ -32,6 +34,7 @@ async fn main() -> Result<()> {
         }
     };
     let sacloud = Arc::new(SacloudClient::new(&credentials)?);
+    let apprun_client = Arc::new(apprun::AppRunClient::new(&credentials)?);
     let settings = match config::Config::load() {
         Ok(settings) => settings,
         Err(err) => {
@@ -41,7 +44,7 @@ async fn main() -> Result<()> {
     };
 
     let terminal = ratatui::init();
-    let result = run(terminal, sacloud, settings, credentials.source).await;
+    let result = run(terminal, sacloud, apprun_client, settings, credentials.source).await;
     ratatui::restore();
     result
 }
@@ -49,11 +52,12 @@ async fn main() -> Result<()> {
 async fn run(
     mut terminal: ratatui::DefaultTerminal,
     sacloud: Arc<SacloudClient>,
+    apprun_client: Arc<apprun::AppRunClient>,
     settings: config::Config,
     credential_source: config::CredentialSource,
 ) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(sacloud, tx, settings, credential_source);
+    let mut app = App::new(sacloud, apprun_client, tx, settings, credential_source);
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

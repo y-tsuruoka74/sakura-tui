@@ -11,6 +11,7 @@ use crate::app::{
     App, LoginForm, Overlay, RegistryForm, RegistryFormMode, StatusKind, UserForm, UserFormMode,
 };
 use crate::config::CredentialSource;
+use crate::iaas::Zone;
 use crate::sacloud::Permission;
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -33,7 +34,70 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, sources, *index, &app.credential_source)
         }
+        Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, zones, *index, &app.zone),
     }
+}
+
+fn draw_zone_picker(frame: &mut Frame, zones: &[Zone], index: usize, current: &str) {
+    let rows = zones.iter().enumerate().map(|(i, zone)| {
+        picker_row(i == index, zone.name == current, &zone.label())
+    });
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "サーバーを表示するゾーンを選んでください",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+    ];
+    lines.extend(rows);
+    lines.push(Line::raw(""));
+    lines.push(picker_hint("切り替え"));
+
+    let area = centered(frame, 60, dialog_height(&lines, 60));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("ゾーンの切り替え", SAKURA)),
+        area,
+    );
+}
+
+/// ピッカーの 1 行（選択中は ▌、現在値は ●）。
+fn picker_row(selected: bool, is_current: bool, label: &str) -> Line<'static> {
+    let style = if selected {
+        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![
+        Span::styled(
+            if selected { "▌ " } else { "  " },
+            Style::default().fg(SAKURA),
+        ),
+        Span::styled(
+            format!("{} {label}", if is_current { "●" } else { "○" }),
+            style,
+        ),
+    ];
+    if is_current {
+        spans.push(Span::styled(" (現在)", Style::default().fg(DIM)));
+    }
+    Line::from(spans)
+}
+
+fn picker_hint(action: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {action}   ")),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ])
 }
 
 fn draw_profile_picker(
@@ -48,38 +112,14 @@ fn draw_profile_picker(
     ))];
     lines.push(Line::raw(""));
     for (i, source) in sources.iter().enumerate() {
-        let selected = i == index;
-        let marker = if source == current { "●" } else { "○" };
-        let style = if selected {
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let mut spans = vec![
-            Span::styled(if selected { "▌ " } else { "  " }, Style::default().fg(SAKURA)),
-            Span::styled(format!("{marker} {}", source.label()), style),
-        ];
-        if source == current {
-            spans.push(Span::styled(" (現在)", Style::default().fg(DIM)));
-        }
-        lines.push(Line::from(spans));
+        lines.push(picker_row(i == index, source == current, &source.label()));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "~/.usacloud/current は書き換えません（このセッションのみ）",
         Style::default().fg(DIM),
     )));
-    lines.push(Line::from(vec![
-        Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" 移動   "),
-        Span::styled(
-            "Enter",
-            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" 切り替え   "),
-        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" 中止"),
-    ]));
+    lines.push(picker_hint("切り替え"));
 
     let area = centered(frame, 64, dialog_height(&lines, 64));
     frame.render_widget(Clear, area);
@@ -177,6 +217,11 @@ fn draw_help(frame: &mut Frame) {
                 ("/", "表示中のリストを絞り込み"),
                 ("y", "選択中の項目をコピー"),
                 ("p", "認証情報（プロファイル）を切替"),
+                ("s / S", "サービスを切り替え"),
+                ("z", "ゾーンを切り替え（サーバー）"),
+                ("t", "トラフィックを切替（AppRun共用型）"),
+                ("b / x", "サーバーの起動 / シャットダウン"),
+                ("X / B", "サーバーの強制停止 / 強制リセット"),
             ],
         ),
         ("その他", &[("?", "このヘルプ"), ("q / Ctrl+C", "終了")]),

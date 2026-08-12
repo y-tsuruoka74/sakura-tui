@@ -16,7 +16,9 @@ use serde_json::json;
 use crate::config::ApiCredentials;
 
 const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/zone";
-/// グローバルリソース用の既定ゾーン。
+/// ゾーンに依存しないリソースを呼ぶときに使うゾーン。
+const GLOBAL_ZONE: &str = "is1a";
+/// プロファイルにゾーン指定が無い場合の既定ゾーン。
 const DEFAULT_ZONE: &str = "is1a";
 const API_SUFFIX: &str = "api/cloud/1.1";
 /// `commonserviceitem` のうちコンテナレジストリを表す `Provider.Class`。
@@ -175,7 +177,7 @@ struct NakedStatus {
 ///
 /// さくらのクラウド API は未設定の項目をキーごと省くこともあれば `null` で返すこともあり、
 /// `#[serde(default)]` だけでは後者で失敗するため。
-fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
+pub(crate) fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Default + Deserialize<'de>,
@@ -276,7 +278,7 @@ pub struct SacloudClient {
     http: reqwest::Client,
     token: String,
     secret: String,
-    base: String,
+    default_zone: String,
 }
 
 impl SacloudClient {
@@ -290,18 +292,39 @@ impl SacloudClient {
             http,
             token: creds.token.clone(),
             secret: creds.secret.clone(),
-            base: format!("{API_ROOT}/{DEFAULT_ZONE}/{API_SUFFIX}"),
+            default_zone: creds
+                .zone
+                .clone()
+                .unwrap_or_else(|| DEFAULT_ZONE.to_string()),
         })
     }
 
+    /// プロファイルに書かれた既定ゾーン（無ければ `is1a`）。
+    pub fn default_zone(&self) -> &str {
+        &self.default_zone
+    }
+
+    /// ゾーンに依存しないリソース向け。常に `is1a` のエンドポイントを使う。
     async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        let mut url = reqwest::Url::parse(&format!("{}/{}", self.base, path))
-            .with_context(|| format!("URLの組み立てに失敗しました: {}/{path}", self.base))?;
+        self.request_in_zone(GLOBAL_ZONE, method, path, body).await
+    }
+
+    /// ゾーンを指定して呼ぶ。
+    pub(crate) async fn request_in_zone<T: DeserializeOwned>(
+        &self,
+        zone: &str,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let base = format!("{API_ROOT}/{zone}/{API_SUFFIX}");
+        let mut url = reqwest::Url::parse(&format!("{base}/{path}"))
+            .with_context(|| format!("URLの組み立てに失敗しました: {base}/{path}"))?;
 
         // さくらのクラウド API は GET のリクエストボディを読まない。
         // 検索条件は JSON をそのままクエリ文字列に載せて渡す。

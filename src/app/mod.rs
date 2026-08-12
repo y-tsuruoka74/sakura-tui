@@ -11,7 +11,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
+mod apprun;
+mod server;
+
+pub use apprun::{AppRunPane, AppRunView};
+pub use server::ServerView;
+
+use crate::apprun::{Application, ApplicationDetail, AppRunClient, Traffic, Version};
 use crate::config::{Config, CredentialSource, RegistryLogin};
+use crate::iaas::{PowerAction, Server, Zone};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 
@@ -44,6 +52,34 @@ pub enum Message {
     },
     UserAction {
         id: ResourceId,
+        label: String,
+        result: Result<(), String>,
+    },
+    Applications(Result<Vec<Application>, String>),
+    ApplicationDetail {
+        id: String,
+        result: Result<ApplicationDetail, String>,
+    },
+    Versions {
+        id: String,
+        result: Result<Vec<Version>, String>,
+    },
+    Traffics {
+        id: String,
+        result: Result<Vec<Traffic>, String>,
+    },
+    AppRunAction {
+        id: String,
+        label: String,
+        result: Result<(), String>,
+    },
+    Zones(Result<Vec<Zone>, String>),
+    Servers {
+        zone: String,
+        result: Result<Vec<Server>, String>,
+    },
+    ServerAction {
+        zone: String,
         label: String,
         result: Result<(), String>,
     },
@@ -87,45 +123,34 @@ impl<T> Loadable<T> {
 /// タグ詳細キャッシュのキー（ホスト・リポジトリ・タグ）。
 pub type TagKey = (String, String, String);
 
-/// 絞り込みの対象になるリスト。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 絞り込みの対象になるリスト。サービスをまたいで一意になるように並べる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pane {
+    // コンテナレジストリ
     Registries,
     Users,
     Repositories,
     Tags,
+    // AppRun
+    Applications,
+    Versions,
+    // サーバー
+    Servers,
     /// 絞り込み対象になるリストが無い（概要タブなど）。
     None,
 }
 
 /// ペインごとの絞り込み文字列。
 #[derive(Debug, Clone, Default)]
-pub struct Filters {
-    pub registries: String,
-    pub users: String,
-    pub repositories: String,
-    pub tags: String,
-}
+pub struct Filters(HashMap<Pane, String>);
 
 impl Filters {
     fn get(&self, pane: Pane) -> &str {
-        match pane {
-            Pane::Registries => &self.registries,
-            Pane::Users => &self.users,
-            Pane::Repositories => &self.repositories,
-            Pane::Tags => &self.tags,
-            Pane::None => "",
-        }
+        self.0.get(&pane).map_or("", String::as_str)
     }
 
     fn get_mut(&mut self, pane: Pane) -> Option<&mut String> {
-        match pane {
-            Pane::Registries => Some(&mut self.registries),
-            Pane::Users => Some(&mut self.users),
-            Pane::Repositories => Some(&mut self.repositories),
-            Pane::Tags => Some(&mut self.tags),
-            Pane::None => None,
-        }
+        (pane != Pane::None).then(|| self.0.entry(pane).or_default())
     }
 }
 
@@ -157,6 +182,32 @@ impl Tab {
             Tab::Users => "ユーザー",
             Tab::Images => "イメージ",
         }
+    }
+}
+
+/// TUI が扱うサービス。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Service {
+    #[default]
+    Registry,
+    AppRun,
+    Server,
+}
+
+impl Service {
+    pub const ALL: [Service; 3] = [Service::Registry, Service::AppRun, Service::Server];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Service::Registry => "コンテナレジストリ",
+            Service::AppRun => "AppRun",
+            Service::Server => "サーバー",
+        }
+    }
+
+    /// ゾーンを選ぶ意味があるサービスか。
+    pub fn is_zoned(self) -> bool {
+        matches!(self, Service::Server)
     }
 }
 
@@ -317,6 +368,17 @@ pub enum ConfirmAction {
         tag: String,
         digest: String,
     },
+    RouteTraffic {
+        application: String,
+        app_name: String,
+        version: String,
+    },
+    PowerAction {
+        id: ResourceId,
+        zone: String,
+        name: String,
+        action: PowerAction,
+    },
 }
 
 /// 前面に表示するダイアログ。
@@ -344,6 +406,11 @@ pub enum Overlay {
         sources: Vec<CredentialSource>,
         index: usize,
     },
+    /// ゾーンの切り替え。
+    ZonePicker {
+        zones: Vec<Zone>,
+        index: usize,
+    },
 }
 
 /// コンテナレジストリ画面が持つ状態。
@@ -364,14 +431,11 @@ pub struct RegistryView {
     pub tags: HashMap<(String, String), Loadable<Vec<TagInfo>>>,
     pub tag_state: ListState,
     pub tag_details: HashMap<TagKey, Loadable<TagDetail>>,
-
-    pub filters: Filters,
-    /// 絞り込み文字列を編集中かどうか。
-    pub filtering: bool,
 }
 
 pub struct App {
     sacloud: Arc<SacloudClient>,
+    apprun_client: Arc<AppRunClient>,
     tx: UnboundedSender<Message>,
     pub config: Config,
     pub registry_clients: RegistryClients,
@@ -383,8 +447,23 @@ pub struct App {
     pub inflight: usize,
     pub tick: u64,
 
+    /// 表示中のサービス。
+    pub service: Service,
+    /// ゾーンに属するリソース（サーバーなど）を見るときのゾーン。
+    pub zone: String,
+    pub zones: Loadable<Vec<Zone>>,
+
     /// コンテナレジストリ画面の状態。
     pub registry: RegistryView,
+    /// AppRun 画面の状態。
+    pub apprun: AppRunView,
+    /// サーバー画面の状態。
+    pub server: ServerView,
+
+    /// ペインごとの絞り込み。
+    pub filters: Filters,
+    /// 絞り込み文字列を編集中かどうか。
+    pub filtering: bool,
 
     pub overlay: Option<Overlay>,
     pub status: Option<(String, StatusKind)>,
@@ -393,12 +472,15 @@ pub struct App {
 impl App {
     pub fn new(
         sacloud: Arc<SacloudClient>,
+        apprun_client: Arc<AppRunClient>,
         tx: UnboundedSender<Message>,
         config: Config,
         credential_source: CredentialSource,
     ) -> Self {
+        let default_zone = sacloud.default_zone().to_string();
         let mut app = Self {
             sacloud,
+            apprun_client,
             tx,
             config,
             registry_clients: RegistryClients::default(),
@@ -408,7 +490,14 @@ impl App {
             should_quit: false,
             inflight: 0,
             tick: 0,
+            service: Service::Registry,
+            zone: default_zone,
+            zones: Loadable::Idle,
             registry: RegistryView::default(),
+            apprun: AppRunView::default(),
+            server: ServerView::default(),
+            filters: Filters::default(),
+            filtering: false,
             overlay: None,
             status: None,
         };
@@ -424,7 +513,7 @@ impl App {
         let Some(items) = self.registry.registries.ready() else {
             return Vec::new();
         };
-        let filter = &self.registry.filters.registries;
+        let filter = self.filters.get(Pane::Registries);
         items
             .iter()
             .filter(|r| matches(filter, &[&r.name, r.host(), &r.description]))
@@ -449,7 +538,7 @@ impl App {
         Loadable::Ready(
             users
                 .into_iter()
-                .filter(|u| matches(&self.registry.filters.users, &[&u.username, u.permission.as_str()]))
+                .filter(|u| matches(self.filters.get(Pane::Users), &[&u.username, u.permission.as_str()]))
                 .collect(),
         )
     }
@@ -471,7 +560,7 @@ impl App {
         Loadable::Ready(
             repositories
                 .into_iter()
-                .filter(|r| matches(&self.registry.filters.repositories, &[r]))
+                .filter(|r| matches(self.filters.get(Pane::Repositories), &[r]))
                 .collect(),
         )
     }
@@ -499,7 +588,7 @@ impl App {
         };
         Loadable::Ready(
             tags.into_iter()
-                .filter(|t| matches(&self.registry.filters.tags, &[&t.name]))
+                .filter(|t| matches(self.filters.get(Pane::Tags), &[&t.name]))
                 .collect(),
         )
     }
@@ -533,6 +622,14 @@ impl App {
 
     /// 現在キー操作の対象になっているリスト。
     pub fn active_pane(&self) -> Pane {
+        match self.service {
+            Service::Registry => self.registry_active_pane(),
+            Service::AppRun => self.apprun_active_pane(),
+            Service::Server => Pane::Servers,
+        }
+    }
+
+    fn registry_active_pane(&self) -> Pane {
         match self.registry.focus {
             Focus::Registries => Pane::Registries,
             Focus::Detail => match self.registry.tab {
@@ -548,7 +645,7 @@ impl App {
 
     /// 現在のペインに掛かっている絞り込み文字列。
     pub fn active_filter(&self) -> &str {
-        self.registry.filters.get(self.active_pane())
+        self.filters.get(self.active_pane())
     }
 
     // --- 非同期処理の起動 ---
@@ -625,6 +722,14 @@ impl App {
 
     /// 現在表示中のビューに必要なデータをまだ読んでいなければ読む。
     pub fn ensure_loaded(&mut self) {
+        match self.service {
+            Service::Registry => self.registry_ensure_loaded(),
+            Service::AppRun => self.apprun_ensure_loaded(),
+            Service::Server => self.server_ensure_loaded(),
+        }
+    }
+
+    fn registry_ensure_loaded(&mut self) {
         let Some(registry) = self.selected_registry() else {
             return;
         };
@@ -807,6 +912,101 @@ impl App {
                     self.set_status(err, StatusKind::Error);
                 }
             },
+            Message::Applications(Ok(items)) => {
+                let count = items.len();
+                self.apprun.applications = Loadable::Ready(items);
+                self.apprun.application_state.select(None);
+                self.set_status(format!("AppRun アプリ {count} 件"), StatusKind::Info);
+                self.ensure_loaded();
+            }
+            Message::Applications(Err(err)) => {
+                self.apprun.applications = Loadable::Failed(err.clone());
+                self.set_status(err, StatusKind::Error);
+            }
+            Message::ApplicationDetail { id, result } => {
+                let loadable = match result {
+                    Ok(detail) => Loadable::Ready(detail),
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.apprun.details.insert(id, loadable);
+            }
+            Message::Versions { id, result } => {
+                match result {
+                    Ok(versions) => {
+                        self.apprun.version_state.select(None);
+                        self.apprun.versions.insert(id, Loadable::Ready(versions));
+                        self.ensure_loaded();
+                    }
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        self.apprun.versions.insert(id, Loadable::Failed(err));
+                    }
+                };
+            }
+            Message::Traffics { id, result } => {
+                let loadable = match result {
+                    Ok(traffics) => Loadable::Ready(traffics),
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.apprun.traffics.insert(id, loadable);
+            }
+            Message::AppRunAction { id, label, result } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    // 反映を確かめたいのでトラフィックとバージョンを取り直す。
+                    self.apprun.traffics.insert(id.clone(), Loadable::Idle);
+                    self.apprun.versions.insert(id, Loadable::Idle);
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::Zones(Ok(zones)) => self.zones = Loadable::Ready(zones),
+            Message::Zones(Err(err)) => {
+                self.zones = Loadable::Failed(err.clone());
+                self.set_status(err, StatusKind::Error);
+            }
+            Message::Servers { zone, result } => {
+                match result {
+                    Ok(servers) => {
+                        let count = servers.len();
+                        self.server.server_state.select(None);
+                        self.server.servers.insert(zone.clone(), Loadable::Ready(servers));
+                        if zone == self.zone {
+                            self.set_status(
+                                format!("{zone} のサーバー {count} 件"),
+                                StatusKind::Info,
+                            );
+                        }
+                        self.ensure_loaded();
+                    }
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        self.server.servers.insert(zone, Loadable::Failed(err));
+                    }
+                };
+            }
+            Message::ServerAction { zone, label, result } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    // 電源状態が変わるので取り直す。
+                    self.load_servers(zone);
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::RegistryAction { label, result } => match result {
                 Ok(()) => {
                     self.set_status(format!("{label}しました"), StatusKind::Success);
@@ -876,7 +1076,7 @@ impl App {
         }
         if self.overlay.is_some() {
             self.on_key_overlay(key);
-        } else if self.registry.filtering {
+        } else if self.filtering {
             self.on_key_filter(key);
         } else {
             self.on_key_main(key);
@@ -885,24 +1085,59 @@ impl App {
     }
 
     fn on_key_main(&mut self, key: KeyEvent) {
+        // サービス横断のキーを先に処理し、残りをサービス別に渡す。
+        if self.on_key_common(key) {
+            return;
+        }
+        match self.service {
+            Service::Registry => self.on_key_registry(key),
+            Service::AppRun => self.on_key_apprun(key),
+            Service::Server => self.on_key_server(key),
+        }
+    }
+
+    /// どのサービスでも同じ意味を持つキー。処理したら true。
+    fn on_key_common(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            // Esc は「ひとつ戻る」。絞り込みが効いていればまずそれを解除する。
+            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('s') => self.cycle_service(1),
+            KeyCode::Char('S') => self.cycle_service(-1),
+            KeyCode::Char('z') => self.open_zone_picker(),
+            KeyCode::Char('p') => self.open_profile_picker(),
+            KeyCode::Char('w') => self.toggle_mode(),
+            KeyCode::Char('/') => self.start_filtering(),
+            KeyCode::Char('y') => self.copy_selection(),
+            KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('R') => {
+                self.invalidate_all();
+                self.refresh();
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
+            KeyCode::PageDown => self.move_selection(10),
+            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => self.jump_selection(true),
+            KeyCode::End | KeyCode::Char('G') => self.jump_selection(false),
+            // 絞り込みが掛かっていればまず解除し、無ければサービス側の「戻る」に任せる。
             KeyCode::Esc => {
                 let pane = self.active_pane();
-                if self.registry.filters.get(pane).is_empty() {
-                    self.focus_left();
-                } else if let Some(filter) = self.registry.filters.get_mut(pane) {
+                if self.filters.get(pane).is_empty() {
+                    return false;
+                }
+                if let Some(filter) = self.filters.get_mut(pane) {
                     filter.clear();
                     self.clamp_selection(pane);
                 }
             }
-            KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
-            KeyCode::Char('r') => self.refresh(),
-            KeyCode::Char('R') => {
-                self.invalidate_all();
-                self.load_registries();
-            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn on_key_registry(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.focus_left(),
             KeyCode::Tab => self.cycle_tab(1),
             KeyCode::BackTab => self.cycle_tab(-1),
             KeyCode::Char('1') => self.set_tab(Tab::Overview),
@@ -916,20 +1151,68 @@ impl App {
             KeyCode::Char('D') => self.confirm_delete_registry(),
             KeyCode::Char('L') => self.open_login(),
             KeyCode::Char('O') => self.confirm_forget_login(),
-            KeyCode::Char('/') => self.start_filtering(),
-            KeyCode::Char('y') => self.copy_selection(),
-            KeyCode::Char('p') => self.open_profile_picker(),
-            KeyCode::Char('w') => self.toggle_mode(),
             KeyCode::Left | KeyCode::Char('h') => self.focus_left(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.focus_right(),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::PageDown => self.move_selection(10),
-            KeyCode::PageUp => self.move_selection(-10),
-            KeyCode::Home | KeyCode::Char('g') => self.jump_selection(true),
-            KeyCode::End | KeyCode::Char('G') => self.jump_selection(false),
             _ => {}
         }
+    }
+
+    // --- サービスの切り替え ---
+
+    fn cycle_service(&mut self, delta: i32) {
+        let current = Service::ALL
+            .iter()
+            .position(|svc| *svc == self.service)
+            .unwrap_or(0) as i32;
+        let len = Service::ALL.len() as i32;
+        self.service = Service::ALL[(current + delta).rem_euclid(len) as usize];
+        self.filtering = false;
+        self.set_status(self.service.title(), StatusKind::Info);
+        self.ensure_loaded();
+    }
+
+    // --- ゾーンの切り替え ---
+
+    fn open_zone_picker(&mut self) {
+        if !self.service.is_zoned() {
+            self.set_status(
+                format!("{} はゾーンに依存しません", self.service.title()),
+                StatusKind::Info,
+            );
+            return;
+        }
+        match self.zones.clone() {
+            Loadable::Ready(zones) if !zones.is_empty() => {
+                let index = zones.iter().position(|z| z.name == self.zone).unwrap_or(0);
+                self.overlay = Some(Overlay::ZonePicker { zones, index });
+            }
+            Loadable::Loading => self.set_status("ゾーン一覧を取得中です…", StatusKind::Info),
+            _ => {
+                self.load_zones();
+                self.set_status("ゾーン一覧を取得しています…", StatusKind::Info);
+            }
+        }
+    }
+
+    fn load_zones(&mut self) {
+        self.zones = Loadable::Loading;
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.list_zones().await.map_err(fmt_error);
+            let _ = tx.send(Message::Zones(result));
+        });
+    }
+
+    fn switch_zone(&mut self, zone: String) {
+        if zone == self.zone {
+            return;
+        }
+        self.zone = zone;
+        self.server.server_state.select(None);
+        self.set_status(format!("ゾーンを {} に切り替えました", self.zone), StatusKind::Info);
+        self.ensure_loaded();
     }
 
     // --- 操作モード ---
@@ -965,22 +1248,22 @@ impl App {
         if self.active_pane() == Pane::None {
             return;
         }
-        self.registry.filtering = true;
+        self.filtering = true;
     }
 
     /// 絞り込み文字列の編集中のキー入力。
     fn on_key_filter(&mut self, key: KeyEvent) {
         let pane = self.active_pane();
-        let Some(filter) = self.registry.filters.get_mut(pane) else {
-            self.registry.filtering = false;
+        let Some(filter) = self.filters.get_mut(pane) else {
+            self.filtering = false;
             return;
         };
         match key.code {
             // Enter は確定、Esc は取り消して絞り込みを解除。
-            KeyCode::Enter => self.registry.filtering = false,
+            KeyCode::Enter => self.filtering = false,
             KeyCode::Esc => {
                 filter.clear();
-                self.registry.filtering = false;
+                self.filtering = false;
             }
             KeyCode::Backspace => {
                 filter.pop();
@@ -1021,6 +1304,9 @@ impl App {
             Pane::Users => self.visible_users().ready().map_or(0, Vec::len),
             Pane::Repositories => self.visible_repositories().ready().map_or(0, Vec::len),
             Pane::Tags => self.visible_tags().ready().map_or(0, Vec::len),
+            Pane::Applications => self.visible_applications().len(),
+            Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
+            Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
             Pane::None => 0,
         }
     }
@@ -1031,6 +1317,9 @@ impl App {
             Pane::Users => Some(&mut self.registry.user_state),
             Pane::Repositories => Some(&mut self.registry.repository_state),
             Pane::Tags => Some(&mut self.registry.tag_state),
+            Pane::Applications => Some(&mut self.apprun.application_state),
+            Pane::Versions => Some(&mut self.apprun.version_state),
+            Pane::Servers => Some(&mut self.server.server_state),
             Pane::None => None,
         }
     }
@@ -1039,32 +1328,48 @@ impl App {
 
     /// 選択中の項目を、そのまま貼って使える形でコピーする。
     fn copy_selection(&mut self) {
-        let Some(registry) = self.selected_registry() else {
+        let Some(text) = self.copy_text() else {
             return;
         };
-        let host = registry.host().to_string();
-        let text = match self.active_pane() {
-            Pane::Registries | Pane::None => host,
-            Pane::Users => match self.selected_user() {
-                Some(user) => user.username,
-                None => return,
-            },
-            Pane::Repositories => match self.selected_repository() {
-                Some(repository) => format!("{host}/{repository}"),
-                None => return,
-            },
-            Pane::Tags => match (self.selected_repository(), self.selected_tag()) {
-                (Some(repository), Some(tag)) => format!("{host}/{repository}:{}", tag.name),
-                _ => return,
-            },
-        };
-
         match copy_to_clipboard(&text) {
             Ok(()) => self.set_status(format!("コピーしました: {text}"), StatusKind::Success),
             Err(err) => self.set_status(
                 format!("クリップボードにコピーできませんでした: {err}"),
                 StatusKind::Error,
             ),
+        }
+    }
+
+    /// ペインごとに「コピーして意味のある文字列」を決める。
+    fn copy_text(&self) -> Option<String> {
+        let host = || {
+            self.selected_registry()
+                .map(|registry| registry.host().to_string())
+        };
+        match self.active_pane() {
+            Pane::Registries | Pane::None => host(),
+            Pane::Users => self.selected_user().map(|user| user.username),
+            Pane::Repositories => Some(format!("{}/{}", host()?, self.selected_repository()?)),
+            Pane::Tags => Some(format!(
+                "{}/{}:{}",
+                host()?,
+                self.selected_repository()?,
+                self.selected_tag()?.name
+            )),
+            // AppRun は公開URLが一番使う場面が多い。
+            Pane::Applications => self
+                .selected_application()
+                .map(|app| app.public_url.clone())
+                .filter(|url| !url.is_empty()),
+            Pane::Versions => self.selected_version().map(|version| version.name),
+            // サーバーは SSH 先として使える IP を優先する。
+            Pane::Servers => self.selected_server().map(|server| {
+                server
+                    .ip_addresses
+                    .first()
+                    .cloned()
+                    .unwrap_or(server.name.clone())
+            }),
         }
     }
 
@@ -1119,7 +1424,7 @@ impl App {
         self.registry.user_state.select(None);
         self.registry.repository_state.select(None);
         self.registry.tag_state.select(None);
-        self.registry.filters = Filters::default();
+        self.filters = Filters::default();
         self.set_status(
             format!("{} に切り替えました", self.credential_source.label()),
             StatusKind::Info,
@@ -1129,6 +1434,14 @@ impl App {
 
     /// 現在のビューのキャッシュを捨てて読み直す。
     fn refresh(&mut self) {
+        match self.service {
+            Service::Registry => self.registry_refresh(),
+            Service::AppRun => self.apprun_refresh(),
+            Service::Server => self.server_refresh(),
+        }
+    }
+
+    fn registry_refresh(&mut self) {
         let Some(registry) = self.selected_registry() else {
             self.load_registries();
             return;
@@ -1156,6 +1469,9 @@ impl App {
         self.registry.users.clear();
         self.registry.repositories.clear();
         self.registry.tags.clear();
+        self.registry.tag_details.clear();
+        self.apprun_invalidate();
+        self.server_invalidate();
     }
 
     fn set_tab(&mut self, tab: Tab) {
@@ -1193,9 +1509,10 @@ impl App {
 
     /// 現在フォーカスしているリストの選択を動かす。
     fn move_selection(&mut self, delta: i32) {
-        let (state, len) = match self.active_list() {
-            Some(v) => v,
-            None => return,
+        let pane = self.active_pane();
+        let len = self.visible_len(pane);
+        let Some(state) = self.list_state(pane) else {
+            return;
         };
         if len == 0 {
             return;
@@ -1203,23 +1520,32 @@ impl App {
         let current = state.selected().unwrap_or(0) as i32;
         let next = (current + delta).clamp(0, len as i32 - 1) as usize;
         state.select(Some(next));
-        self.after_selection_change();
+        self.after_selection_change(pane);
     }
 
     fn jump_selection(&mut self, to_top: bool) {
-        let (state, len) = match self.active_list() {
-            Some(v) => v,
-            None => return,
+        let pane = self.active_pane();
+        let len = self.visible_len(pane);
+        let Some(state) = self.list_state(pane) else {
+            return;
         };
         if len == 0 {
             return;
         }
         state.select(Some(if to_top { 0 } else { len - 1 }));
-        self.after_selection_change();
+        self.after_selection_change(pane);
     }
 
-    /// レジストリやリポジトリの選択が変わったら、それにぶら下がる選択をリセットする。
-    fn after_selection_change(&mut self) {
+    /// 親の選択が変わったら、それにぶら下がる子の選択をリセットする。
+    fn after_selection_change(&mut self, pane: Pane) {
+        // AppRun はアプリを変えるとバージョンが変わる。
+        if pane == Pane::Applications {
+            self.apprun.version_state.select(None);
+            self.apprun.pane = AppRunPane::Applications;
+        }
+        if self.service != Service::Registry {
+            return;
+        }
         match (self.registry.focus, self.registry.tab, self.registry.image_pane) {
             (Focus::Registries, _, _) => {
                 self.registry.user_state.select(None);
@@ -1231,33 +1557,6 @@ impl App {
                 self.registry.tag_state.select(None);
             }
             _ => {}
-        }
-    }
-
-    /// 現在フォーカスしているリストの状態と要素数。
-    fn active_list(&mut self) -> Option<(&mut dyn SelectableList, usize)> {
-        match self.registry.focus {
-            Focus::Registries => {
-                let len = self.registry.registries.ready().map_or(0, Vec::len);
-                Some((&mut self.registry.registry_state, len))
-            }
-            Focus::Detail => match self.registry.tab {
-                Tab::Overview => None,
-                Tab::Users => {
-                    let len = self.visible_users().ready().map_or(0, Vec::len);
-                    Some((&mut self.registry.user_state, len))
-                }
-                Tab::Images => match self.registry.image_pane {
-                    ImagePane::Repositories => {
-                        let len = self.visible_repositories().ready().map_or(0, Vec::len);
-                        Some((&mut self.registry.repository_state, len))
-                    }
-                    ImagePane::Tags => {
-                        let len = self.visible_tags().ready().map_or(0, Vec::len);
-                        Some((&mut self.registry.tag_state, len))
-                    }
-                },
-            },
         }
     }
 
@@ -1449,6 +1748,17 @@ impl App {
                 });
                 self.set_status("送信中…", StatusKind::Info);
             }
+            ConfirmAction::RouteTraffic {
+                application,
+                app_name,
+                version,
+            } => self.run_route_traffic(application, app_name, version),
+            ConfirmAction::PowerAction {
+                id,
+                zone,
+                name,
+                action,
+            } => self.run_power_action(id, zone, name, action),
             ConfirmAction::ForgetLogin { host } => {
                 self.registry_clients.remove(&host);
                 self.registry.repositories.remove(&host);
@@ -1794,6 +2104,19 @@ impl App {
                     edit_registry_form(&mut form, key);
                     self.overlay = Some(Overlay::RegistryForm(form));
                 }
+            },
+            Overlay::ZonePicker { zones, mut index } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                KeyCode::Enter => self.switch_zone(zones[index].name.clone()),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    index = (index + 1) % zones.len();
+                    self.overlay = Some(Overlay::ZonePicker { zones, index });
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    index = (index + zones.len() - 1) % zones.len();
+                    self.overlay = Some(Overlay::ZonePicker { zones, index });
+                }
+                _ => self.overlay = Some(Overlay::ZonePicker { zones, index }),
             },
             Overlay::Login(mut form) => match key.code {
                 KeyCode::Esc => {}

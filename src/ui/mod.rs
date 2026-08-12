@@ -1,8 +1,10 @@
 //! 画面描画。
 
+mod apprun;
 mod detail;
 mod overlay;
 mod registries;
+mod server;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -10,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Tabs};
 
-use crate::app::{App, Focus, Mode, StatusKind, Tab};
+use crate::app::{App, Focus, Mode, Service, StatusKind, Tab};
 
 /// さくらのピンク。
 pub const SAKURA: Color = Color::Rgb(0xE9, 0x54, 0x6B);
@@ -44,24 +46,39 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         " "
     };
-    let line = Line::from(vec![
-        Span::styled(
-            " 🌸 sakura-tui ",
-            Style::default()
-                .fg(SAKURA)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ),
-        Span::raw(" コンテナレジストリ  "),
-        Span::styled(spinner, Style::default().fg(SAKURA)),
-        Span::raw("  "),
-        mode_badge(app.mode),
-        Span::raw("  "),
-        Span::styled(
-            format!("認証: {}", app.credential_source.label()),
-            Style::default().fg(DIM),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    let mut spans = vec![Span::styled(
+        " 🌸 sakura-tui ",
+        Style::default()
+            .fg(SAKURA)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+    )];
+    for service in Service::ALL {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(" {} ", service.title()),
+            if service == app.service {
+                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ));
+    }
+    spans.push(Span::styled(spinner, Style::default().fg(SAKURA)));
+    spans.push(Span::raw(" "));
+    spans.push(mode_badge(app.mode));
+    spans.push(Span::raw(" "));
+    // ゾーンはゾーン依存のサービスのときだけ出す。
+    if app.service.is_zoned() {
+        spans.push(Span::styled(
+            format!(" {} ", app.zone),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    spans.push(Span::styled(
+        format!(" {}", app.credential_source.label()),
+        Style::default().fg(DIM),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// 現在のモードを示すバッジ。書き込み可のときは目立つようにする。
@@ -76,6 +93,14 @@ fn mode_badge(mode: Mode) -> Span<'static> {
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
+    match app.service {
+        Service::Registry => draw_registry(frame, area, app),
+        Service::AppRun => apprun::draw(frame, area, app),
+        Service::Server => server::draw(frame, area, app),
+    }
+}
+
+fn draw_registry(frame: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
@@ -113,7 +138,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     // 絞り込み編集中はステータス行を入力欄として使う。
-    if app.registry.filtering {
+    if app.filtering {
         let line = Line::from(vec![
             Span::styled(" /", Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)),
             Span::raw(app.active_filter().to_string()),
@@ -155,20 +180,36 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
-    let mut hints: Vec<&str> = vec!["↑↓/jk 移動", "←→/hl ペイン", "Tab タブ", "r 更新"];
-    // 書き込み系のキーは、書き込みモードのときだけ案内する。
-    if app.mode == Mode::Write {
-        match app.registry.tab {
-            Tab::Overview => hints.extend(["n 作成", "E 編集", "D 削除"]),
-            Tab::Users => hints.extend(["a 追加", "e 編集", "d 削除"]),
-            Tab::Images => hints.push("d イメージ削除"),
+    let mut hints: Vec<&str> = vec!["↑↓/jk 移動", "s サービス", "r 更新"];
+    match app.service {
+        Service::Registry => {
+            hints.push("Tab タブ");
+            // 書き込み系のキーは、書き込みモードのときだけ案内する。
+            if app.mode == Mode::Write {
+                match app.registry.tab {
+                    Tab::Overview => hints.extend(["n 作成", "E 編集", "D 削除"]),
+                    Tab::Users => hints.extend(["a 追加", "e 編集", "d 削除"]),
+                    Tab::Images => hints.push("d イメージ削除"),
+                }
+            }
+            if app.registry.tab == Tab::Images {
+                if app.is_logged_in() {
+                    hints.extend(["L ログイン変更", "O ログアウト"]);
+                } else {
+                    hints.push("L ログイン");
+                }
+            }
         }
-    }
-    if app.registry.tab == Tab::Images {
-        if app.is_logged_in() {
-            hints.extend(["L ログイン変更", "O ログアウト"]);
-        } else {
-            hints.push("L ログイン");
+        Service::AppRun => {
+            if app.mode == Mode::Write {
+                hints.push("t トラフィック切替");
+            }
+        }
+        Service::Server => {
+            hints.push("z ゾーン");
+            if app.mode == Mode::Write {
+                hints.extend(["b 起動", "x 停止", "X 強制停止", "B 強制リセット"]);
+            }
         }
     }
     hints.extend(["/ 絞込", "y コピー", "p 認証切替"]);
@@ -211,6 +252,54 @@ pub fn pad(label: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let pad = width.saturating_sub(label.width());
     format!("{label}{}", " ".repeat(pad))
+}
+
+/// ラベル幅を表示セル数で揃えた `ラベル  値` の行。
+pub fn field(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(pad(label, 14), Style::default().fg(DIM)),
+        Span::raw(value.to_string()),
+    ])
+}
+
+pub fn placeholder(text: &str) -> Paragraph<'static> {
+    Paragraph::new(text.to_string())
+        .style(Style::default().fg(DIM))
+        .wrap(ratatui::widgets::Wrap { trim: false })
+}
+
+/// 一覧そのものの取得に失敗したときは、狭いペインに押し込めず画面幅いっぱいに出す。
+/// （権限エラーの案内など、複数行のメッセージが読めなくなるため）
+pub fn draw_full_width_error(frame: &mut Frame, area: Rect, title: &str, err: &str) {
+    frame.render_widget(
+        Paragraph::new(err.to_string())
+            .style(Style::default().fg(Color::Red))
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::bordered()
+                    .title(Span::styled(
+                        format!(" {title} "),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ))
+                    .border_style(Style::default().fg(Color::Red))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 0, 0)),
+            ),
+        area,
+    );
+}
+
+/// AppRun のステータス文字列を色分けする。
+pub fn status_color(status: &str) -> Color {
+    match status.to_ascii_lowercase().as_str() {
+        s if s.contains("success") || s.contains("running") || s.contains("healthy") => {
+            Color::Green
+        }
+        s if s.contains("fail") || s.contains("error") => Color::Red,
+        s if s.contains("progress") || s.contains("pending") || s.contains("deploy") => {
+            Color::Yellow
+        }
+        _ => Color::Gray,
+    }
 }
 
 /// 日時文字列を `YYYY-MM-DD HH:MM` に整形する。解析できなければそのまま返す。
