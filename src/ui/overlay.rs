@@ -33,7 +33,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::RegistryForm(form) => draw_registry_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
-            draw_profile_picker(frame, sources, *index, &app.credential_source)
+            draw_profile_picker(frame, app, sources, *index)
         }
         Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, zones, *index, &app.zone),
         Overlay::ServicePicker { index } => draw_service_picker(frame, *index, app.service),
@@ -123,26 +123,81 @@ fn picker_hint(action: &str) -> Line<'static> {
 
 fn draw_profile_picker(
     frame: &mut Frame,
-    sources: &[CredentialSource],
+    app: &App,
+    sources: &[(CredentialSource, Option<String>)],
     index: usize,
-    current: &CredentialSource,
 ) {
-    let mut lines = vec![Line::from(Span::styled(
-        "切り替え先を選んでください",
-        Style::default().fg(DIM),
-    ))];
-    lines.push(Line::raw(""));
-    for (i, source) in sources.iter().enumerate() {
-        lines.push(picker_row(i == index, source == current, &source.label()));
+    let current = &app.credential_source;
+    let mut lines = Vec::new();
+    for (i, (source, zone)) in sources.iter().enumerate() {
+        let selected = i == index;
+        let is_current = source == current;
+        // 色は利用者が割り当てたもの。未設定なら既定色。
+        let assigned = app
+            .config
+            .profile_color(source)
+            .and_then(super::parse_color);
+
+        let mut name_style = match assigned {
+            Some(color) => Style::default().fg(color),
+            None => Style::default(),
+        };
+        if selected {
+            name_style = name_style.add_modifier(Modifier::BOLD);
+            if assigned.is_none() {
+                name_style = name_style.fg(SAKURA);
+            }
+        }
+
+        let mut spans = vec![
+            Span::styled(
+                if selected { "▌ " } else { "  " },
+                Style::default().fg(SAKURA),
+            ),
+            Span::styled(
+                if is_current { "● " } else { "○ " },
+                Style::default().fg(if is_current { SAKURA } else { DIM }),
+            ),
+            // 名前は先頭が同じことが多いので、幅を揃えて末尾の違いを見やすくする。
+            Span::styled(super::pad(&source.label(), 26), name_style),
+        ];
+        // ゾーンは取り違えに気づく手がかりになるので併記する。
+        match zone {
+            Some(zone) => spans.push(Span::styled(
+                format!("ゾーン {zone}"),
+                Style::default().fg(Color::Cyan),
+            )),
+            None => spans.push(Span::styled("ゾーン未設定", Style::default().fg(DIM))),
+        }
+        // 割り当てた色を色名でも示す（色覚や端末設定に依存しないように）。
+        spans.push(Span::styled(
+            format!("  {}", app.config.profile_color(source).unwrap_or("既定")),
+            Style::default().fg(DIM),
+        ));
+        if is_current {
+            spans.push(Span::styled("  (現在)", Style::default().fg(DIM)));
+        }
+        lines.push(Line::from(spans));
     }
     lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "c",
+            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " で色を割り当て（設定ファイルに保存されます）",
+            Style::default().fg(DIM),
+        ),
+    ]));
     lines.push(Line::from(Span::styled(
-        "~/.usacloud/current は書き換えません（このセッションのみ）",
+        "切り替えはこのセッションのみで、~/.usacloud/current は書き換えません。",
         Style::default().fg(DIM),
     )));
+    lines.push(Line::raw(""));
     lines.push(picker_hint("切り替え"));
 
-    let area = centered(frame, 64, dialog_height(&lines, 64));
+    let area = centered(frame, 72, dialog_height(&lines, 72));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
@@ -239,6 +294,7 @@ fn draw_help(frame: &mut Frame) {
                 ("/", "表示中のリストを絞り込み"),
                 ("y", "選択中の項目をコピー"),
                 ("p", "認証情報（プロファイル）を切替"),
+                ("", "  ピッカー内で c を押すと色を割り当て"),
                 ("s / S", "サービスを切り替え（4種）"),
                 ("z", "ゾーンを切り替え（サーバー）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),

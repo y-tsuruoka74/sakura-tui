@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Tabs};
 
 use crate::app::{App, Focus, Mode, Service, StatusKind, Tab};
+use crate::config::CredentialSource;
 
 /// さくらのピンク。
 pub const SAKURA: Color = Color::Rgb(0xE9, 0x54, 0x6B);
@@ -48,34 +49,92 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         " "
     };
-    let mut spans = vec![Span::styled(
-        " 🌸 sakura-tui ",
-        Style::default()
-            .fg(SAKURA)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-    )];
-    spans.push(Span::styled(
-        format!(" {} ", app.service.title()),
-        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled("(s)", Style::default().fg(DIM)));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(spinner, Style::default().fg(SAKURA)));
-    spans.push(Span::raw(" "));
-    spans.push(mode_badge(app.mode));
-    spans.push(Span::raw(" "));
+    let mut spans = vec![
+        Span::styled(
+            " 🌸 sakura-tui ",
+            Style::default()
+                .fg(SAKURA)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ),
+        separator(),
+        Span::styled(
+            app.service.title(),
+            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" (s)", Style::default().fg(DIM)),
+        separator(),
+        mode_badge(app.mode),
+    ];
     // ゾーンはゾーン依存のサービスのときだけ出す。
     if app.service.is_zoned() {
+        spans.push(separator());
         spans.push(Span::styled(
-            format!(" {} ", app.zone),
+            format!("ゾーン {}", app.zone),
             Style::default().fg(Color::Cyan),
         ));
     }
-    spans.push(Span::styled(
-        format!(" {}", app.credential_source.label()),
-        Style::default().fg(DIM),
+    spans.push(separator());
+    spans.extend(credential_badge(
+        &app.credential_source,
+        app.config
+            .profile_color(&app.credential_source)
+            .and_then(parse_color),
     ));
+    spans.push(Span::styled(" (p)", Style::default().fg(DIM)));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(spinner, Style::default().fg(SAKURA)));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// ヘッダーの項目を区切る。
+fn separator() -> Span<'static> {
+    Span::styled(" │ ", Style::default().fg(DIM))
+}
+
+/// プロファイルに割り当てられる色。ピッカーの `c` キーで順に切り替える。
+pub const PROFILE_COLORS: [&str; 6] = ["red", "yellow", "green", "cyan", "blue", "magenta"];
+
+/// 設定ファイルの色名を実際の色にする。
+///
+/// 名前のほか `#RRGGBB` も受け取る。解釈できない値は既定色として扱う。
+pub fn parse_color(name: &str) -> Option<Color> {
+    let name = name.trim();
+    if let Some(hex) = name.strip_prefix('#')
+        && hex.len() == 6
+        && let Ok(value) = u32::from_str_radix(hex, 16)
+    {
+        return Some(Color::Rgb(
+            (value >> 16) as u8,
+            (value >> 8) as u8,
+            value as u8,
+        ));
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "red" => Some(Color::Red),
+        "yellow" => Some(Color::Yellow),
+        "green" => Some(Color::Green),
+        "cyan" => Some(Color::Cyan),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "gray" | "grey" => Some(Color::Gray),
+        "white" => Some(Color::White),
+        _ => None,
+    }
+}
+
+/// どの契約で見ているかを示すバッジ。
+///
+/// 色は設定ファイルで指定されたものを使う（ピッカーの `c` キーでも変えられる）。
+/// dev と prod のように名前が似ている契約を、自分で決めた色で区別するため。
+pub fn credential_badge(source: &CredentialSource, color: Option<Color>) -> Vec<Span<'static>> {
+    let style = match color {
+        Some(color) => Style::default().fg(color).add_modifier(Modifier::BOLD),
+        None => Style::default().fg(Color::Gray),
+    };
+    vec![
+        Span::styled("◆ ", style),
+        Span::styled(source.label(), style),
+    ]
 }
 
 /// 現在のモードを示すバッジ。書き込み可のときは目立つようにする。
@@ -335,4 +394,38 @@ pub fn format_datetime(raw: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(raw)
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|_| raw.to_string())
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn parses_named_colors() {
+        assert_eq!(parse_color("red"), Some(Color::Red));
+        assert_eq!(parse_color("  Cyan "), Some(Color::Cyan));
+        assert_eq!(parse_color("grey"), Some(Color::Gray));
+    }
+
+    #[test]
+    fn parses_hex_colors() {
+        assert_eq!(parse_color("#ff8800"), Some(Color::Rgb(0xFF, 0x88, 0x00)));
+        assert_eq!(parse_color("#000000"), Some(Color::Rgb(0, 0, 0)));
+    }
+
+    /// 解釈できない値は既定色扱いにして、落とさない。
+    #[test]
+    fn unknown_values_fall_back_to_default() {
+        for value in ["", "むらさき", "#fff", "#gggggg", "rgb(1,2,3)"] {
+            assert_eq!(parse_color(value), None, "{value}");
+        }
+    }
+
+    /// パレットは全て解釈できること（`c` キーで循環させるため）。
+    #[test]
+    fn palette_is_all_parseable() {
+        for name in PROFILE_COLORS {
+            assert!(parse_color(name).is_some(), "{name}");
+        }
+    }
 }

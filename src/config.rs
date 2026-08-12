@@ -27,6 +27,27 @@ impl CredentialSource {
             CredentialSource::Profile(name) => name.clone(),
         }
     }
+
+    /// 設定ファイルで色などを紐づけるときのキー。
+    ///
+    /// 環境変数はプロファイル名を持たないので `@env` を使う。
+    /// usacloud のプロファイル名に `@` は使えないため衝突しない。
+    pub fn config_key(&self) -> String {
+        match self {
+            CredentialSource::Env => "@env".to_string(),
+            CredentialSource::Profile(name) => name.clone(),
+        }
+    }
+
+    /// プロファイルに設定された既定ゾーン。ピッカーで見分ける手がかりにする。
+    pub fn zone(&self) -> Option<String> {
+        match self {
+            CredentialSource::Env => env_multi(&["SAKURA_ZONE", "SAKURACLOUD_ZONE"]),
+            CredentialSource::Profile(name) => {
+                load_usacloud_profile(Some(name)).ok().and_then(|c| c.zone)
+            }
+        }
+    }
 }
 
 /// さくらのクラウド API のアクセストークンとシークレット。
@@ -191,12 +212,54 @@ pub struct RegistryLogin {
     pub password: String,
 }
 
+/// プロファイルごとの見た目の設定。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileStyle {
+    /// ヘッダーとピッカーでの表示色。
+    ///
+    /// `red` / `yellow` / `green` / `cyan` / `blue` / `magenta` / `gray` か、
+    /// `#RRGGBB` 形式で指定する。未指定なら既定色。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 /// `~/.config/sakura-tui/config.toml` の内容。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     /// レジストリの FQDN をキーにしたログイン情報。
     #[serde(default)]
     pub registries: BTreeMap<String, RegistryLogin>,
+    /// 認証情報（プロファイル名 / `@env`）をキーにした見た目の設定。
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ProfileStyle>,
+}
+
+impl Config {
+    /// 指定の認証情報に紐づけられた色名。
+    pub fn profile_color(&self, source: &CredentialSource) -> Option<&str> {
+        self.profiles
+            .get(&source.config_key())?
+            .color
+            .as_deref()
+            .filter(|c| !c.is_empty())
+    }
+
+    /// 色を設定する。`None` を渡すと既定色に戻す。
+    pub fn set_profile_color(&mut self, source: &CredentialSource, color: Option<String>) {
+        let key = source.config_key();
+        match color {
+            Some(color) => {
+                self.profiles.entry(key).or_default().color = Some(color);
+            }
+            None => {
+                if let Some(style) = self.profiles.get_mut(&key) {
+                    style.color = None;
+                }
+                // 中身が空になった項目は残さない。
+                self.profiles.retain(|_, style| style.color.is_some());
+            }
+        }
+    }
 }
 
 /// 設定ファイルのパス。`SAKURA_TUI_CONFIG` で上書きできる。
@@ -250,4 +313,62 @@ fn restrict_permissions(path: &std::path::Path) -> Result<()> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_key_distinguishes_env_from_profiles() {
+        assert_eq!(CredentialSource::Env.config_key(), "@env");
+        assert_eq!(
+            CredentialSource::Profile("prod".to_string()).config_key(),
+            "prod"
+        );
+    }
+
+    #[test]
+    fn stores_and_clears_profile_color() {
+        let source = CredentialSource::Profile("ixt15226_aipf-prod".to_string());
+        let mut config = Config::default();
+        assert_eq!(config.profile_color(&source), None);
+
+        config.set_profile_color(&source, Some("red".to_string()));
+        assert_eq!(config.profile_color(&source), Some("red"));
+
+        // 既定色に戻したら設定自体を残さない。
+        config.set_profile_color(&source, None);
+        assert_eq!(config.profile_color(&source), None);
+        assert!(config.profiles.is_empty());
+    }
+
+    /// 色を設定してもレジストリのログイン情報は壊れないこと。
+    #[test]
+    fn round_trips_through_toml() {
+        let source = CredentialSource::Env;
+        let mut config = Config::default();
+        config.registries.insert(
+            "example.sakuracr.jp".to_string(),
+            RegistryLogin {
+                username: "u".to_string(),
+                password: "p".to_string(),
+            },
+        );
+        config.set_profile_color(&source, Some("#ff8800".to_string()));
+
+        let text = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.profile_color(&source), Some("#ff8800"));
+        assert_eq!(parsed.registries.len(), 1);
+    }
+
+    #[test]
+    fn label_reads_naturally() {
+        assert_eq!(CredentialSource::Env.label(), "環境変数");
+        assert_eq!(
+            CredentialSource::Profile("default".to_string()).label(),
+            "default"
+        );
+    }
 }

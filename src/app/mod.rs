@@ -530,7 +530,9 @@ pub enum Overlay {
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
-        sources: Vec<CredentialSource>,
+        /// 選択肢と、それぞれの既定ゾーン。
+        /// ゾーンは開いた時点で読んでおく（描画のたびにファイルを読まないため）。
+        sources: Vec<(CredentialSource, Option<String>)>,
         index: usize,
     },
     /// ゾーンの切り替え。
@@ -1830,7 +1832,46 @@ impl App {
             .iter()
             .position(|s| *s == self.credential_source)
             .unwrap_or(0);
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let zone = source.zone();
+                (source, zone)
+            })
+            .collect();
         self.overlay = Some(Overlay::ProfilePicker { sources, index });
+    }
+
+    /// 認証情報に割り当てる色を順に切り替えて保存する。
+    ///
+    /// dev と prod のように名前が似ている契約を、自分で決めた色で
+    /// 見分けられるようにするためのもの。既定色に戻すところまで一巡する。
+    fn cycle_profile_color(&mut self, source: &CredentialSource) {
+        let palette = crate::ui::PROFILE_COLORS;
+        let next = match self.config.profile_color(source) {
+            None => Some(palette[0].to_string()),
+            Some(current) => palette
+                .iter()
+                .position(|c| *c == current)
+                .map(|i| i + 1)
+                .filter(|i| *i < palette.len())
+                .map(|i| palette[i].to_string()),
+        };
+        self.config.set_profile_color(source, next.clone());
+
+        match self.config.save() {
+            Ok(_) => {
+                let label = next.as_deref().unwrap_or("既定");
+                self.set_status(
+                    format!("{} の色を {label} にしました", source.label()),
+                    StatusKind::Success,
+                );
+            }
+            Err(err) => self.set_status(
+                format!("設定の保存に失敗しました: {}", fmt_error(err)),
+                StatusKind::Error,
+            ),
+        }
     }
 
     /// 認証情報を切り替え、クラウド API 側のキャッシュを捨てて読み直す。
@@ -2590,7 +2631,12 @@ impl App {
             },
             Overlay::ProfilePicker { sources, mut index } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {}
-                KeyCode::Enter => self.switch_credentials(sources[index].clone()),
+                KeyCode::Enter => self.switch_credentials(sources[index].0.clone()),
+                // 選択中の認証情報に色を割り当てる。
+                KeyCode::Char('c') => {
+                    self.cycle_profile_color(&sources[index].0);
+                    self.overlay = Some(Overlay::ProfilePicker { sources, index });
+                }
                 KeyCode::Down | KeyCode::Char('j') => {
                     index = (index + 1) % sources.len();
                     self.overlay = Some(Overlay::ProfilePicker { sources, index });
