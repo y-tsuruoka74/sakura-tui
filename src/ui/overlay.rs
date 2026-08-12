@@ -7,6 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, SAKURA};
+use crate::app::Service;
 use crate::app::{
     App, LoginForm, Overlay, RegistryForm, RegistryFormMode, StatusKind, UserForm, UserFormMode,
 };
@@ -35,13 +36,33 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_profile_picker(frame, sources, *index, &app.credential_source)
         }
         Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, zones, *index, &app.zone),
+        Overlay::ServicePicker { index } => draw_service_picker(frame, *index, app.service),
     }
 }
 
+fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
+    let mut lines = vec![Line::raw("")];
+    for (i, service) in Service::ALL.iter().enumerate() {
+        lines.push(picker_row(i == index, *service == current, service.title()));
+    }
+    lines.push(Line::raw(""));
+    lines.push(picker_hint("切り替え"));
+
+    let area = centered(frame, 52, dialog_height(&lines, 52));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("サービスの切り替え", SAKURA)),
+        area,
+    );
+}
+
 fn draw_zone_picker(frame: &mut Frame, zones: &[Zone], index: usize, current: &str) {
-    let rows = zones.iter().enumerate().map(|(i, zone)| {
-        picker_row(i == index, zone.name == current, &zone.label())
-    });
+    let rows = zones
+        .iter()
+        .enumerate()
+        .map(|(i, zone)| picker_row(i == index, zone.name == current, &zone.label()));
     let mut lines = vec![
         Line::from(Span::styled(
             "サーバーを表示するゾーンを選んでください",
@@ -285,13 +306,7 @@ fn draw_message(frame: &mut Frame, title: &str, body: &str, kind: StatusKind) {
     );
 }
 
-fn draw_confirm(
-    frame: &mut Frame,
-    title: &str,
-    body: &str,
-    verify: Option<&str>,
-    typed: &str,
-) {
+fn draw_confirm(frame: &mut Frame, title: &str, body: &str, verify: Option<&str>, typed: &str) {
     let mut lines: Vec<Line> = body.lines().map(|l| Line::raw(l.to_string())).collect();
     lines.push(Line::raw(""));
     match verify {
@@ -467,7 +482,11 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
                     Style::default().fg(DIM)
                 },
             ),
-            Span::raw(if form.save { "[x] する" } else { "[ ] しない" }),
+            Span::raw(if form.save {
+                "[x] する"
+            } else {
+                "[ ] しない"
+            }),
         ]),
         Line::raw(""),
         Line::from(Span::styled(
@@ -524,10 +543,7 @@ fn input_line(label: &str, value: &str, focused: bool, masked: bool) -> Line<'st
     Line::from(vec![
         Span::styled(super::pad(label, 14), label_style),
         Span::styled(shown, value_style),
-        Span::styled(
-            if focused { "▏" } else { "" },
-            Style::default().fg(SAKURA),
-        ),
+        Span::styled(if focused { "▏" } else { "" }, Style::default().fg(SAKURA)),
     ])
 }
 

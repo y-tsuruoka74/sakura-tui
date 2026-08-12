@@ -5,10 +5,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
-use super::{
-    App, ConfirmAction, Loadable, Message, Overlay, Pane, StatusKind, fmt_error,
-    matches,
-};
+use super::{App, ConfirmAction, Loadable, Message, Overlay, Pane, StatusKind, fmt_error, matches};
 use crate::iaas::{PowerAction, PowerStatus, Server};
 
 #[derive(Debug, Default)]
@@ -45,7 +42,6 @@ impl App {
         let index = self.server.server_state.selected()?;
         self.visible_servers().ready()?.get(index).cloned()
     }
-
 
     pub(super) fn load_servers(&mut self, zone: String) {
         self.server.servers.insert(zone.clone(), Loadable::Loading);
@@ -155,7 +151,11 @@ impl App {
                 .power_action(&target_zone, id, action)
                 .await
                 .map_err(fmt_error);
-            let _ = tx.send(Message::ServerAction { zone, label, result });
+            let _ = tx.send(Message::ServerAction {
+                zone,
+                label,
+                result,
+            });
         });
         self.set_status("送信中…", StatusKind::Info);
     }

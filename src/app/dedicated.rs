@@ -292,7 +292,12 @@ impl App {
 
         match self.dedicated.tab {
             DedicatedTab::Overview => {
-                if self.dedicated.details.get(&id).is_none_or(Loadable::is_idle) {
+                if self
+                    .dedicated
+                    .details
+                    .get(&id)
+                    .is_none_or(Loadable::is_idle)
+                {
                     self.load_cluster_child(id, ChildKind::Detail);
                 }
             }

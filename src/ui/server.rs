@@ -112,10 +112,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         .padding(ratatui::widgets::Padding::horizontal(1));
 
     let Some(server) = app.selected_server() else {
-        frame.render_widget(
-            placeholder("サーバーを選択してください").block(block),
-            area,
-        );
+        frame.render_widget(placeholder("サーバーを選択してください").block(block), area);
         return;
     };
 
@@ -135,7 +132,9 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             "プラン",
             &format!(
                 "{} ({} コア / {:.0} GB)",
-                server.plan_name, server.cpu, server.memory_gb()
+                server.plan_name,
+                server.cpu,
+                server.memory_gb()
             ),
         ),
         field("状態", &server.availability),
@@ -165,7 +164,9 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(block),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
         area,
     );
 }

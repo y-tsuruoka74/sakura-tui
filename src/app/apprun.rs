@@ -5,10 +5,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::{ListState, TableState};
 
-use super::{
-    App, ConfirmAction, Loadable, Message, Overlay, Pane, StatusKind, fmt_error,
-    matches,
-};
+use super::{App, ConfirmAction, Loadable, Message, Overlay, Pane, StatusKind, fmt_error, matches};
 use crate::apprun::{Application, ApplicationDetail, Traffic, Version};
 
 /// AppRun 画面で選択中のペイン。
@@ -90,13 +87,11 @@ impl App {
 
     /// トラフィック情報上で「最新バージョン」と印が付いているか。
     pub fn is_latest_version(&self, version_name: &str) -> bool {
-        self.current_traffics()
-            .ready()
-            .is_some_and(|traffics| {
-                traffics
-                    .iter()
-                    .any(|t| t.version_name == version_name && t.is_latest)
-            })
+        self.current_traffics().ready().is_some_and(|traffics| {
+            traffics
+                .iter()
+                .any(|t| t.version_name == version_name && t.is_latest)
+        })
     }
 
     /// トラフィックが向いている割合（バージョン名 → %）。
@@ -114,7 +109,6 @@ impl App {
             AppRunPane::Versions => Pane::Versions,
         }
     }
-
 
     // --- 読み込み ---
 
@@ -185,7 +179,10 @@ impl App {
         if self.apprun.traffics.get(&id).is_none_or(Loadable::is_idle) {
             self.load_traffics(id);
         }
-        if self.visible_versions().ready().is_some_and(|v| !v.is_empty())
+        if self
+            .visible_versions()
+            .ready()
+            .is_some_and(|v| !v.is_empty())
             && self.apprun.version_state.selected().is_none()
         {
             self.apprun.version_state.select(Some(0));

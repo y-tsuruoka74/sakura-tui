@@ -3,6 +3,7 @@
 mod apprun;
 mod dedicated;
 mod detail;
+mod observability;
 mod overlay;
 mod registries;
 mod server;
@@ -53,17 +54,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             .fg(SAKURA)
             .add_modifier(Modifier::BOLD | Modifier::REVERSED),
     )];
-    for service in Service::ALL {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!(" {} ", service.title()),
-            if service == app.service {
-                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(DIM)
-            },
-        ));
-    }
+    spans.push(Span::styled(
+        format!(" {} ", app.service.title()),
+        Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled("(s)", Style::default().fg(DIM)));
+    spans.push(Span::raw(" "));
     spans.push(Span::styled(spinner, Style::default().fg(SAKURA)));
     spans.push(Span::raw(" "));
     spans.push(mode_badge(app.mode));
@@ -99,6 +95,10 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::AppRun => apprun::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
+        Service::Dns => observability::draw_dns(frame, area, app),
+        Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
+        Service::Secrets => observability::draw_secrets(frame, area, app),
+        Service::Monitoring => observability::draw_monitoring(frame, area, app),
     }
 }
 
@@ -124,7 +124,10 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, tab)| Line::from(format!("{} {}", i + 1, tab.title())))
         .collect();
-    let selected = Tab::ALL.iter().position(|t| *t == app.registry.tab).unwrap_or(0);
+    let selected = Tab::ALL
+        .iter()
+        .position(|t| *t == app.registry.tab)
+        .unwrap_or(0);
     let highlight = if app.registry.focus == Focus::Detail {
         Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
     } else {
@@ -142,13 +145,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     // 絞り込み編集中はステータス行を入力欄として使う。
     if app.filtering {
         let line = Line::from(vec![
-            Span::styled(" /", Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " /",
+                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(app.active_filter().to_string()),
             Span::styled("▏", Style::default().fg(SAKURA)),
-            Span::styled(
-                "   Enter 確定 · Esc 解除",
-                Style::default().fg(DIM),
-            ),
+            Span::styled("   Enter 確定 · Esc 解除", Style::default().fg(DIM)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
         return;
@@ -207,8 +210,11 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 hints.push("t トラフィック切替");
             }
         }
-        // 専有型は閲覧のみなので書き込み系のヒントは無い。
+        // 以下はすべて閲覧のみなので書き込み系のヒントは無い。
         Service::Dedicated => hints.push("Tab タブ"),
+        Service::Dns | Service::SimpleMonitor => {}
+        Service::Secrets => hints.extend(["z ゾーン", "u 値を表示"]),
+        Service::Monitoring => hints.extend(["z ゾーン", "Tab タブ"]),
         Service::Server => {
             hints.push("z ゾーン");
             if app.mode == Mode::Write {

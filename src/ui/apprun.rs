@@ -77,19 +77,22 @@ fn draw_applications(frame: &mut Frame, area: Rect, app: &mut App) {
                     ])
                 })
                 .collect();
-            let table = Table::new(rows, [Constraint::Percentage(65), Constraint::Percentage(35)])
-                .header(
-                    Row::new(vec!["名前", "状態"])
-                        .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
-                )
-                .row_highlight_style(if focused {
-                    Style::default()
-                        .fg(SAKURA)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                } else {
-                    Style::default().add_modifier(Modifier::BOLD)
-                })
-                .block(block);
+            let table = Table::new(
+                rows,
+                [Constraint::Percentage(65), Constraint::Percentage(35)],
+            )
+            .header(
+                Row::new(vec!["名前", "状態"])
+                    .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+            )
+            .row_highlight_style(if focused {
+                Style::default()
+                    .fg(SAKURA)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            })
+            .block(block);
             frame.render_stateful_widget(table, area, &mut app.apprun.application_state);
         }
     }
@@ -149,7 +152,9 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(block),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
         area,
     );
 }
@@ -192,9 +197,11 @@ fn draw_versions(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(ratatui::widgets::Padding::horizontal(1));
 
     match &versions {
-        Loadable::Idle | Loadable::Loading => {
-            frame.render_widget(placeholder("読み込み中…").block(block), area)
-        }
+        Loadable::Idle => frame.render_widget(
+            placeholder("アプリケーションを選択してください").block(block),
+            area,
+        ),
+        Loadable::Loading => frame.render_widget(placeholder("読み込み中…").block(block), area),
         Loadable::Failed(err) => frame.render_widget(
             Paragraph::new(err.clone())
                 .style(Style::default().fg(Color::Red))

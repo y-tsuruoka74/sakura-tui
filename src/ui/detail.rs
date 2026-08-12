@@ -105,9 +105,11 @@ fn draw_users(frame: &mut Frame, area: Rect, app: &mut App, _registry: &Containe
         .padding(ratatui::widgets::Padding::horizontal(1));
 
     match &users {
-        Loadable::Idle | Loadable::Loading => {
-            frame.render_widget(placeholder("読み込み中…").block(block), area)
-        }
+        Loadable::Idle => frame.render_widget(
+            placeholder("レジストリを選択してください").block(block),
+            area,
+        ),
+        Loadable::Loading => frame.render_widget(placeholder("読み込み中…").block(block), area),
         Loadable::Failed(err) => frame.render_widget(error_paragraph(err).block(block), area),
         Loadable::Ready(users) if users.is_empty() => frame.render_widget(
             placeholder("ユーザーが登録されていません（a キーで追加）").block(block),
@@ -237,7 +239,12 @@ fn draw_tag_detail(frame: &mut Frame, area: Rect, app: &App) {
             lines
         }
     };
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
 }
 
 /// バイト数を人が読める単位にする。
@@ -267,7 +274,8 @@ fn short_media_type(media_type: &str) -> &str {
 }
 
 fn draw_repositories(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.registry.focus == Focus::Detail && app.registry.image_pane == ImagePane::Repositories;
+    let focused =
+        app.registry.focus == Focus::Detail && app.registry.image_pane == ImagePane::Repositories;
     let repositories = app.visible_repositories();
     let count = repositories.ready().map_or(0, Vec::len);
     let block = Block::bordered()
@@ -311,14 +319,19 @@ fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(ratatui::widgets::Padding::horizontal(1));
 
     if repository.is_none() {
-        frame.render_widget(placeholder("リポジトリを選択してください").block(block), area);
+        frame.render_widget(
+            placeholder("リポジトリを選択してください").block(block),
+            area,
+        );
         return;
     }
 
     match &tags {
-        Loadable::Idle | Loadable::Loading => {
-            frame.render_widget(placeholder("読み込み中…").block(block), area)
-        }
+        Loadable::Idle => frame.render_widget(
+            placeholder("リポジトリを選択してください").block(block),
+            area,
+        ),
+        Loadable::Loading => frame.render_widget(placeholder("読み込み中…").block(block), area),
         Loadable::Failed(err) => frame.render_widget(error_paragraph(err).block(block), area),
         Loadable::Ready(tags) if tags.is_empty() => {
             frame.render_widget(placeholder("タグがありません").block(block), area)

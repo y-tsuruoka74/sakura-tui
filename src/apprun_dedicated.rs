@@ -4,8 +4,6 @@
 //! オートスケーリンググループ（ASG）・ワーカーノード・証明書がぶら下がる。
 //! ページングは共用型のページ番号方式ではなくカーソル方式。
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -188,7 +186,11 @@ struct RawAutoScalingGroup {
 
 #[derive(Debug, Deserialize)]
 struct ListAsgResponse {
-    #[serde(rename = "autoScalingGroups", default, deserialize_with = "null_as_default")]
+    #[serde(
+        rename = "autoScalingGroups",
+        default,
+        deserialize_with = "null_as_default"
+    )]
     auto_scaling_groups: Vec<RawAutoScalingGroup>,
     #[serde(rename = "nextCursor")]
     next_cursor: Option<String>,
@@ -283,11 +285,7 @@ pub struct DedicatedClient {
 
 impl DedicatedClient {
     pub fn new(creds: &ApiCredentials) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("sakura-tui/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("HTTPクライアントの初期化に失敗しました")?;
+        let http = crate::http::client()?;
         Ok(Self {
             http,
             token: creds.token.clone(),
@@ -297,14 +295,16 @@ impl DedicatedClient {
 
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
         let url = format!("{API_ROOT}{path}");
-        let res = self
-            .http
-            .request(Method::GET, &url)
-            .basic_auth(&self.token, Some(&self.secret))
-            .query(query)
-            .send()
-            .await
-            .with_context(|| format!("AppRun専有型APIへのリクエストに失敗しました: {url}"))?;
+        let res = crate::http::send_with_retry(&self.http, || {
+            Ok(self
+                .http
+                .request(Method::GET, &url)
+                .basic_auth(&self.token, Some(&self.secret))
+                .query(query)
+                .build()?)
+        })
+        .await
+        .context("AppRun専有型APIへのリクエストに失敗しました")?;
         let status = res.status();
         let text = res
             .text()
@@ -337,9 +337,7 @@ impl DedicatedClient {
             out.extend(items);
             match next {
                 // 同じカーソルが返ってきたら進んでいないので打ち切る。
-                Some(next) if received > 0 && Some(&next) != cursor.as_ref() => {
-                    cursor = Some(next)
-                }
+                Some(next) if received > 0 && Some(&next) != cursor.as_ref() => cursor = Some(next),
                 _ => break,
             }
         }
@@ -379,7 +377,10 @@ impl DedicatedClient {
             query.push(("clusterID", cluster_id.to_string()));
             let res: ListApplicationsResponse = self.get("/applications", &query).await?;
             Ok((
-                res.applications.into_iter().map(Application::from).collect(),
+                res.applications
+                    .into_iter()
+                    .map(Application::from)
+                    .collect(),
                 res.next_cursor,
             ))
         })
@@ -404,7 +405,11 @@ impl DedicatedClient {
         .await
     }
 
-    pub async fn list_worker_nodes(&self, cluster_id: &str, asg_id: &str) -> Result<Vec<WorkerNode>> {
+    pub async fn list_worker_nodes(
+        &self,
+        cluster_id: &str,
+        asg_id: &str,
+    ) -> Result<Vec<WorkerNode>> {
         let path = format!("/clusters/{cluster_id}/asg/{asg_id}/worker_nodes");
         self.collect(|cursor| {
             let path = path.clone();
@@ -428,7 +433,10 @@ impl DedicatedClient {
                 let res: ListCertificatesResponse =
                     self.get(&path, &Self::page_query(cursor)).await?;
                 Ok((
-                    res.certificates.into_iter().map(Certificate::from).collect(),
+                    res.certificates
+                        .into_iter()
+                        .map(Certificate::from)
+                        .collect(),
                     res.next_cursor,
                 ))
             }

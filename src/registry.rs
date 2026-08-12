@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -137,11 +136,7 @@ pub struct RegistryClient {
 
 impl RegistryClient {
     pub fn new(host: &str, login: RegistryLogin) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("sakura-tui/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("HTTPクライアントの初期化に失敗しました")?;
+        let http = crate::http::client()?;
         Ok(Self {
             http,
             host: host.to_string(),
@@ -227,9 +222,7 @@ impl RegistryClient {
         let scope = format!("repository:{repository}:pull");
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static(MANIFEST_ACCEPT));
-        let res = self
-            .send(Method::HEAD, &url, &scope, Some(headers))
-            .await?;
+        let res = self.send(Method::HEAD, &url, &scope, Some(headers)).await?;
         Ok(digest_header(&res))
     }
 
@@ -313,7 +306,10 @@ impl RegistryClient {
     ///
     /// レジストリ側で削除が無効化されていることがあるため、405 は専用のメッセージにする。
     pub async fn delete_manifest(&self, repository: &str, digest: &str) -> Result<()> {
-        let url = format!("https://{}/v2/{}/manifests/{}", self.host, repository, digest);
+        let url = format!(
+            "https://{}/v2/{}/manifests/{}",
+            self.host, repository, digest
+        );
         let scope = format!("repository:{repository}:pull,delete");
         match self.send(Method::DELETE, &url, &scope, None).await {
             Ok(_) => Ok(()),
@@ -366,11 +362,12 @@ impl RegistryClient {
         // キャッシュ済みトークンがあればまずそれで試す。
         if let Some(token) = cached {
             let res = self
-                .build(method.clone(), url, headers.clone())
-                .header(AUTHORIZATION, format!("Bearer {token}"))
-                .send()
+                .send_built(
+                    self.build(method.clone(), url, headers.clone())
+                        .header(AUTHORIZATION, format!("Bearer {token}")),
+                )
                 .await
-                .with_context(|| format!("レジストリへのリクエストに失敗しました: {url}"))?;
+                .context("レジストリへのリクエストに失敗しました")?;
             if res.status() != StatusCode::UNAUTHORIZED {
                 return check_status(res).await;
             }
@@ -379,10 +376,9 @@ impl RegistryClient {
 
         // 認証なしで送り、返ってきたチャレンジに従って認証をやり直す。
         let res = self
-            .build(method.clone(), url, headers.clone())
-            .send()
+            .send_built(self.build(method.clone(), url, headers.clone()))
             .await
-            .with_context(|| format!("レジストリへのリクエストに失敗しました: {url}"))?;
+            .context("レジストリへのリクエストに失敗しました")?;
         if res.status() != StatusCode::UNAUTHORIZED {
             return check_status(res).await;
         }
@@ -390,21 +386,22 @@ impl RegistryClient {
         let challenge = parse_challenge(&res)
             .context("レジストリの認証方式を判別できませんでした（WWW-Authenticate ヘッダなし）")?;
         let res = match challenge {
-            Challenge::Basic => {
-                self.build(method, url, headers)
-                    .basic_auth(&self.login.username, Some(&self.login.password))
-                    .send()
-                    .await
-                    .with_context(|| format!("レジストリへのリクエストに失敗しました: {url}"))?
-            }
+            Challenge::Basic => self
+                .send_built(
+                    self.build(method, url, headers)
+                        .basic_auth(&self.login.username, Some(&self.login.password)),
+                )
+                .await
+                .context("レジストリへのリクエストに失敗しました")?,
             Challenge::Bearer { realm, service } => {
                 let token = self.fetch_token(&realm, service.as_deref(), scope).await?;
                 let res = self
-                    .build(method, url, headers)
-                    .header(AUTHORIZATION, format!("Bearer {token}"))
-                    .send()
+                    .send_built(
+                        self.build(method, url, headers)
+                            .header(AUTHORIZATION, format!("Bearer {token}")),
+                    )
                     .await
-                    .with_context(|| format!("レジストリへのリクエストに失敗しました: {url}"))?;
+                    .context("レジストリへのリクエストに失敗しました")?;
                 self.tokens.lock().await.insert(scope.to_string(), token);
                 res
             }
@@ -425,6 +422,17 @@ impl RegistryClient {
         req
     }
 
+    /// リトライを挟んで送る。
+    async fn send_built(&self, req: reqwest::RequestBuilder) -> Result<Response> {
+        let request = req.build()?;
+        crate::http::send_with_retry(&self.http, || {
+            request
+                .try_clone()
+                .context("リクエストを複製できませんでした")
+        })
+        .await
+    }
+
     /// 認証サーバーから Bearer トークンを取得する。
     async fn fetch_token(&self, realm: &str, service: Option<&str>, scope: &str) -> Result<String> {
         #[derive(Deserialize)]
@@ -442,10 +450,10 @@ impl RegistryClient {
             req = req.query(&[("service", service)]);
         }
 
-        let res = req
-            .send()
+        let res = self
+            .send_built(req)
             .await
-            .with_context(|| format!("認証トークンの取得に失敗しました: {realm}"))?;
+            .context("認証トークンの取得に失敗しました")?;
         if res.status() == StatusCode::UNAUTHORIZED || res.status() == StatusCode::FORBIDDEN {
             bail!("レジストリの認証に失敗しました。ユーザー名とパスワードを確認してください。");
         }
@@ -624,10 +632,7 @@ mod tests {
 
     #[test]
     fn resolves_relative_next_page_link() {
-        let res = response(&[(
-            "link",
-            r#"</v2/_catalog?n=200&last=foo>; rel="next""#,
-        )]);
+        let res = response(&[("link", r#"</v2/_catalog?n=200&last=foo>; rel="next""#)]);
         assert_eq!(
             next_page_url("registry.example.com", &res).as_deref(),
             Some("https://registry.example.com/v2/_catalog?n=200&last=foo")

@@ -2,8 +2,6 @@
 //!
 //! IaaS とは別のエンドポイントだが、認証は同じ API キー（Basic 認証）を使う。
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
@@ -15,6 +13,8 @@ use crate::sacloud::null_as_default;
 const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/api/apprun/1.0/apprun/api";
 /// 1 ページあたりの取得件数（API の上限に合わせる）。
 const PAGE_SIZE: usize = 100;
+/// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
+const MAX_PAGES: usize = 100;
 
 /// アプリケーション 1 件（一覧表示用）。
 #[derive(Debug, Clone)]
@@ -174,11 +174,7 @@ pub struct AppRunClient {
 
 impl AppRunClient {
     pub fn new(creds: &ApiCredentials) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("sakura-tui/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("HTTPクライアントの初期化に失敗しました")?;
+        let http = crate::http::client()?;
         Ok(Self {
             http,
             token: creds.token.clone(),
@@ -194,19 +190,19 @@ impl AppRunClient {
         body: Option<serde_json::Value>,
     ) -> Result<T> {
         let url = format!("{API_ROOT}{path}");
-        let mut req = self
-            .http
-            .request(method, &url)
-            .basic_auth(&self.token, Some(&self.secret))
-            .query(query);
-        if let Some(body) = &body {
-            req = req.json(body);
-        }
-
-        let res = req
-            .send()
-            .await
-            .with_context(|| format!("AppRun APIへのリクエストに失敗しました: {url}"))?;
+        let res = crate::http::send_with_retry(&self.http, || {
+            let mut req = self
+                .http
+                .request(method.clone(), &url)
+                .basic_auth(&self.token, Some(&self.secret))
+                .query(query);
+            if let Some(body) = &body {
+                req = req.json(body);
+            }
+            Ok(req.build()?)
+        })
+        .await
+        .context("AppRun APIへのリクエストに失敗しました")?;
         let status = res.status();
         let text = res
             .text()
@@ -226,14 +222,14 @@ impl AppRunClient {
     /// アプリケーションを全件取得する。
     pub async fn list_applications(&self) -> Result<Vec<Application>> {
         let mut out = Vec::new();
-        let mut page = 1usize;
-        loop {
+        for page in (1usize..).take(MAX_PAGES) {
             let query = [
                 ("page_num", page.to_string()),
                 ("page_size", PAGE_SIZE.to_string()),
             ];
-            let res: Paged<RawApplication> =
-                self.request(Method::GET, "/applications", &query, None).await?;
+            let res: Paged<RawApplication> = self
+                .request(Method::GET, "/applications", &query, None)
+                .await?;
             let total = res.total();
             let items = res.items();
             let received = items.len();
@@ -247,7 +243,6 @@ impl AppRunClient {
             if received == 0 || out.len() >= total {
                 break;
             }
-            page += 1;
         }
         Ok(out)
     }
@@ -453,6 +448,9 @@ mod tests {
             "error_code":"unauthorized","error_msg":"error-unauthorized"}"#;
         let message = format_api_error(StatusCode::UNAUTHORIZED, body);
         assert!(message.contains("error-unauthorized"), "{message}");
-        assert!(!message.contains("is_fatal"), "生JSONが混ざっている: {message}");
+        assert!(
+            !message.contains("is_fatal"),
+            "生JSONが混ざっている: {message}"
+        );
     }
 }

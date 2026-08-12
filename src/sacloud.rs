@@ -5,7 +5,6 @@
 //! 常に既定ゾーン `is1a` のエンドポイントを使う。
 
 use std::fmt;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
@@ -25,6 +24,8 @@ const API_SUFFIX: &str = "api/cloud/1.1";
 const REGISTRY_CLASS: &str = "containerregistry";
 /// Find の 1 ページあたりの取得件数。
 const PAGE_SIZE: usize = 100;
+/// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
+const MAX_PAGES: usize = 100;
 
 /// さくらのクラウドのリソース ID。API は文字列でも数値でも返してくるため両方受ける。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -185,6 +186,38 @@ where
     Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
+/// 数値のはずの項目を、文字列で返されても受け取る。
+///
+/// さくらの API は OpenAPI 上 integer と書かれていても実際には
+/// `"113701924793"` のように文字列で返すことがある。
+pub(crate) fn flexible_number<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + std::str::FromStr + TryFrom<i64> + TryFrom<u64>,
+{
+    use serde::de::Error as _;
+    let Some(value) = Option::<serde_json::Value>::deserialize(de)? else {
+        return Ok(T::default());
+    };
+    match value {
+        serde_json::Value::Null => Ok(T::default()),
+        serde_json::Value::String(s) if s.is_empty() => Ok(T::default()),
+        serde_json::Value::String(s) => s
+            .parse()
+            .map_err(|_| D::Error::custom(format!("数値として解釈できません: {s}"))),
+        serde_json::Value::Number(n) => {
+            if let Some(v) = n.as_i64() {
+                T::try_from(v).map_err(|_| D::Error::custom(format!("範囲外の数値です: {v}")))
+            } else if let Some(v) = n.as_u64() {
+                T::try_from(v).map_err(|_| D::Error::custom(format!("範囲外の数値です: {v}")))
+            } else {
+                Err(D::Error::custom(format!("整数ではありません: {n}")))
+            }
+        }
+        other => Err(D::Error::custom(format!("数値の型が不正です: {other}"))),
+    }
+}
+
 impl From<NakedRegistry> for ContainerRegistry {
     fn from(naked: NakedRegistry) -> Self {
         let setting = naked.settings.and_then(|s| s.container_registry);
@@ -197,7 +230,10 @@ impl From<NakedRegistry> for ContainerRegistry {
             availability: naked.availability,
             created_at: naked.created_at,
             modified_at: naked.modified_at,
-            access_level: setting.as_ref().map(|s| s.public.clone()).unwrap_or_default(),
+            access_level: setting
+                .as_ref()
+                .map(|s| s.public.clone())
+                .unwrap_or_default(),
             virtual_domain: setting.map(|s| s.virtual_domain).unwrap_or_default(),
             subdomain_label: status
                 .as_ref()
@@ -213,7 +249,11 @@ impl From<NakedRegistry> for ContainerRegistry {
 /// 各項目をいったん生の JSON で受けて、コンテナレジストリだけを取り出す。
 #[derive(Debug, Deserialize)]
 struct FindResponse {
-    #[serde(rename = "CommonServiceItems", default, deserialize_with = "null_as_default")]
+    #[serde(
+        rename = "CommonServiceItems",
+        default,
+        deserialize_with = "null_as_default"
+    )]
     items: Vec<serde_json::Value>,
     #[serde(rename = "Total", default)]
     total: usize,
@@ -283,11 +323,7 @@ pub struct SacloudClient {
 
 impl SacloudClient {
     pub fn new(creds: &ApiCredentials) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("sakura-tui/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("HTTPクライアントの初期化に失敗しました")?;
+        let http = crate::http::client()?;
         Ok(Self {
             http,
             token: creds.token.clone(),
@@ -302,6 +338,16 @@ impl SacloudClient {
     /// プロファイルに書かれた既定ゾーン（無ければ `is1a`）。
     pub fn default_zone(&self) -> &str {
         &self.default_zone
+    }
+
+    /// ゾーンに依存しないリソース向け（他モジュールから使う入口）。
+    pub(crate) async fn request_common<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        self.request_in_zone(GLOBAL_ZONE, method, path, body).await
     }
 
     /// ゾーンに依存しないリソース向け。常に `is1a` のエンドポイントを使う。
@@ -333,18 +379,18 @@ impl SacloudClient {
             url.set_query(Some(&serde_json::to_string(body)?));
         }
 
-        let mut req = self
-            .http
-            .request(method, url.clone())
-            .basic_auth(&self.token, Some(&self.secret));
-        if !send_as_query && let Some(body) = &body {
-            req = req.json(body);
-        }
-
-        let res = req
-            .send()
-            .await
-            .with_context(|| format!("APIリクエストに失敗しました: {url}"))?;
+        let res = crate::http::send_with_retry(&self.http, || {
+            let mut req = self
+                .http
+                .request(method.clone(), url.clone())
+                .basic_auth(&self.token, Some(&self.secret));
+            if !send_as_query && let Some(body) = &body {
+                req = req.json(body);
+            }
+            Ok(req.build()?)
+        })
+        .await
+        .context("さくらのクラウドAPIへのリクエストに失敗しました")?;
         let status = res.status();
         let text = res
             .text()
@@ -367,7 +413,7 @@ impl SacloudClient {
         let mut out = Vec::new();
         let mut from = 0usize;
         let mut fetched = 0usize;
-        loop {
+        for _ in 0..MAX_PAGES {
             let body = json!({
                 "Filter": { "Provider.Class": REGISTRY_CLASS },
                 "From": from,
@@ -600,7 +646,10 @@ mod tests {
             {"public": "none", "virtual_domain": "registry.example.com"}},
             "Status": {"registry_name": "x", "hostname": "x.sakuracr.jp"}}"#;
         let naked: NakedRegistry = serde_json::from_str(body).unwrap();
-        assert_eq!(ContainerRegistry::from(naked).host(), "registry.example.com");
+        assert_eq!(
+            ContainerRegistry::from(naked).host(),
+            "registry.example.com"
+        );
     }
 
     #[test]
@@ -743,5 +792,41 @@ mod class_tests {
     #[test]
     fn rejects_items_without_any_signal() {
         assert!(!is_container_registry(&serde_json::json!({"ID": "1"})));
+    }
+}
+
+#[cfg(test)]
+mod number_tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct Sample {
+        #[serde(default, deserialize_with = "flexible_number")]
+        value: i64,
+        #[serde(default, deserialize_with = "flexible_number")]
+        count: usize,
+    }
+
+    #[test]
+    fn accepts_numbers_and_numeric_strings() {
+        let from_number: Sample = serde_json::from_str(r#"{"value": 42, "count": 3}"#).unwrap();
+        assert_eq!((from_number.value, from_number.count), (42, 3));
+
+        let from_string: Sample =
+            serde_json::from_str(r#"{"value": "113701924793", "count": "7"}"#).unwrap();
+        assert_eq!((from_string.value, from_string.count), (113_701_924_793, 7));
+    }
+
+    #[test]
+    fn missing_null_and_empty_become_default() {
+        for body in [r#"{}"#, r#"{"value": null}"#, r#"{"value": ""}"#] {
+            let parsed: Sample = serde_json::from_str(body).unwrap();
+            assert_eq!(parsed.value, 0, "{body}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_numeric_strings() {
+        assert!(serde_json::from_str::<Sample>(r#"{"value": "abc"}"#).is_err());
     }
 }

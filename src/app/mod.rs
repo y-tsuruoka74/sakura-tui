@@ -13,20 +13,23 @@ use tokio::sync::mpsc::UnboundedSender;
 
 mod apprun;
 mod dedicated;
+mod observability;
 mod server;
 
 pub use apprun::{AppRunPane, AppRunView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
+pub use observability::{DnsView, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView};
 pub use server::ServerView;
 
-use crate::apprun::{Application, ApplicationDetail, AppRunClient, Traffic, Version};
-use crate::apprun_dedicated::{
-    self as ded, Cluster, DedicatedClient,
-};
+use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
+use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
+use crate::commonservice::{DnsZone, SimpleMonitor};
 use crate::config::{Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
+use crate::monitoring::{AlertHistory, AlertProject, AlertRule, MonitoringClient, Storage};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
+use crate::secretmanager::{Secret, Vault};
 
 /// 非同期処理の結果。
 #[derive(Debug)]
@@ -100,6 +103,39 @@ pub enum Message {
         cluster: String,
         result: Result<Vec<ded::Certificate>, String>,
     },
+    DnsZones(Result<Vec<DnsZone>, String>),
+    SimpleMonitors(Result<Vec<SimpleMonitor>, String>),
+    Vaults {
+        zone: String,
+        result: Result<Vec<Vault>, String>,
+    },
+    Secrets {
+        zone: String,
+        vault: String,
+        result: Result<Vec<Secret>, String>,
+    },
+    UnveiledSecret {
+        name: String,
+        result: Result<String, String>,
+    },
+    Projects {
+        zone: String,
+        result: Result<Vec<AlertProject>, String>,
+    },
+    AlertRules {
+        zone: String,
+        project: i64,
+        result: Result<Vec<AlertRule>, String>,
+    },
+    AlertHistories {
+        zone: String,
+        project: i64,
+        result: Result<Vec<AlertHistory>, String>,
+    },
+    Storages {
+        zone: String,
+        result: Result<Vec<Storage>, String>,
+    },
     Zones(Result<Vec<Zone>, String>),
     Servers {
         zone: String,
@@ -168,6 +204,18 @@ pub enum Pane {
     Certificates,
     // サーバー
     Servers,
+    // DNS / シンプル監視
+    DnsZones,
+    DnsRecords,
+    Monitors,
+    // シークレットマネージャ
+    Vaults,
+    Secrets,
+    // モニタリングスイート
+    Projects,
+    Rules,
+    Histories,
+    Storages,
     /// 絞り込み対象になるリストが無い（概要タブなど）。
     None,
 }
@@ -225,14 +273,22 @@ pub enum Service {
     AppRun,
     Dedicated,
     Server,
+    Dns,
+    SimpleMonitor,
+    Secrets,
+    Monitoring,
 }
 
 impl Service {
-    pub const ALL: [Service; 4] = [
+    pub const ALL: [Service; 8] = [
         Service::Registry,
         Service::AppRun,
         Service::Dedicated,
         Service::Server,
+        Service::Dns,
+        Service::SimpleMonitor,
+        Service::Secrets,
+        Service::Monitoring,
     ];
 
     pub fn title(self) -> &'static str {
@@ -241,12 +297,39 @@ impl Service {
             Service::AppRun => "AppRun",
             Service::Dedicated => "AppRun専有型",
             Service::Server => "サーバー",
+            Service::Dns => "DNS",
+            Service::SimpleMonitor => "シンプル監視",
+            Service::Secrets => "シークレットマネージャ",
+            Service::Monitoring => "モニタリングスイート",
         }
+    }
+
+    /// `--service` に渡せる短い名前。
+    pub fn arg_name(self) -> &'static str {
+        match self {
+            Service::Registry => "registry",
+            Service::AppRun => "apprun",
+            Service::Dedicated => "dedicated",
+            Service::Server => "server",
+            Service::Dns => "dns",
+            Service::SimpleMonitor => "monitor",
+            Service::Secrets => "secrets",
+            Service::Monitoring => "monitoring",
+        }
+    }
+
+    pub fn from_arg(name: &str) -> Option<Self> {
+        Service::ALL
+            .into_iter()
+            .find(|svc| svc.arg_name().eq_ignore_ascii_case(name))
     }
 
     /// ゾーンを選ぶ意味があるサービスか。
     pub fn is_zoned(self) -> bool {
-        matches!(self, Service::Server)
+        matches!(
+            self,
+            Service::Server | Service::Secrets | Service::Monitoring
+        )
     }
 }
 
@@ -412,6 +495,11 @@ pub enum ConfirmAction {
         app_name: String,
         version: String,
     },
+    UnveilSecret {
+        zone: String,
+        vault: String,
+        name: String,
+    },
     PowerAction {
         id: ResourceId,
         zone: String,
@@ -450,6 +538,10 @@ pub enum Overlay {
         zones: Vec<Zone>,
         index: usize,
     },
+    /// サービスの切り替え。
+    ServicePicker {
+        index: usize,
+    },
 }
 
 /// コンテナレジストリ画面が持つ状態。
@@ -476,6 +568,7 @@ pub struct App {
     sacloud: Arc<SacloudClient>,
     apprun_client: Arc<AppRunClient>,
     dedicated_client: Arc<DedicatedClient>,
+    monitoring_client: Arc<MonitoringClient>,
     tx: UnboundedSender<Message>,
     pub config: Config,
     pub registry_clients: RegistryClients,
@@ -501,6 +594,10 @@ pub struct App {
     pub dedicated: DedicatedView,
     /// サーバー画面の状態。
     pub server: ServerView,
+    pub dns: DnsView,
+    pub simple_monitor: SimpleMonitorView,
+    pub secrets: SecretsView,
+    pub monitoring: MonitoringView,
 
     /// ペインごとの絞り込み。
     pub filters: Filters,
@@ -513,18 +610,17 @@ pub struct App {
 
 impl App {
     pub fn new(
-        sacloud: Arc<SacloudClient>,
-        apprun_client: Arc<AppRunClient>,
-        dedicated_client: Arc<DedicatedClient>,
+        clients: crate::Clients,
         tx: UnboundedSender<Message>,
         config: Config,
         credential_source: CredentialSource,
     ) -> Self {
-        let default_zone = sacloud.default_zone().to_string();
+        let default_zone = clients.sacloud.default_zone().to_string();
         let mut app = Self {
-            sacloud,
-            apprun_client,
-            dedicated_client,
+            sacloud: clients.sacloud,
+            apprun_client: clients.apprun,
+            dedicated_client: clients.dedicated,
+            monitoring_client: clients.monitoring,
             tx,
             config,
             registry_clients: RegistryClients::default(),
@@ -541,6 +637,10 @@ impl App {
             apprun: AppRunView::default(),
             dedicated: DedicatedView::default(),
             server: ServerView::default(),
+            dns: DnsView::default(),
+            simple_monitor: SimpleMonitorView::default(),
+            secrets: SecretsView::default(),
+            monitoring: MonitoringView::default(),
             filters: Filters::default(),
             filtering: false,
             overlay: None,
@@ -583,7 +683,12 @@ impl App {
         Loadable::Ready(
             users
                 .into_iter()
-                .filter(|u| matches(self.filters.get(Pane::Users), &[&u.username, u.permission.as_str()]))
+                .filter(|u| {
+                    matches(
+                        self.filters.get(Pane::Users),
+                        &[&u.username, u.permission.as_str()],
+                    )
+                })
                 .collect(),
         )
     }
@@ -672,6 +777,27 @@ impl App {
             Service::AppRun => self.apprun_active_pane(),
             Service::Dedicated => self.dedicated_active_pane(),
             Service::Server => Pane::Servers,
+            Service::Dns => {
+                // レコードを選んでいればレコード側、そうでなければゾーン側。
+                if self.dns.record_state.selected().is_some() {
+                    Pane::DnsRecords
+                } else {
+                    Pane::DnsZones
+                }
+            }
+            Service::SimpleMonitor => Pane::Monitors,
+            Service::Secrets => {
+                if self.secrets.secret_state.selected().is_some() {
+                    Pane::Secrets
+                } else {
+                    Pane::Vaults
+                }
+            }
+            Service::Monitoring => match self.monitoring.tab {
+                MonitoringTab::Rules => Pane::Rules,
+                MonitoringTab::Histories => Pane::Histories,
+                MonitoringTab::Storages => Pane::Storages,
+            },
         }
     }
 
@@ -722,7 +848,9 @@ impl App {
         let Some(client) = self.registry_clients.get(&host) else {
             return;
         };
-        self.registry.repositories.insert(host.clone(), Loadable::Loading);
+        self.registry
+            .repositories
+            .insert(host.clone(), Loadable::Loading);
         self.inflight += 1;
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -735,7 +863,8 @@ impl App {
         let Some(client) = self.registry_clients.get(&host) else {
             return;
         };
-        self.registry.tags
+        self.registry
+            .tags
             .insert((host.clone(), repository.clone()), Loadable::Loading);
         self.inflight += 1;
         let tx = self.tx.clone();
@@ -754,14 +883,13 @@ impl App {
         let Some(client) = self.registry_clients.get(&key.0) else {
             return;
         };
-        self.registry.tag_details.insert(key.clone(), Loadable::Loading);
+        self.registry
+            .tag_details
+            .insert(key.clone(), Loadable::Loading);
         self.inflight += 1;
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = client
-                .tag_detail(&key.1, &key.2)
-                .await
-                .map_err(fmt_error);
+            let result = client.tag_detail(&key.1, &key.2).await.map_err(fmt_error);
             let _ = tx.send(Message::TagDetails { key, result });
         });
     }
@@ -773,6 +901,10 @@ impl App {
             Service::AppRun => self.apprun_ensure_loaded(),
             Service::Dedicated => self.dedicated_ensure_loaded(),
             Service::Server => self.server_ensure_loaded(),
+            Service::Dns => self.dns_ensure_loaded(),
+            Service::SimpleMonitor => self.monitor_ensure_loaded(),
+            Service::Secrets => self.secrets_ensure_loaded(),
+            Service::Monitoring => self.monitoring_ensure_loaded(),
         }
     }
 
@@ -797,7 +929,12 @@ impl App {
                 self.try_auto_login(&host);
             }
             Tab::Images => {
-                if self.registry.repositories.get(&host).is_none_or(Loadable::is_idle) {
+                if self
+                    .registry
+                    .repositories
+                    .get(&host)
+                    .is_none_or(Loadable::is_idle)
+                {
                     self.load_repositories(host.clone());
                 }
                 if let Some(repository) = self.selected_repository() {
@@ -808,7 +945,11 @@ impl App {
                 }
                 // 詳細は選択中のタグの分だけ取る。
                 if let Some(key) = self.selected_tag_key()
-                    && self.registry.tag_details.get(&key).is_none_or(Loadable::is_idle)
+                    && self
+                        .registry
+                        .tag_details
+                        .get(&key)
+                        .is_none_or(Loadable::is_idle)
                 {
                     self.load_tag_detail(key);
                 }
@@ -840,11 +981,14 @@ impl App {
         };
         match self.registry_clients.insert(host, login) {
             Ok(_) => {
-                self.registry.repositories.insert(host.to_string(), Loadable::Idle);
+                self.registry
+                    .repositories
+                    .insert(host.to_string(), Loadable::Idle);
                 self.load_repositories(host.to_string());
             }
             Err(err) => {
-                self.registry.repositories
+                self.registry
+                    .repositories
                     .insert(host.to_string(), Loadable::Failed(fmt_error(err)));
             }
         }
@@ -874,8 +1018,11 @@ impl App {
             Message::Users { id, result } => {
                 match result {
                     Ok(users) => {
-                        self.registry.user_state
-                            .select(if users.is_empty() { None } else { Some(0) });
+                        self.registry.user_state.select(if users.is_empty() {
+                            None
+                        } else {
+                            Some(0)
+                        });
                         self.registry.users.insert(id, Loadable::Ready(users));
                     }
                     Err(err) => {
@@ -887,14 +1034,21 @@ impl App {
             Message::Repositories { host, result } => {
                 match result {
                     Ok(repos) => {
-                        self.registry.repository_state
-                            .select(if repos.is_empty() { None } else { Some(0) });
-                        self.registry.repositories.insert(host, Loadable::Ready(repos));
+                        self.registry.repository_state.select(if repos.is_empty() {
+                            None
+                        } else {
+                            Some(0)
+                        });
+                        self.registry
+                            .repositories
+                            .insert(host, Loadable::Ready(repos));
                         self.ensure_loaded();
                     }
                     Err(err) => {
                         self.set_status(err.clone(), StatusKind::Error);
-                        self.registry.repositories.insert(host, Loadable::Failed(err));
+                        self.registry
+                            .repositories
+                            .insert(host, Loadable::Failed(err));
                     }
                 };
             }
@@ -906,8 +1060,11 @@ impl App {
                 let key = (host, repository);
                 match result {
                     Ok(tags) => {
-                        self.registry.tag_state
-                            .select(if tags.is_empty() { None } else { Some(0) });
+                        self.registry.tag_state.select(if tags.is_empty() {
+                            None
+                        } else {
+                            Some(0)
+                        });
                         self.registry.tags.insert(key, Loadable::Ready(tags));
                     }
                     Err(err) => {
@@ -946,7 +1103,9 @@ impl App {
                     } else {
                         self.set_status(format!("{host} にログインしました"), StatusKind::Success);
                     }
-                    self.registry.repositories.insert(host.clone(), Loadable::Idle);
+                    self.registry
+                        .repositories
+                        .insert(host.clone(), Loadable::Idle);
                     self.load_repositories(host);
                 }
                 Err(err) => {
@@ -1065,6 +1224,80 @@ impl App {
                 };
                 self.dedicated.worker_nodes.insert((cluster, asg), loadable);
             }
+            Message::DnsZones(result) => {
+                self.dns.zones = self.store_result(result);
+                self.dns.zone_state.select(None);
+                self.dns.record_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::SimpleMonitors(result) => {
+                self.simple_monitor.monitors = self.store_result(result);
+                self.simple_monitor.monitor_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::Vaults { zone, result } => {
+                let loadable = self.store_result(result);
+                self.secrets.vaults.insert(zone, loadable);
+                self.secrets.vault_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::Secrets {
+                zone,
+                vault,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.secrets.secrets.insert((zone, vault), loadable);
+                self.ensure_loaded();
+            }
+            Message::UnveiledSecret { name, result } => match result {
+                Ok(value) => {
+                    // 値はステータス行には出さず、閉じられるダイアログにだけ出す。
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{name} の値"),
+                        body: value,
+                        kind: StatusKind::Info,
+                    });
+                    self.set_status("値を表示しました", StatusKind::Success);
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "値を取得できませんでした".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::Projects { zone, result } => {
+                let loadable = self.store_result(result);
+                self.monitoring.projects.insert(zone, loadable);
+                self.monitoring.project_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::AlertRules {
+                zone,
+                project,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.monitoring.rules.insert((zone, project), loadable);
+                self.ensure_loaded();
+            }
+            Message::AlertHistories {
+                zone,
+                project,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.monitoring.histories.insert((zone, project), loadable);
+                self.ensure_loaded();
+            }
+            Message::Storages { zone, result } => {
+                let loadable = self.store_result(result);
+                self.monitoring.storages.insert(zone, loadable);
+                self.ensure_loaded();
+            }
             Message::Zones(Ok(zones)) => self.zones = Loadable::Ready(zones),
             Message::Zones(Err(err)) => {
                 self.zones = Loadable::Failed(err.clone());
@@ -1075,7 +1308,9 @@ impl App {
                     Ok(servers) => {
                         let count = servers.len();
                         self.server.server_state.select(None);
-                        self.server.servers.insert(zone.clone(), Loadable::Ready(servers));
+                        self.server
+                            .servers
+                            .insert(zone.clone(), Loadable::Ready(servers));
                         if zone == self.zone {
                             self.set_status(
                                 format!("{zone} のサーバー {count} 件"),
@@ -1090,7 +1325,11 @@ impl App {
                     }
                 };
             }
-            Message::ServerAction { zone, label, result } => match result {
+            Message::ServerAction {
+                zone,
+                label,
+                result,
+            } => match result {
                 Ok(()) => {
                     self.set_status(format!("{label}しました"), StatusKind::Success);
                     // 電源状態が変わるので取り直す。
@@ -1128,7 +1367,8 @@ impl App {
                 Ok(()) => {
                     self.set_status(format!("{label}しました"), StatusKind::Success);
                     // 同じダイジェストの他のタグも消えているので一覧ごと取り直す。
-                    self.registry.tag_details
+                    self.registry
+                        .tag_details
                         .retain(|(h, r, _), _| h != &host || r != &repository);
                     self.registry.tag_state.select(None);
                     self.load_tags(host, repository);
@@ -1203,6 +1443,10 @@ impl App {
             Service::AppRun => self.on_key_apprun(key),
             Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
+            Service::Secrets => self.on_key_secrets(key),
+            Service::Monitoring => self.on_key_monitoring(key),
+            // DNS とシンプル監視は共通キーだけで足りる。
+            Service::Dns | Service::SimpleMonitor => {}
         }
     }
 
@@ -1211,8 +1455,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
-            KeyCode::Char('s') => self.cycle_service(1),
-            KeyCode::Char('S') => self.cycle_service(-1),
+            KeyCode::Char('s') => self.open_service_picker(),
+            KeyCode::Char('S') => self.cycle_service(1),
             KeyCode::Char('z') => self.open_zone_picker(),
             KeyCode::Char('p') => self.open_profile_picker(),
             KeyCode::Char('w') => self.toggle_mode(),
@@ -1269,6 +1513,24 @@ impl App {
 
     // --- サービスの切り替え ---
 
+    fn open_service_picker(&mut self) {
+        let index = Service::ALL
+            .iter()
+            .position(|svc| *svc == self.service)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::ServicePicker { index });
+    }
+
+    fn switch_service(&mut self, service: Service) {
+        if service == self.service {
+            return;
+        }
+        self.service = service;
+        self.filtering = false;
+        self.set_status(service.title(), StatusKind::Info);
+        self.ensure_loaded();
+    }
+
     fn cycle_service(&mut self, delta: i32) {
         let current = Service::ALL
             .iter()
@@ -1321,7 +1583,10 @@ impl App {
         }
         self.zone = zone;
         self.server.server_state.select(None);
-        self.set_status(format!("ゾーンを {} に切り替えました", self.zone), StatusKind::Info);
+        self.set_status(
+            format!("ゾーンを {} に切り替えました", self.zone),
+            StatusKind::Info,
+        );
         self.ensure_loaded();
     }
 
@@ -1429,11 +1694,21 @@ impl App {
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
             Pane::Clusters => self.visible_clusters().len(),
-            Pane::DedicatedApplications => {
-                self.visible_dedicated_applications().ready().map_or(0, Vec::len)
-            }
+            Pane::DedicatedApplications => self
+                .visible_dedicated_applications()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::ScalingGroups => self.visible_scaling_groups().ready().map_or(0, Vec::len),
             Pane::Certificates => self.visible_certificates().ready().map_or(0, Vec::len),
+            Pane::DnsZones => self.visible_dns_zones().len(),
+            Pane::DnsRecords => self.visible_dns_records().len(),
+            Pane::Monitors => self.visible_monitors().len(),
+            Pane::Vaults => self.visible_vaults().len(),
+            Pane::Secrets => self.visible_secrets().ready().map_or(0, Vec::len),
+            Pane::Projects => self.visible_projects().len(),
+            Pane::Rules => self.visible_rules().ready().map_or(0, Vec::len),
+            Pane::Histories => self.visible_histories().ready().map_or(0, Vec::len),
+            Pane::Storages => self.visible_storages().ready().map_or(0, Vec::len),
             Pane::None => 0,
         }
     }
@@ -1451,6 +1726,15 @@ impl App {
             Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
             Pane::ScalingGroups => Some(&mut self.dedicated.scaling_group_state),
             Pane::Certificates => Some(&mut self.dedicated.certificate_state),
+            Pane::DnsZones => Some(&mut self.dns.zone_state),
+            Pane::DnsRecords => Some(&mut self.dns.record_state),
+            Pane::Monitors => Some(&mut self.simple_monitor.monitor_state),
+            Pane::Vaults => Some(&mut self.secrets.vault_state),
+            Pane::Secrets => Some(&mut self.secrets.secret_state),
+            Pane::Projects => Some(&mut self.monitoring.project_state),
+            Pane::Rules => Some(&mut self.monitoring.rule_state),
+            Pane::Histories => Some(&mut self.monitoring.history_state),
+            Pane::Storages => Some(&mut self.monitoring.storage_state),
             Pane::None => None,
         }
     }
@@ -1494,14 +1778,27 @@ impl App {
                 .filter(|url| !url.is_empty()),
             Pane::Versions => self.selected_version().map(|version| version.name),
             // サーバーは SSH 先として使える IP を優先する。
+            Pane::DnsZones => self.selected_dns_zone().map(|z| z.name.clone()),
+            Pane::DnsRecords => {
+                let zone = self.selected_dns_zone()?.name.clone();
+                let index = self.dns.record_state.selected()?;
+                self.visible_dns_records().get(index).map(|r| r.fqdn(&zone))
+            }
+            Pane::Monitors => self.selected_monitor().map(SimpleMonitor::summary),
+            Pane::Vaults => self.selected_vault().map(|v| v.name),
+            // 値はコピーしない。名前だけ。
+            Pane::Secrets => self.selected_secret().map(|s| s.name),
+            Pane::Projects => self.selected_project().map(|p| p.name),
+            Pane::Rules | Pane::Histories | Pane::Storages => None,
             Pane::Clusters => self.selected_cluster().map(|c| c.id.clone()),
-            Pane::DedicatedApplications => self
-                .visible_dedicated_applications()
-                .ready()
-                .and_then(|apps| {
-                    apps.get(self.dedicated.application_state.selected()?)
-                        .map(|app| app.name.clone())
-                }),
+            Pane::DedicatedApplications => {
+                self.visible_dedicated_applications()
+                    .ready()
+                    .and_then(|apps| {
+                        apps.get(self.dedicated.application_state.selected()?)
+                            .map(|app| app.name.clone())
+                    })
+            }
             Pane::ScalingGroups => self.selected_scaling_group().map(|g| g.id),
             Pane::Certificates => self.visible_certificates().ready().and_then(|certs| {
                 certs
@@ -1547,7 +1844,11 @@ impl App {
             Ok(credentials) => credentials,
             Err(err) => {
                 self.set_status(
-                    format!("{} に切り替えられません: {}", source.label(), fmt_error(err)),
+                    format!(
+                        "{} に切り替えられません: {}",
+                        source.label(),
+                        fmt_error(err)
+                    ),
                     StatusKind::Error,
                 );
                 return;
@@ -1584,6 +1885,27 @@ impl App {
             Service::AppRun => self.apprun_refresh(),
             Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
+            // 閲覧のみのサービスは、該当キャッシュを捨てて読み直すだけ。
+            Service::Dns => {
+                self.dns.zones = Loadable::Idle;
+                self.dns_ensure_loaded();
+            }
+            Service::SimpleMonitor => {
+                self.simple_monitor.monitors = Loadable::Idle;
+                self.monitor_ensure_loaded();
+            }
+            Service::Secrets => {
+                self.secrets.vaults.remove(&self.zone);
+                self.secrets.secrets.clear();
+                self.secrets_ensure_loaded();
+            }
+            Service::Monitoring => {
+                self.monitoring.projects.remove(&self.zone);
+                self.monitoring.rules.clear();
+                self.monitoring.histories.clear();
+                self.monitoring.storages.remove(&self.zone);
+                self.monitoring_ensure_loaded();
+            }
         }
     }
 
@@ -1619,6 +1941,7 @@ impl App {
         self.apprun_invalidate();
         self.dedicated_invalidate();
         self.server_invalidate();
+        self.observability_invalidate();
     }
 
     fn set_tab(&mut self, tab: Tab) {
@@ -1627,7 +1950,10 @@ impl App {
     }
 
     fn cycle_tab(&mut self, delta: i32) {
-        let current = Tab::ALL.iter().position(|t| *t == self.registry.tab).unwrap_or(0) as i32;
+        let current = Tab::ALL
+            .iter()
+            .position(|t| *t == self.registry.tab)
+            .unwrap_or(0) as i32;
         let len = Tab::ALL.len() as i32;
         self.registry.tab = Tab::ALL[(current + delta).rem_euclid(len) as usize];
         self.registry.focus = Focus::Detail;
@@ -1697,10 +2023,24 @@ impl App {
         if pane == Pane::ScalingGroups {
             self.dedicated.worker_node_state.select(None);
         }
+        if pane == Pane::DnsZones {
+            self.dns.record_state.select(None);
+        }
+        if pane == Pane::Vaults {
+            self.secrets.secret_state.select(None);
+        }
+        if pane == Pane::Projects {
+            self.monitoring.rule_state.select(None);
+            self.monitoring.history_state.select(None);
+        }
         if self.service != Service::Registry {
             return;
         }
-        match (self.registry.focus, self.registry.tab, self.registry.image_pane) {
+        match (
+            self.registry.focus,
+            self.registry.tab,
+            self.registry.image_pane,
+        ) {
             (Focus::Registries, _, _) => {
                 self.registry.user_state.select(None);
                 self.registry.repository_state.select(None);
@@ -1907,6 +2247,7 @@ impl App {
                 app_name,
                 version,
             } => self.run_route_traffic(application, app_name, version),
+            ConfirmAction::UnveilSecret { zone, vault, name } => self.run_unveil(zone, vault, name),
             ConfirmAction::PowerAction {
                 id,
                 zone,
@@ -1930,7 +2271,10 @@ impl App {
                         ),
                     }
                 } else {
-                    self.set_status(format!("{host} からログアウトしました"), StatusKind::Success);
+                    self.set_status(
+                        format!("{host} からログアウトしました"),
+                        StatusKind::Success,
+                    );
                 }
             }
         }
@@ -2111,7 +2455,10 @@ impl App {
         self.registry.tab = Tab::Images;
         self.registry.focus = Focus::Detail;
         self.overlay = Some(Overlay::Login(LoginForm {
-            username: saved.as_ref().map(|l| l.username.clone()).unwrap_or_default(),
+            username: saved
+                .as_ref()
+                .map(|l| l.username.clone())
+                .unwrap_or_default(),
             password: String::new(),
             save: saved.is_some(),
             host,
@@ -2141,7 +2488,10 @@ impl App {
 
     fn submit_login(&mut self, form: LoginForm) {
         if form.username.is_empty() || form.password.is_empty() {
-            self.set_status("ユーザー名とパスワードを入力してください", StatusKind::Error);
+            self.set_status(
+                "ユーザー名とパスワードを入力してください",
+                StatusKind::Error,
+            );
             self.overlay = Some(Overlay::Login(form));
             return;
         }
@@ -2258,6 +2608,19 @@ impl App {
                     edit_registry_form(&mut form, key);
                     self.overlay = Some(Overlay::RegistryForm(form));
                 }
+            },
+            Overlay::ServicePicker { mut index } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                KeyCode::Enter => self.switch_service(Service::ALL[index]),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    index = (index + 1) % Service::ALL.len();
+                    self.overlay = Some(Overlay::ServicePicker { index });
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    index = (index + Service::ALL.len() - 1) % Service::ALL.len();
+                    self.overlay = Some(Overlay::ServicePicker { index });
+                }
+                _ => self.overlay = Some(Overlay::ServicePicker { index }),
             },
             Overlay::ZonePicker { zones, mut index } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {}

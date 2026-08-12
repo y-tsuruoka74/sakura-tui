@@ -67,20 +67,23 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 })
                 .collect();
 
-            let table = Table::new(rows, [Constraint::Percentage(45), Constraint::Percentage(55)])
-                .header(
-                    Row::new(vec!["名前", "ホスト"])
-                        .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
-                )
-                .row_highlight_style(if focused {
-                    Style::default()
-                        .fg(SAKURA)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                } else {
-                    Style::default().add_modifier(Modifier::BOLD)
-                })
-                .highlight_symbol("")
-                .block(block);
+            let table = Table::new(
+                rows,
+                [Constraint::Percentage(45), Constraint::Percentage(55)],
+            )
+            .header(
+                Row::new(vec!["名前", "ホスト"])
+                    .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+            )
+            .row_highlight_style(if focused {
+                Style::default()
+                    .fg(SAKURA)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            })
+            .highlight_symbol("")
+            .block(block);
             frame.render_stateful_widget(table, area, &mut app.registry.registry_state);
         }
     }

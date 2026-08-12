@@ -61,8 +61,11 @@ fn credentials_from_env() -> Option<ApiCredentials> {
 }
 
 /// 環境変数 → usacloud プロファイルの順で API 認証情報を探す。
-pub fn load_api_credentials() -> Result<ApiCredentials> {
-    if let Some(creds) = credentials_from_env() {
+///
+/// `prefer_profile` が真（`--profile` 指定時）なら環境変数を飛ばして
+/// プロファイルを見る。明示指定を環境変数に潰されないようにするため。
+pub fn load_api_credentials(prefer_profile: bool) -> Result<ApiCredentials> {
+    if !prefer_profile && let Some(creds) = credentials_from_env() {
         return Ok(creds);
     }
 
@@ -96,7 +99,11 @@ pub fn available_credential_sources() -> Vec<CredentialSource> {
     if credentials_from_env().is_some() {
         sources.push(CredentialSource::Env);
     }
-    sources.extend(list_usacloud_profiles().into_iter().map(CredentialSource::Profile));
+    sources.extend(
+        list_usacloud_profiles()
+            .into_iter()
+            .map(CredentialSource::Profile),
+    );
     sources
 }
 

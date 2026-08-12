@@ -12,6 +12,8 @@ use crate::sacloud::{ResourceId, SacloudClient, null_as_default};
 
 /// 1 ページあたりの取得件数。
 const PAGE_SIZE: usize = 100;
+/// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
+const MAX_PAGES: usize = 100;
 
 /// ゾーン 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +200,11 @@ struct NakedInstance {
 struct NakedInterface {
     #[serde(rename = "IPAddress", default, deserialize_with = "null_as_default")]
     ip_address: String,
-    #[serde(rename = "UserIPAddress", default, deserialize_with = "null_as_default")]
+    #[serde(
+        rename = "UserIPAddress",
+        default,
+        deserialize_with = "null_as_default"
+    )]
     user_ip_address: String,
 }
 
@@ -264,7 +270,7 @@ impl SacloudClient {
     pub async fn list_servers(&self, zone: &str) -> Result<Vec<Server>> {
         let mut out = Vec::new();
         let mut from = 0usize;
-        loop {
+        for _ in 0..MAX_PAGES {
             let body = json!({
                 "From": from,
                 "Count": PAGE_SIZE,

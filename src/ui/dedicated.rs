@@ -126,7 +126,10 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let mut lines = vec![field("名前", &cluster.name), field("クラスタID", &cluster.id)];
+    let mut lines = vec![
+        field("名前", &cluster.name),
+        field("クラスタID", &cluster.id),
+    ];
     if let Some(created) = cluster.created {
         lines.push(field("作成日時", &format_unix(created)));
     }
@@ -164,7 +167,9 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(block),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
         area,
     );
 }
@@ -172,12 +177,17 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_applications(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.dedicated.focus == DedicatedFocus::Detail;
     let applications = app.visible_dedicated_applications();
-    let block = pane_block(" アプリケーション ", applications.ready().map_or(0, Vec::len), focused);
+    let block = pane_block(
+        " アプリケーション ",
+        applications.ready().map_or(0, Vec::len),
+        focused,
+    );
 
     match &applications {
-        Loadable::Idle | Loadable::Loading => {
-            frame.render_widget(placeholder("読み込み中…").block(block), area)
+        Loadable::Idle => {
+            frame.render_widget(placeholder("クラスタを選択してください").block(block), area)
         }
+        Loadable::Loading => frame.render_widget(placeholder("読み込み中…").block(block), area),
         Loadable::Failed(err) => frame.render_widget(error_paragraph(err).block(block), area),
         Loadable::Ready(items) if items.is_empty() => frame.render_widget(
             placeholder("このクラスタにアプリケーションがありません").block(block),
@@ -246,12 +256,14 @@ fn draw_scaling_groups(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 
     match &groups {
-        Loadable::Idle | Loadable::Loading => {
+        Loadable::Idle => frame.render_widget(
+            placeholder("クラスタを選択してください").block(block),
+            chunks[0],
+        ),
+        Loadable::Loading => {
             frame.render_widget(placeholder("読み込み中…").block(block), chunks[0])
         }
-        Loadable::Failed(err) => {
-            frame.render_widget(error_paragraph(err).block(block), chunks[0])
-        }
+        Loadable::Failed(err) => frame.render_widget(error_paragraph(err).block(block), chunks[0]),
         Loadable::Ready(items) if items.is_empty() => {
             frame.render_widget(placeholder("ASG がありません").block(block), chunks[0])
         }
@@ -270,10 +282,7 @@ fn draw_scaling_groups(frame: &mut Frame, area: Rect, app: &mut App) {
                         } else {
                             group.name.clone()
                         }),
-                        Cell::from(Span::styled(
-                            group.zone.clone(),
-                            Style::default().fg(DIM),
-                        )),
+                        Cell::from(Span::styled(group.zone.clone(), Style::default().fg(DIM))),
                         Cell::from(Span::styled(scale, Style::default().fg(DIM))),
                         Cell::from(Span::styled(
                             group
@@ -321,9 +330,7 @@ fn draw_worker_nodes(frame: &mut Frame, area: Rect, app: &mut App) {
         Loadable::Idle => {
             frame.render_widget(placeholder("ASG を選択してください").block(block), area)
         }
-        Loadable::Loading => {
-            frame.render_widget(placeholder("読み込み中…").block(block), area)
-        }
+        Loadable::Loading => frame.render_widget(placeholder("読み込み中…").block(block), area),
         Loadable::Failed(err) => frame.render_widget(error_paragraph(err).block(block), area),
         Loadable::Ready(items) if items.is_empty() => {
             frame.render_widget(placeholder("ワーカーノードがありません").block(block), area)
@@ -384,12 +391,17 @@ fn draw_worker_nodes(frame: &mut Frame, area: Rect, app: &mut App) {
 fn draw_certificates(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.dedicated.focus == DedicatedFocus::Detail;
     let certificates = app.visible_certificates();
-    let block = pane_block(" 証明書 ", certificates.ready().map_or(0, Vec::len), focused);
+    let block = pane_block(
+        " 証明書 ",
+        certificates.ready().map_or(0, Vec::len),
+        focused,
+    );
 
     match &certificates {
-        Loadable::Idle | Loadable::Loading => {
-            frame.render_widget(placeholder("読み込み中…").block(block), area)
+        Loadable::Idle => {
+            frame.render_widget(placeholder("クラスタを選択してください").block(block), area)
         }
+        Loadable::Loading => frame.render_widget(placeholder("読み込み中…").block(block), area),
         Loadable::Failed(err) => frame.render_widget(error_paragraph(err).block(block), area),
         Loadable::Ready(items) if items.is_empty() => {
             frame.render_widget(placeholder("証明書がありません").block(block), area)
