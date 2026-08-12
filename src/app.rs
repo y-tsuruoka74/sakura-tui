@@ -11,8 +11,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::config::{Config, RegistryLogin};
-use crate::registry::{RegistryClients, TagInfo};
+use crate::config::{Config, CredentialSource, RegistryLogin};
+use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 
 /// 非同期処理の結果。
@@ -32,6 +32,10 @@ pub enum Message {
         repository: String,
         result: Result<Vec<TagInfo>, String>,
     },
+    TagDetails {
+        key: TagKey,
+        result: Result<TagDetail, String>,
+    },
     LoginVerified {
         host: String,
         login: RegistryLogin,
@@ -40,6 +44,18 @@ pub enum Message {
     },
     UserAction {
         id: ResourceId,
+        label: String,
+        result: Result<(), String>,
+    },
+    /// レジストリ自体への変更（作成・更新・削除）。
+    RegistryAction {
+        label: String,
+        result: Result<(), String>,
+    },
+    /// イメージ（マニフェスト）の削除。
+    TagAction {
+        host: String,
+        repository: String,
         label: String,
         result: Result<(), String>,
     },
@@ -67,6 +83,62 @@ impl<T> Loadable<T> {
     }
 }
 
+/// タグ詳細キャッシュのキー（ホスト・リポジトリ・タグ）。
+pub type TagKey = (String, String, String);
+
+/// 絞り込みの対象になるリスト。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    Registries,
+    Users,
+    Repositories,
+    Tags,
+    /// 絞り込み対象になるリストが無い（概要タブなど）。
+    None,
+}
+
+/// ペインごとの絞り込み文字列。
+#[derive(Debug, Clone, Default)]
+pub struct Filters {
+    pub registries: String,
+    pub users: String,
+    pub repositories: String,
+    pub tags: String,
+}
+
+impl Filters {
+    fn get(&self, pane: Pane) -> &str {
+        match pane {
+            Pane::Registries => &self.registries,
+            Pane::Users => &self.users,
+            Pane::Repositories => &self.repositories,
+            Pane::Tags => &self.tags,
+            Pane::None => "",
+        }
+    }
+
+    fn get_mut(&mut self, pane: Pane) -> Option<&mut String> {
+        match pane {
+            Pane::Registries => Some(&mut self.registries),
+            Pane::Users => Some(&mut self.users),
+            Pane::Repositories => Some(&mut self.repositories),
+            Pane::Tags => Some(&mut self.tags),
+            Pane::None => None,
+        }
+    }
+}
+
+/// 絞り込み文字列に一致するか（部分一致・大文字小文字を無視）。
+fn matches(filter: &str, fields: &[&str]) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let needle = filter.to_lowercase();
+    fields
+        .iter()
+        .any(|field| field.to_lowercase().contains(&needle))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Overview,
@@ -82,6 +154,29 @@ impl Tab {
             Tab::Overview => "概要",
             Tab::Users => "ユーザー",
             Tab::Images => "イメージ",
+        }
+    }
+}
+
+/// 操作モード。既定は読み取り専用で、書き込み操作は明示的に切り替えてから行う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    ReadOnly,
+    Write,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::ReadOnly => "読取専用",
+            Mode::Write => "書込可",
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            Mode::ReadOnly => Mode::Write,
+            Mode::Write => Mode::ReadOnly,
         }
     }
 }
@@ -146,6 +241,58 @@ impl LoginForm {
     pub const FIELDS: usize = 3;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryFormMode {
+    Create,
+    Edit,
+}
+
+/// レジストリの作成・編集フォーム。
+#[derive(Debug, Clone)]
+pub struct RegistryForm {
+    pub mode: RegistryFormMode,
+    /// 編集時の対象。作成時は `None`。
+    pub target: Option<ContainerRegistry>,
+    pub name: String,
+    /// `<subdomain>.sakuracr.jp` の左側。作成時のみ指定できる。
+    pub subdomain: String,
+    pub description: String,
+    pub virtual_domain: String,
+    pub field: usize,
+}
+
+impl RegistryForm {
+    /// モードごとの入力欄（ラベル, 値の取り出し）。
+    pub fn labels(&self) -> &'static [&'static str] {
+        match self.mode {
+            RegistryFormMode::Create => &["名前", "サブドメイン", "説明"],
+            RegistryFormMode::Edit => &["名前", "説明", "独自ドメイン"],
+        }
+    }
+
+    pub fn value(&self, index: usize) -> &str {
+        match (self.mode, index) {
+            (RegistryFormMode::Create, 0) | (RegistryFormMode::Edit, 0) => &self.name,
+            (RegistryFormMode::Create, 1) => &self.subdomain,
+            (RegistryFormMode::Create, 2) | (RegistryFormMode::Edit, 1) => &self.description,
+            (RegistryFormMode::Edit, 2) => &self.virtual_domain,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match (self.mode, index) {
+            (RegistryFormMode::Create, 0) | (RegistryFormMode::Edit, 0) => Some(&mut self.name),
+            (RegistryFormMode::Create, 1) => Some(&mut self.subdomain),
+            (RegistryFormMode::Create, 2) | (RegistryFormMode::Edit, 1) => {
+                Some(&mut self.description)
+            }
+            (RegistryFormMode::Edit, 2) => Some(&mut self.virtual_domain),
+            _ => None,
+        }
+    }
+}
+
 /// 確認ダイアログで実行する操作。
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -155,6 +302,16 @@ pub enum ConfirmAction {
     },
     ForgetLogin {
         host: String,
+    },
+    DeleteRegistry {
+        id: ResourceId,
+        name: String,
+    },
+    DeleteTag {
+        host: String,
+        repository: String,
+        tag: String,
+        digest: String,
     },
 }
 
@@ -170,10 +327,19 @@ pub enum Overlay {
     Confirm {
         title: String,
         body: String,
+        /// 取り返しがつかない操作では、ここに入れた文字列の入力を要求する。
+        verify: Option<String>,
+        typed: String,
         action: ConfirmAction,
     },
     UserForm(UserForm),
+    RegistryForm(RegistryForm),
     Login(LoginForm),
+    /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
+    ProfilePicker {
+        sources: Vec<CredentialSource>,
+        index: usize,
+    },
 }
 
 pub struct App {
@@ -181,8 +347,9 @@ pub struct App {
     tx: UnboundedSender<Message>,
     pub config: Config,
     pub registry_clients: RegistryClients,
-    pub credential_source: String,
+    pub credential_source: CredentialSource,
 
+    pub mode: Mode,
     pub should_quit: bool,
     /// 実行中の非同期リクエスト数（スピナー表示用）。
     pub inflight: usize,
@@ -202,6 +369,11 @@ pub struct App {
     pub repository_state: ListState,
     pub tags: HashMap<(String, String), Loadable<Vec<TagInfo>>>,
     pub tag_state: ListState,
+    pub tag_details: HashMap<TagKey, Loadable<TagDetail>>,
+
+    pub filters: Filters,
+    /// 絞り込み文字列を編集中かどうか。
+    pub filtering: bool,
 
     pub overlay: Option<Overlay>,
     pub status: Option<(String, StatusKind)>,
@@ -212,7 +384,7 @@ impl App {
         sacloud: Arc<SacloudClient>,
         tx: UnboundedSender<Message>,
         config: Config,
-        credential_source: String,
+        credential_source: CredentialSource,
     ) -> Self {
         let mut app = Self {
             sacloud,
@@ -220,6 +392,8 @@ impl App {
             config,
             registry_clients: RegistryClients::default(),
             credential_source,
+            // 事故を防ぐため、既定は読み取り専用。
+            mode: Mode::ReadOnly,
             should_quit: false,
             inflight: 0,
             tick: 0,
@@ -234,6 +408,9 @@ impl App {
             repository_state: ListState::default(),
             tags: HashMap::new(),
             tag_state: ListState::default(),
+            tag_details: HashMap::new(),
+            filters: Filters::default(),
+            filtering: false,
             overlay: None,
             status: None,
         };
@@ -241,49 +418,110 @@ impl App {
         app
     }
 
-    // --- 選択中の要素 ---
+    // --- 表示中の要素（絞り込み適用後） ---
+    //
+    // 選択位置は常に「絞り込み後のリスト」に対する添字として扱う。
+
+    pub fn visible_registries(&self) -> Vec<&ContainerRegistry> {
+        let Some(items) = self.registries.ready() else {
+            return Vec::new();
+        };
+        let filter = &self.filters.registries;
+        items
+            .iter()
+            .filter(|r| matches(filter, &[&r.name, r.host(), &r.description]))
+            .collect()
+    }
 
     pub fn selected_registry(&self) -> Option<&ContainerRegistry> {
-        let items = self.registries.ready()?;
-        items.get(self.registry_state.selected()?)
+        let index = self.registry_state.selected()?;
+        self.visible_registries().into_iter().nth(index)
     }
 
-    pub fn selected_user(&self) -> Option<&RegistryUser> {
-        let registry = self.selected_registry()?;
-        let users = self.users.get(&registry.id)?.ready()?;
-        users.get(self.user_state.selected()?)
-    }
-
-    pub fn selected_repository(&self) -> Option<&str> {
-        let host = self.selected_registry()?.host();
-        let repos = self.repositories.get(host)?.ready()?;
-        repos.get(self.repository_state.selected()?).map(|s| &**s)
-    }
-
-    /// 現在選択中のレジストリのユーザー一覧の状態。
-    pub fn current_users(&self) -> Loadable<Vec<RegistryUser>> {
-        self.selected_registry()
+    /// 現在選択中のレジストリのユーザー一覧（絞り込み適用後）。
+    pub fn visible_users(&self) -> Loadable<Vec<RegistryUser>> {
+        let loadable = self
+            .selected_registry()
             .and_then(|r| self.users.get(&r.id))
             .cloned()
-            .unwrap_or(Loadable::Idle)
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(users) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            users
+                .into_iter()
+                .filter(|u| matches(&self.filters.users, &[&u.username, u.permission.as_str()]))
+                .collect(),
+        )
     }
 
-    pub fn current_repositories(&self) -> Loadable<Vec<String>> {
-        self.selected_registry()
+    pub fn selected_user(&self) -> Option<RegistryUser> {
+        let index = self.user_state.selected()?;
+        self.visible_users().ready()?.get(index).cloned()
+    }
+
+    pub fn visible_repositories(&self) -> Loadable<Vec<String>> {
+        let loadable = self
+            .selected_registry()
             .and_then(|r| self.repositories.get(r.host()))
             .cloned()
-            .unwrap_or(Loadable::Idle)
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(repositories) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            repositories
+                .into_iter()
+                .filter(|r| matches(&self.filters.repositories, &[r]))
+                .collect(),
+        )
     }
 
-    pub fn current_tags(&self) -> Loadable<Vec<TagInfo>> {
+    pub fn selected_repository(&self) -> Option<String> {
+        let index = self.repository_state.selected()?;
+        self.visible_repositories().ready()?.get(index).cloned()
+    }
+
+    pub fn visible_tags(&self) -> Loadable<Vec<TagInfo>> {
         let Some(registry) = self.selected_registry() else {
             return Loadable::Idle;
         };
         let Some(repository) = self.selected_repository() else {
             return Loadable::Idle;
         };
-        self.tags
-            .get(&(registry.host().to_string(), repository.to_string()))
+        let loadable = self
+            .tags
+            .get(&(registry.host().to_string(), repository))
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(tags) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            tags.into_iter()
+                .filter(|t| matches(&self.filters.tags, &[&t.name]))
+                .collect(),
+        )
+    }
+
+    pub fn selected_tag(&self) -> Option<TagInfo> {
+        let index = self.tag_state.selected()?;
+        self.visible_tags().ready()?.get(index).cloned()
+    }
+
+    /// 選択中タグの詳細キャッシュのキー。
+    fn selected_tag_key(&self) -> Option<TagKey> {
+        let host = self.selected_registry()?.host().to_string();
+        let repository = self.selected_repository()?;
+        let tag = self.selected_tag()?.name;
+        Some((host, repository, tag))
+    }
+
+    /// 選択中タグの詳細。
+    pub fn selected_tag_detail(&self) -> Loadable<TagDetail> {
+        self.selected_tag_key()
+            .and_then(|key| self.tag_details.get(&key))
             .cloned()
             .unwrap_or(Loadable::Idle)
     }
@@ -292,6 +530,26 @@ impl App {
     pub fn is_logged_in(&self) -> bool {
         self.selected_registry()
             .is_some_and(|r| self.registry_clients.get(r.host()).is_some())
+    }
+
+    /// 現在キー操作の対象になっているリスト。
+    pub fn active_pane(&self) -> Pane {
+        match self.focus {
+            Focus::Registries => Pane::Registries,
+            Focus::Detail => match self.tab {
+                Tab::Overview => Pane::None,
+                Tab::Users => Pane::Users,
+                Tab::Images => match self.image_pane {
+                    ImagePane::Repositories => Pane::Repositories,
+                    ImagePane::Tags => Pane::Tags,
+                },
+            },
+        }
+    }
+
+    /// 現在のペインに掛かっている絞り込み文字列。
+    pub fn active_filter(&self) -> &str {
+        self.filters.get(self.active_pane())
     }
 
     // --- 非同期処理の起動 ---
@@ -349,6 +607,23 @@ impl App {
         });
     }
 
+    /// 選択中タグの詳細（サイズ・レイヤ数・プラットフォーム・ビルド日時）を取る。
+    fn load_tag_detail(&mut self, key: TagKey) {
+        let Some(client) = self.registry_clients.get(&key.0) else {
+            return;
+        };
+        self.tag_details.insert(key.clone(), Loadable::Loading);
+        self.inflight += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .tag_detail(&key.1, &key.2)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::TagDetails { key, result });
+        });
+    }
+
     /// 現在表示中のビューに必要なデータをまだ読んでいなければ読む。
     pub fn ensure_loaded(&mut self) {
         let Some(registry) = self.selected_registry() else {
@@ -374,11 +649,17 @@ impl App {
                 if self.repositories.get(&host).is_none_or(Loadable::is_idle) {
                     self.load_repositories(host.clone());
                 }
-                if let Some(repository) = self.selected_repository().map(str::to_string) {
+                if let Some(repository) = self.selected_repository() {
                     let key = (host.clone(), repository.clone());
                     if self.tags.get(&key).is_none_or(Loadable::is_idle) {
                         self.load_tags(host, repository);
                     }
+                }
+                // 詳細は選択中のタグの分だけ取る。
+                if let Some(key) = self.selected_tag_key()
+                    && self.tag_details.get(&key).is_none_or(Loadable::is_idle)
+                {
+                    self.load_tag_detail(key);
                 }
             }
         }
@@ -393,11 +674,11 @@ impl App {
             }
         }
 
-        let users = self.current_users().ready().map_or(0, Vec::len);
+        let users = self.visible_users().ready().map_or(0, Vec::len);
         fill(&mut self.user_state, users);
-        let repositories = self.current_repositories().ready().map_or(0, Vec::len);
+        let repositories = self.visible_repositories().ready().map_or(0, Vec::len);
         fill(&mut self.repository_state, repositories);
-        let tags = self.current_tags().ready().map_or(0, Vec::len);
+        let tags = self.visible_tags().ready().map_or(0, Vec::len);
         fill(&mut self.tag_state, tags);
     }
 
@@ -484,6 +765,14 @@ impl App {
                     }
                 };
             }
+            Message::TagDetails { key, result } => {
+                let loadable = match result {
+                    Ok(detail) => Loadable::Ready(detail),
+                    // タグ詳細は付加情報なのでステータス行を汚さず枠内にだけ出す。
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.tag_details.insert(key, loadable);
+            }
             Message::LoginVerified {
                 host,
                 login,
@@ -513,6 +802,43 @@ impl App {
                     self.registry_clients.remove(&host);
                     self.overlay = Some(Overlay::Message {
                         title: "ログイン失敗".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::RegistryAction { label, result } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.load_registries();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::TagAction {
+                host,
+                repository,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    // 同じダイジェストの他のタグも消えているので一覧ごと取り直す。
+                    self.tag_details
+                        .retain(|(h, r, _), _| h != &host || r != &repository);
+                    self.tag_state.select(None);
+                    self.load_tags(host, repository);
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
                     });
@@ -551,6 +877,8 @@ impl App {
         }
         if self.overlay.is_some() {
             self.on_key_overlay(key);
+        } else if self.filtering {
+            self.on_key_filter(key);
         } else {
             self.on_key_main(key);
         }
@@ -559,7 +887,17 @@ impl App {
 
     fn on_key_main(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') => self.should_quit = true,
+            // Esc は「ひとつ戻る」。絞り込みが効いていればまずそれを解除する。
+            KeyCode::Esc => {
+                let pane = self.active_pane();
+                if self.filters.get(pane).is_empty() {
+                    self.focus_left();
+                } else if let Some(filter) = self.filters.get_mut(pane) {
+                    filter.clear();
+                    self.clamp_selection(pane);
+                }
+            }
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('R') => {
@@ -573,9 +911,16 @@ impl App {
             KeyCode::Char('3') => self.set_tab(Tab::Images),
             KeyCode::Char('a') => self.open_add_user(),
             KeyCode::Char('e') => self.open_edit_user(),
-            KeyCode::Char('d') => self.confirm_delete_user(),
+            KeyCode::Char('d') => self.delete_selected(),
+            KeyCode::Char('n') => self.open_create_registry(),
+            KeyCode::Char('E') => self.open_edit_registry(),
+            KeyCode::Char('D') => self.confirm_delete_registry(),
             KeyCode::Char('L') => self.open_login(),
             KeyCode::Char('O') => self.confirm_forget_login(),
+            KeyCode::Char('/') => self.start_filtering(),
+            KeyCode::Char('y') => self.copy_selection(),
+            KeyCode::Char('p') => self.open_profile_picker(),
+            KeyCode::Char('w') => self.toggle_mode(),
             KeyCode::Left | KeyCode::Char('h') => self.focus_left(),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.focus_right(),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
@@ -586,6 +931,201 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.jump_selection(false),
             _ => {}
         }
+    }
+
+    // --- 操作モード ---
+
+    fn toggle_mode(&mut self) {
+        self.mode = self.mode.toggled();
+        match self.mode {
+            Mode::Write => self.set_status(
+                "書き込みモードに切り替えました（w で読み取り専用に戻ります）",
+                StatusKind::Error,
+            ),
+            Mode::ReadOnly => {
+                self.set_status("読み取り専用モードに戻しました", StatusKind::Success)
+            }
+        }
+    }
+
+    /// 書き込み操作の入口で呼ぶ。読み取り専用なら false を返して案内を出す。
+    fn require_write(&mut self) -> bool {
+        if self.mode == Mode::Write {
+            return true;
+        }
+        self.set_status(
+            "読み取り専用モードです。w キーで書き込みモードに切り替えてください",
+            StatusKind::Info,
+        );
+        false
+    }
+
+    // --- 絞り込み ---
+
+    fn start_filtering(&mut self) {
+        if self.active_pane() == Pane::None {
+            return;
+        }
+        self.filtering = true;
+    }
+
+    /// 絞り込み文字列の編集中のキー入力。
+    fn on_key_filter(&mut self, key: KeyEvent) {
+        let pane = self.active_pane();
+        let Some(filter) = self.filters.get_mut(pane) else {
+            self.filtering = false;
+            return;
+        };
+        match key.code {
+            // Enter は確定、Esc は取り消して絞り込みを解除。
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Esc => {
+                filter.clear();
+                self.filtering = false;
+            }
+            KeyCode::Backspace => {
+                filter.pop();
+            }
+            KeyCode::Char(c) => filter.push(c),
+            _ => return,
+        }
+        self.clamp_selection(pane);
+    }
+
+    /// 絞り込みで件数が減ったときに選択位置がはみ出さないようにする。
+    fn clamp_selection(&mut self, pane: Pane) {
+        let len = self.visible_len(pane);
+        let Some(state) = self.list_state(pane) else {
+            return;
+        };
+        match (state.selected(), len) {
+            (_, 0) => state.select(None),
+            (Some(index), len) if index >= len => state.select(Some(len - 1)),
+            (None, _) => state.select(Some(0)),
+            _ => {}
+        }
+        // 絞り込みでレジストリやリポジトリが変わると下位の選択も無効になる。
+        match pane {
+            Pane::Registries => {
+                self.user_state.select(None);
+                self.repository_state.select(None);
+                self.tag_state.select(None);
+            }
+            Pane::Repositories => self.tag_state.select(None),
+            _ => {}
+        }
+    }
+
+    fn visible_len(&self, pane: Pane) -> usize {
+        match pane {
+            Pane::Registries => self.visible_registries().len(),
+            Pane::Users => self.visible_users().ready().map_or(0, Vec::len),
+            Pane::Repositories => self.visible_repositories().ready().map_or(0, Vec::len),
+            Pane::Tags => self.visible_tags().ready().map_or(0, Vec::len),
+            Pane::None => 0,
+        }
+    }
+
+    fn list_state(&mut self, pane: Pane) -> Option<&mut dyn SelectableList> {
+        match pane {
+            Pane::Registries => Some(&mut self.registry_state),
+            Pane::Users => Some(&mut self.user_state),
+            Pane::Repositories => Some(&mut self.repository_state),
+            Pane::Tags => Some(&mut self.tag_state),
+            Pane::None => None,
+        }
+    }
+
+    // --- クリップボードへのコピー ---
+
+    /// 選択中の項目を、そのまま貼って使える形でコピーする。
+    fn copy_selection(&mut self) {
+        let Some(registry) = self.selected_registry() else {
+            return;
+        };
+        let host = registry.host().to_string();
+        let text = match self.active_pane() {
+            Pane::Registries | Pane::None => host,
+            Pane::Users => match self.selected_user() {
+                Some(user) => user.username,
+                None => return,
+            },
+            Pane::Repositories => match self.selected_repository() {
+                Some(repository) => format!("{host}/{repository}"),
+                None => return,
+            },
+            Pane::Tags => match (self.selected_repository(), self.selected_tag()) {
+                (Some(repository), Some(tag)) => format!("{host}/{repository}:{}", tag.name),
+                _ => return,
+            },
+        };
+
+        match copy_to_clipboard(&text) {
+            Ok(()) => self.set_status(format!("コピーしました: {text}"), StatusKind::Success),
+            Err(err) => self.set_status(
+                format!("クリップボードにコピーできませんでした: {err}"),
+                StatusKind::Error,
+            ),
+        }
+    }
+
+    // --- 認証情報の切り替え ---
+
+    fn open_profile_picker(&mut self) {
+        let sources = crate::config::available_credential_sources();
+        if sources.len() < 2 {
+            self.set_status(
+                "切り替え先の認証情報がありません（usacloud のプロファイルは1つだけです）",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let index = sources
+            .iter()
+            .position(|s| *s == self.credential_source)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::ProfilePicker { sources, index });
+    }
+
+    /// 認証情報を切り替え、クラウド API 側のキャッシュを捨てて読み直す。
+    ///
+    /// レジストリへのログインはホスト単位でクラウドの契約とは独立なので保持する。
+    fn switch_credentials(&mut self, source: CredentialSource) {
+        if source == self.credential_source {
+            return;
+        }
+        let credentials = match crate::config::load_credentials_from(&source) {
+            Ok(credentials) => credentials,
+            Err(err) => {
+                self.set_status(
+                    format!("{} に切り替えられません: {}", source.label(), fmt_error(err)),
+                    StatusKind::Error,
+                );
+                return;
+            }
+        };
+        let client = match SacloudClient::new(&credentials) {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                self.set_status(fmt_error(err), StatusKind::Error);
+                return;
+            }
+        };
+
+        self.sacloud = client;
+        self.credential_source = source;
+        // ユーザーはレジストリIDに紐づくので、契約が変われば無効。
+        self.users.clear();
+        self.registry_state.select(None);
+        self.user_state.select(None);
+        self.repository_state.select(None);
+        self.tag_state.select(None);
+        self.filters = Filters::default();
+        self.set_status(
+            format!("{} に切り替えました", self.credential_source.label()),
+            StatusKind::Info,
+        );
+        self.load_registries();
     }
 
     /// 現在のビューのキャッシュを捨てて読み直す。
@@ -605,7 +1145,7 @@ impl App {
                     self.load_repositories(host);
                 }
                 ImagePane::Tags => {
-                    if let Some(repository) = self.selected_repository().map(str::to_string) {
+                    if let Some(repository) = self.selected_repository() {
                         self.load_tags(host, repository);
                     }
                 }
@@ -705,16 +1245,16 @@ impl App {
             Focus::Detail => match self.tab {
                 Tab::Overview => None,
                 Tab::Users => {
-                    let len = self.current_users().ready().map_or(0, Vec::len);
+                    let len = self.visible_users().ready().map_or(0, Vec::len);
                     Some((&mut self.user_state, len))
                 }
                 Tab::Images => match self.image_pane {
                     ImagePane::Repositories => {
-                        let len = self.current_repositories().ready().map_or(0, Vec::len);
+                        let len = self.visible_repositories().ready().map_or(0, Vec::len);
                         Some((&mut self.repository_state, len))
                     }
                     ImagePane::Tags => {
-                        let len = self.current_tags().ready().map_or(0, Vec::len);
+                        let len = self.visible_tags().ready().map_or(0, Vec::len);
                         Some((&mut self.tag_state, len))
                     }
                 },
@@ -725,6 +1265,9 @@ impl App {
     // --- ユーザー管理 ---
 
     fn open_add_user(&mut self) {
+        if !self.require_write() {
+            return;
+        }
         let Some((id, name)) = self
             .selected_registry()
             .map(|registry| (registry.id, registry.name.clone()))
@@ -745,6 +1288,9 @@ impl App {
     }
 
     fn open_edit_user(&mut self) {
+        if !self.require_write() {
+            return;
+        }
         if self.tab != Tab::Users {
             return;
         }
@@ -791,6 +1337,8 @@ impl App {
                 "レジストリ「{registry_name}」からユーザー「{username}」を削除します。\n\
                  この操作は取り消せません。実行しますか？"
             ),
+            verify: None,
+            typed: String::new(),
             action: ConfirmAction::DeleteUser {
                 registry: id,
                 username,
@@ -863,6 +1411,45 @@ impl App {
                 });
                 self.set_status("送信中…", StatusKind::Info);
             }
+            ConfirmAction::DeleteRegistry { id, name } => {
+                let client = self.sacloud.clone();
+                let tx = self.tx.clone();
+                let label = format!("レジストリ「{name}」を削除");
+                self.inflight += 1;
+                tokio::spawn(async move {
+                    let result = client.delete_registry(id).await.map_err(fmt_error);
+                    let _ = tx.send(Message::RegistryAction { label, result });
+                });
+                self.set_status("送信中…", StatusKind::Info);
+            }
+            ConfirmAction::DeleteTag {
+                host,
+                repository,
+                tag,
+                digest,
+            } => {
+                let Some(client) = self.registry_clients.get(&host) else {
+                    return;
+                };
+                let tx = self.tx.clone();
+                let label = format!("イメージ「{repository}:{tag}」を削除");
+                self.inflight += 1;
+                let repo = repository.clone();
+                let target_host = host.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .delete_manifest(&repo, &digest)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::TagAction {
+                        host: target_host,
+                        repository: repo,
+                        label,
+                        result,
+                    });
+                });
+                self.set_status("送信中…", StatusKind::Info);
+            }
             ConfirmAction::ForgetLogin { host } => {
                 self.registry_clients.remove(&host);
                 self.repositories.remove(&host);
@@ -884,6 +1471,163 @@ impl App {
                 }
             }
         }
+    }
+
+    // --- レジストリ自体の作成・編集・削除 ---
+
+    fn open_create_registry(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::RegistryForm(RegistryForm {
+            mode: RegistryFormMode::Create,
+            target: None,
+            name: String::new(),
+            subdomain: String::new(),
+            description: String::new(),
+            virtual_domain: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_registry(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(registry) = self.selected_registry().cloned() else {
+            return;
+        };
+        self.overlay = Some(Overlay::RegistryForm(RegistryForm {
+            mode: RegistryFormMode::Edit,
+            name: registry.name.clone(),
+            subdomain: registry.subdomain_label.clone(),
+            description: registry.description.clone(),
+            virtual_domain: registry.virtual_domain.clone(),
+            target: Some(registry),
+            field: 0,
+        }));
+    }
+
+    fn submit_registry_form(&mut self, form: RegistryForm) {
+        if form.name.is_empty() {
+            self.set_status("名前を入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::RegistryForm(form));
+            return;
+        }
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+
+        match form.mode {
+            RegistryFormMode::Create => {
+                if form.subdomain.is_empty() {
+                    self.inflight -= 1;
+                    self.set_status("サブドメインを入力してください", StatusKind::Error);
+                    self.overlay = Some(Overlay::RegistryForm(form));
+                    return;
+                }
+                let label = format!("レジストリ「{}」を作成", form.name);
+                let (name, subdomain, description) = (form.name, form.subdomain, form.description);
+                tokio::spawn(async move {
+                    let result = client
+                        .create_registry(&name, &subdomain, &description)
+                        .await
+                        .map(|_| ())
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::RegistryAction { label, result });
+                });
+            }
+            RegistryFormMode::Edit => {
+                let Some(target) = form.target else {
+                    self.inflight -= 1;
+                    return;
+                };
+                let label = format!("レジストリ「{}」を更新", form.name);
+                let (name, description, virtual_domain) =
+                    (form.name, form.description, form.virtual_domain);
+                tokio::spawn(async move {
+                    let result = client
+                        .update_registry(&target, &name, &description, &virtual_domain)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::RegistryAction { label, result });
+                });
+            }
+        }
+    }
+
+    /// レジストリの削除は取り消せないので、名前の入力を要求する。
+    fn confirm_delete_registry(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(registry) = self.selected_registry() else {
+            return;
+        };
+        let (id, name, host) = (
+            registry.id,
+            registry.name.clone(),
+            registry.host().to_string(),
+        );
+        self.overlay = Some(Overlay::Confirm {
+            title: "レジストリの削除".to_string(),
+            body: format!(
+                "レジストリ「{name}」({host}) を削除します。\n\
+                 保存されている全てのイメージとユーザーも消え、取り消せません。\n\
+                 実行するにはレジストリ名を入力してください。"
+            ),
+            verify: Some(name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteRegistry { id, name },
+        });
+    }
+
+    /// フォーカス中のペインに応じて「選択中のもの」を削除する。
+    fn delete_selected(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        match self.active_pane() {
+            Pane::Users => self.confirm_delete_user(),
+            Pane::Tags => self.confirm_delete_tag(),
+            _ => {}
+        }
+    }
+
+    fn confirm_delete_tag(&mut self) {
+        let Some(registry) = self.selected_registry() else {
+            return;
+        };
+        let host = registry.host().to_string();
+        let (Some(repository), Some(tag)) = (self.selected_repository(), self.selected_tag())
+        else {
+            return;
+        };
+        let Some(digest) = tag.digest.clone() else {
+            self.set_status(
+                "ダイジェストが取得できていないため削除できません",
+                StatusKind::Error,
+            );
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "イメージの削除".to_string(),
+            body: format!(
+                "{host}/{repository}:{} を削除します。\n\
+                 Registry API はマニフェスト単位で消すため、同じダイジェストを指す\n\
+                 他のタグも同時に消えます。取り消せません。",
+                tag.name
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteTag {
+                host,
+                repository,
+                tag: tag.name,
+                digest,
+            },
+        });
     }
 
     // --- レジストリへのログイン ---
@@ -926,6 +1670,8 @@ impl App {
             body: format!(
                 "{host} のログイン情報を破棄します。\n設定ファイルに保存済みの場合はそこからも削除されます。"
             ),
+            verify: None,
+            typed: String::new(),
             action: ConfirmAction::ForgetLogin { host },
         });
     }
@@ -975,26 +1721,79 @@ impl App {
             Overlay::Confirm {
                 title,
                 body,
+                verify,
+                mut typed,
                 action,
-            } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.run_confirmed(action)
+            } => {
+                let Some(expected) = verify.clone() else {
+                    // 入力確認なし: y/Enter で実行、それ以外は開いたまま。
+                    match key.code {
+                        KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.run_confirmed(action),
+                        KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {}
+                        _ => {
+                            self.overlay = Some(Overlay::Confirm {
+                                title,
+                                body,
+                                verify,
+                                typed,
+                                action,
+                            })
+                        }
+                    }
+                    return;
+                };
+                // 入力確認あり: 名前を打ち込まないと実行できない。
+                match key.code {
+                    KeyCode::Esc => return,
+                    KeyCode::Enter if typed == expected => {
+                        self.run_confirmed(action);
+                        return;
+                    }
+                    KeyCode::Enter => self.set_status(
+                        format!("「{expected}」と一致していません"),
+                        StatusKind::Error,
+                    ),
+                    KeyCode::Backspace => {
+                        typed.pop();
+                    }
+                    KeyCode::Char(c) => typed.push(c),
+                    _ => {}
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {}
-                _ => {
-                    self.overlay = Some(Overlay::Confirm {
-                        title,
-                        body,
-                        action,
-                    })
-                }
-            },
+                self.overlay = Some(Overlay::Confirm {
+                    title,
+                    body,
+                    verify,
+                    typed,
+                    action,
+                });
+            }
             Overlay::UserForm(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => self.submit_user_form(form),
                 _ => {
                     edit_user_form(&mut form, key);
                     self.overlay = Some(Overlay::UserForm(form));
+                }
+            },
+            Overlay::ProfilePicker { sources, mut index } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                KeyCode::Enter => self.switch_credentials(sources[index].clone()),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    index = (index + 1) % sources.len();
+                    self.overlay = Some(Overlay::ProfilePicker { sources, index });
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    index = (index + sources.len() - 1) % sources.len();
+                    self.overlay = Some(Overlay::ProfilePicker { sources, index });
+                }
+                _ => self.overlay = Some(Overlay::ProfilePicker { sources, index }),
+            },
+            Overlay::RegistryForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_registry_form(form),
+                _ => {
+                    edit_registry_form(&mut form, key);
+                    self.overlay = Some(Overlay::RegistryForm(form));
                 }
             },
             Overlay::Login(mut form) => match key.code {
@@ -1064,6 +1863,26 @@ fn edit_user_form(form: &mut UserForm, key: KeyEvent) {
     }
 }
 
+fn edit_registry_form(form: &mut RegistryForm, key: KeyEvent) {
+    let fields = form.labels().len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn edit_login_form(form: &mut LoginForm, key: KeyEvent) {
     match key.code {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % LoginForm::FIELDS,
@@ -1091,9 +1910,39 @@ fn edit_login_form(form: &mut LoginForm, key: KeyEvent) {
     }
 }
 
+/// OS のクリップボードにコピーする。
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    clipboard.set_text(text).map_err(|err| err.to_string())
+}
+
 /// `anyhow::Error` を原因も含めた 1 つの文字列にする。
 fn fmt_error(err: anyhow::Error) -> String {
     let mut parts = vec![err.to_string()];
     parts.extend(err.chain().skip(1).map(|c| c.to_string()));
     parts.join(": ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        assert!(matches("", &["anything"]));
+        assert!(matches("", &[]));
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_substring() {
+        assert!(matches("REG", &["my-registry"]));
+        assert!(matches("reg", &["MY-REGISTRY"]));
+        assert!(!matches("xyz", &["my-registry"]));
+    }
+
+    #[test]
+    fn filter_matches_any_field() {
+        // 名前が外れてもホスト側で拾えること。
+        assert!(matches("sakuracr", &["example", "example.sakuracr.jp"]));
+    }
 }

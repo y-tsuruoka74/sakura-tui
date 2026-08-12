@@ -98,7 +98,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App, registry: &ContainerR
 
 fn draw_users(frame: &mut Frame, area: Rect, app: &mut App, _registry: &ContainerRegistry) {
     let focused = app.focus == Focus::Detail;
-    let users = app.current_users();
+    let users = app.visible_users();
     let block = Block::bordered()
         .title(" ユーザー ")
         .border_style(border_style(focused))
@@ -181,12 +181,94 @@ fn draw_images(frame: &mut Frame, area: Rect, app: &mut App, registry: &Containe
         .split(area);
 
     draw_repositories(frame, chunks[0], app);
-    draw_tags(frame, chunks[1], app);
+
+    // タグ一覧と、選択中タグの詳細を縦に並べる。
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(9)])
+        .split(chunks[1]);
+    draw_tags(frame, right[0], app);
+    draw_tag_detail(frame, right[1], app);
+}
+
+/// 選択中タグのサイズ・レイヤ数・プラットフォーム・ビルド日時。
+fn draw_tag_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered()
+        .title(" タグの詳細 ")
+        .border_style(border_style(false))
+        .padding(ratatui::widgets::Padding::horizontal(1));
+
+    let detail = app.selected_tag_detail();
+    let lines = match &detail {
+        Loadable::Idle => {
+            frame.render_widget(placeholder("タグを選択してください").block(block), area);
+            return;
+        }
+        Loadable::Loading => {
+            frame.render_widget(placeholder("読み込み中…").block(block), area);
+            return;
+        }
+        Loadable::Failed(err) => {
+            frame.render_widget(error_paragraph(err).block(block), area);
+            return;
+        }
+        Loadable::Ready(detail) => {
+            let mut lines = Vec::new();
+            if let Some(size) = detail.size {
+                lines.push(field("サイズ", &format_bytes(size)));
+            }
+            if let Some(layers) = detail.layers {
+                lines.push(field("レイヤ数", &layers.to_string()));
+            }
+            if !detail.platforms.is_empty() {
+                let platforms: Vec<String> =
+                    detail.platforms.iter().map(ToString::to_string).collect();
+                lines.push(field("プラットフォーム", &platforms.join(", ")));
+            }
+            if let Some(created) = &detail.created {
+                lines.push(field("ビルド日時", &format_datetime(created)));
+            }
+            if !detail.media_type.is_empty() {
+                lines.push(field("形式", short_media_type(&detail.media_type)));
+            }
+            if let Some(digest) = &detail.digest {
+                lines.push(field("ダイジェスト", digest));
+            }
+            lines
+        }
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+}
+
+/// バイト数を人が読める単位にする。
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {} ({bytes} B)", UNITS[unit])
+    }
+}
+
+/// `application/vnd.oci.image.index.v1+json` のような長い名前を短く言い換える。
+fn short_media_type(media_type: &str) -> &str {
+    match media_type {
+        t if t.contains("index") || t.contains("manifest.list") => "マルチアーキテクチャ (index)",
+        t if t.contains("oci.image.manifest") => "OCI イメージマニフェスト",
+        t if t.contains("docker.distribution.manifest.v2") => "Docker マニフェスト v2",
+        other => other,
+    }
 }
 
 fn draw_repositories(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Detail && app.image_pane == ImagePane::Repositories;
-    let repositories = app.current_repositories();
+    let repositories = app.visible_repositories();
     let count = repositories.ready().map_or(0, Vec::len);
     let block = Block::bordered()
         .title(if count > 0 {
@@ -218,8 +300,8 @@ fn draw_repositories(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Detail && app.image_pane == ImagePane::Tags;
-    let repository = app.selected_repository().map(str::to_string);
-    let tags = app.current_tags();
+    let repository = app.selected_repository();
+    let tags = app.visible_tags();
     let block = Block::bordered()
         .title(match &repository {
             Some(repository) => format!(" タグ: {repository} "),

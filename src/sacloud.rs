@@ -99,6 +99,8 @@ pub struct ContainerRegistry {
     pub virtual_domain: String,
     pub subdomain_label: String,
     pub fqdn: String,
+    /// 更新時に送り返して、他所での変更を上書きしないようにする。
+    pub settings_hash: String,
 }
 
 impl ContainerRegistry {
@@ -139,6 +141,8 @@ struct NakedRegistry {
     modified_at: Option<String>,
     #[serde(rename = "Settings")]
     settings: Option<NakedSettings>,
+    #[serde(rename = "SettingsHash", default)]
+    settings_hash: String,
     #[serde(rename = "Status")]
     status: Option<NakedStatus>,
 }
@@ -184,6 +188,7 @@ impl From<NakedRegistry> for ContainerRegistry {
                 .map(|s| s.registry_name.clone())
                 .unwrap_or_default(),
             fqdn: status.map(|s| s.hostname).unwrap_or_default(),
+            settings_hash: naked.settings_hash,
         }
     }
 }
@@ -194,6 +199,13 @@ struct FindResponse {
     items: Vec<NakedRegistry>,
     #[serde(rename = "Total", default)]
     total: usize,
+}
+
+/// 作成・取得時の単体レスポンス。
+#[derive(Debug, Deserialize)]
+struct ItemResponse {
+    #[serde(rename = "CommonServiceItem")]
+    item: Option<NakedRegistry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,6 +319,77 @@ impl SacloudClient {
             from += received;
         }
         Ok(out)
+    }
+
+    /// コンテナレジストリを作成する。
+    ///
+    /// `subdomain` は `<subdomain>.sakuracr.jp` になる部分で、作成後は変更できない。
+    pub async fn create_registry(
+        &self,
+        name: &str,
+        subdomain: &str,
+        description: &str,
+    ) -> Result<ContainerRegistry> {
+        let body = json!({
+            "CommonServiceItem": {
+                "Name": name,
+                "Description": description,
+                "Tags": [],
+                "Provider": { "Class": "containerregistry" },
+                "Status": { "registry_name": subdomain },
+                "Settings": {
+                    "ContainerRegistry": {
+                        // 公開設定は廃止予定のため常に非公開で作る。
+                        "public": "none",
+                        "virtual_domain": "",
+                    }
+                },
+            }
+        });
+        let res: ItemResponse = self
+            .request(Method::POST, "commonserviceitem", Some(body))
+            .await?;
+        res.item
+            .map(ContainerRegistry::from)
+            .context("作成レスポンスにレジストリが含まれていません")
+    }
+
+    /// 名前・説明・独自ドメインを更新する。
+    pub async fn update_registry(
+        &self,
+        registry: &ContainerRegistry,
+        name: &str,
+        description: &str,
+        virtual_domain: &str,
+    ) -> Result<()> {
+        let path = format!("commonserviceitem/{}", registry.id);
+        let body = json!({
+            "CommonServiceItem": {
+                "Name": name,
+                "Description": description,
+                "Tags": registry.tags,
+                "Settings": {
+                    "ContainerRegistry": {
+                        "public": if registry.access_level.is_empty() {
+                            "none"
+                        } else {
+                            registry.access_level.as_str()
+                        },
+                        "virtual_domain": virtual_domain,
+                    }
+                },
+                // 他所での変更を上書きしないよう、読み込み時のハッシュを送る。
+                "SettingsHash": registry.settings_hash,
+            }
+        });
+        let _: serde_json::Value = self.request(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_registry(&self, id: ResourceId) -> Result<()> {
+        let path = format!("commonserviceitem/{id}");
+        let _: serde_json::Value = self.request(Method::DELETE, &path, None).await?;
+        Ok(())
     }
 
     pub async fn list_users(&self, id: ResourceId) -> Result<Vec<RegistryUser>> {

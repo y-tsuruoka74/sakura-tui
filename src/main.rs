@@ -50,7 +50,7 @@ async fn run(
     mut terminal: ratatui::DefaultTerminal,
     sacloud: Arc<SacloudClient>,
     settings: config::Config,
-    credential_source: String,
+    credential_source: config::CredentialSource,
 ) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(sacloud, tx, settings, credential_source);

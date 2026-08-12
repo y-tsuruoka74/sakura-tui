@@ -36,6 +36,85 @@ pub struct TagInfo {
     pub digest: Option<String>,
 }
 
+/// イメージが対象とするプラットフォーム。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Platform {
+    pub os: String,
+    pub architecture: String,
+    pub variant: Option<String>,
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.os, self.architecture)?;
+        match &self.variant {
+            Some(variant) if !variant.is_empty() => write!(f, "/{variant}"),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// 選択中のタグについて追加で取得する詳細。
+#[derive(Debug, Clone, Default)]
+pub struct TagDetail {
+    pub digest: Option<String>,
+    pub media_type: String,
+    /// config + 全レイヤの合計バイト数（マニフェスト上の圧縮後サイズ）。
+    pub size: Option<u64>,
+    pub layers: Option<usize>,
+    /// マルチアーキテクチャイメージなら複数返る。
+    pub platforms: Vec<Platform>,
+    pub created: Option<String>,
+}
+
+// --- マニフェストの JSON 表現 ---
+
+#[derive(Debug, Default, Deserialize)]
+struct RawManifest {
+    #[serde(rename = "mediaType", default)]
+    media_type: String,
+    /// イメージインデックス（マルチアーキテクチャ）の場合のみ非空。
+    #[serde(default)]
+    manifests: Vec<RawIndexEntry>,
+    config: Option<RawDescriptor>,
+    #[serde(default)]
+    layers: Vec<RawDescriptor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDescriptor {
+    #[serde(default)]
+    digest: String,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawIndexEntry {
+    #[serde(default)]
+    digest: String,
+    platform: Option<RawPlatform>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPlatform {
+    #[serde(default)]
+    os: String,
+    #[serde(default)]
+    architecture: String,
+    variant: Option<String>,
+}
+
+/// イメージの config blob（`architecture` などが入っている）。
+#[derive(Debug, Deserialize)]
+struct ImageConfig {
+    created: Option<String>,
+    #[serde(default)]
+    architecture: String,
+    #[serde(default)]
+    os: String,
+}
+
 /// 認証チャレンジの内容。
 #[derive(Debug, Clone)]
 enum Challenge {
@@ -151,11 +230,127 @@ impl RegistryClient {
         let res = self
             .send(Method::HEAD, &url, &scope, Some(headers))
             .await?;
-        Ok(res
-            .headers()
-            .get("docker-content-digest")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string()))
+        Ok(digest_header(&res))
+    }
+
+    /// 選択中のタグだけについて、サイズ・レイヤ数・プラットフォーム・ビルド日時を取る。
+    ///
+    /// 一覧取得時に全タグ分やると重いので、選択されたタグに対してのみ呼ぶ。
+    pub async fn tag_detail(&self, repository: &str, tag: &str) -> Result<TagDetail> {
+        let scope = format!("repository:{repository}:pull");
+        let (digest, manifest) = self.fetch_manifest(repository, tag, &scope).await?;
+        let mut detail = TagDetail {
+            digest,
+            media_type: manifest.media_type.clone(),
+            ..TagDetail::default()
+        };
+
+        if manifest.manifests.is_empty() {
+            // 単一アーキテクチャのイメージマニフェスト。
+            self.fill_from_image_manifest(repository, &manifest, &scope, &mut detail)
+                .await;
+            return Ok(detail);
+        }
+
+        // イメージインデックス。プラットフォームを列挙し、代表 1 つの中身を見る。
+        detail.platforms = manifest
+            .manifests
+            .iter()
+            .filter_map(|entry| entry.platform.as_ref())
+            // attestation manifest などは platform が unknown なので除く。
+            .filter(|platform| platform.architecture != "unknown")
+            .map(|platform| Platform {
+                os: platform.os.clone(),
+                architecture: platform.architecture.clone(),
+                variant: platform.variant.clone(),
+            })
+            .collect();
+
+        if let Some(child) = representative_entry(&manifest.manifests)
+            && let Ok((_, child_manifest)) =
+                self.fetch_manifest(repository, &child.digest, &scope).await
+        {
+            // プラットフォームはインデックス側の情報を優先する。
+            let platforms = std::mem::take(&mut detail.platforms);
+            self.fill_from_image_manifest(repository, &child_manifest, &scope, &mut detail)
+                .await;
+            detail.platforms = platforms;
+        }
+        Ok(detail)
+    }
+
+    /// イメージマニフェストからサイズ・レイヤ数を、config blob から日時などを埋める。
+    async fn fill_from_image_manifest(
+        &self,
+        repository: &str,
+        manifest: &RawManifest,
+        scope: &str,
+        detail: &mut TagDetail,
+    ) {
+        let config_size = manifest.config.as_ref().map_or(0, |c| c.size);
+        let layers_size: u64 = manifest.layers.iter().map(|l| l.size).sum();
+        detail.size = Some(config_size + layers_size);
+        detail.layers = Some(manifest.layers.len());
+
+        // config blob は付加情報なので、取れなくても他の情報は返す。
+        let Some(config) = &manifest.config else {
+            return;
+        };
+        let Ok(image) = self.fetch_config(repository, &config.digest, scope).await else {
+            return;
+        };
+        detail.created = image.created;
+        if detail.platforms.is_empty() && !image.architecture.is_empty() {
+            detail.platforms.push(Platform {
+                os: image.os,
+                architecture: image.architecture,
+                variant: None,
+            });
+        }
+    }
+
+    /// マニフェストを削除する。同じダイジェストを指す全てのタグが消える。
+    ///
+    /// レジストリ側で削除が無効化されていることがあるため、405 は専用のメッセージにする。
+    pub async fn delete_manifest(&self, repository: &str, digest: &str) -> Result<()> {
+        let url = format!("https://{}/v2/{}/manifests/{}", self.host, repository, digest);
+        let scope = format!("repository:{repository}:pull,delete");
+        match self.send(Method::DELETE, &url, &scope, None).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.to_string().contains("405") => bail!(
+                "このレジストリではイメージの削除が有効になっていません (405 Method Not Allowed)"
+            ),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// マニフェストを取得し、`(ダイジェスト, 内容)` を返す。
+    async fn fetch_manifest(
+        &self,
+        repository: &str,
+        reference: &str,
+        scope: &str,
+    ) -> Result<(Option<String>, RawManifest)> {
+        let url = format!(
+            "https://{}/v2/{}/manifests/{}",
+            self.host, repository, reference
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static(MANIFEST_ACCEPT));
+        let res = self.send(Method::GET, &url, scope, Some(headers)).await?;
+        let digest = digest_header(&res);
+        Ok((digest, json_body(res).await?))
+    }
+
+    async fn fetch_config(
+        &self,
+        repository: &str,
+        digest: &str,
+        scope: &str,
+    ) -> Result<ImageConfig> {
+        let url = format!("https://{}/v2/{}/blobs/{}", self.host, repository, digest);
+        let res = self.send(Method::GET, &url, scope, None).await?;
+        json_body(res).await
     }
 
     /// 認証チャレンジに応じてトークンを取得しつつリクエストを送る。
@@ -292,6 +487,39 @@ fn parse_challenge(res: &Response) -> Option<Challenge> {
     })
 }
 
+/// レジストリが返す正規のダイジェスト。
+fn digest_header(res: &Response) -> Option<String> {
+    res.headers()
+        .get("docker-content-digest")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+/// イメージインデックスから、中身を代表して見に行くエントリを選ぶ。
+/// linux/amd64 → linux/* → 先頭 の順で優先する。
+fn representative_entry(entries: &[RawIndexEntry]) -> Option<&RawIndexEntry> {
+    let usable = |entry: &&RawIndexEntry| {
+        entry
+            .platform
+            .as_ref()
+            .is_none_or(|p| p.architecture != "unknown")
+    };
+    entries
+        .iter()
+        .find(|entry| {
+            entry
+                .platform
+                .as_ref()
+                .is_some_and(|p| p.os == "linux" && p.architecture == "amd64")
+        })
+        .or_else(|| {
+            entries
+                .iter()
+                .find(|entry| entry.platform.as_ref().is_some_and(|p| p.os == "linux"))
+        })
+        .or_else(|| entries.iter().find(usable))
+}
+
 /// ページングの `Link: <...>; rel="next"` ヘッダから次ページの URL を作る。
 fn next_page_url(host: &str, res: &Response) -> Option<String> {
     let link = res.headers().get(reqwest::header::LINK)?.to_str().ok()?;
@@ -421,5 +649,88 @@ mod tests {
     #[test]
     fn no_link_header_ends_pagination() {
         assert!(next_page_url("registry.example.com", &response(&[])).is_none());
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+
+    fn entry(os: &str, arch: &str) -> RawIndexEntry {
+        RawIndexEntry {
+            digest: format!("sha256:{os}-{arch}"),
+            platform: Some(RawPlatform {
+                os: os.to_string(),
+                architecture: arch.to_string(),
+                variant: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn prefers_linux_amd64_from_index() {
+        let entries = vec![entry("linux", "arm64"), entry("linux", "amd64")];
+        let picked = representative_entry(&entries).unwrap();
+        assert_eq!(picked.digest, "sha256:linux-amd64");
+    }
+
+    #[test]
+    fn falls_back_to_any_linux() {
+        let entries = vec![entry("windows", "amd64"), entry("linux", "s390x")];
+        let picked = representative_entry(&entries).unwrap();
+        assert_eq!(picked.digest, "sha256:linux-s390x");
+    }
+
+    #[test]
+    fn skips_attestation_entries() {
+        // buildx の attestation manifest は platform が unknown/unknown。
+        let entries = vec![entry("unknown", "unknown"), entry("windows", "amd64")];
+        let picked = representative_entry(&entries).unwrap();
+        assert_eq!(picked.digest, "sha256:windows-amd64");
+    }
+
+    #[test]
+    fn parses_image_index() {
+        let body = r#"{
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {"digest": "sha256:aaa", "platform": {"os": "linux", "architecture": "amd64"}},
+                {"digest": "sha256:bbb", "platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}}
+            ]
+        }"#;
+        let manifest: RawManifest = serde_json::from_str(body).unwrap();
+        assert_eq!(manifest.manifests.len(), 2);
+        assert!(manifest.config.is_none());
+    }
+
+    #[test]
+    fn parses_image_manifest_sizes() {
+        let body = r#"{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"digest": "sha256:cfg", "size": 100},
+            "layers": [{"digest": "sha256:l1", "size": 1000}, {"digest": "sha256:l2", "size": 2000}]
+        }"#;
+        let manifest: RawManifest = serde_json::from_str(body).unwrap();
+        assert!(manifest.manifests.is_empty());
+        assert_eq!(manifest.layers.len(), 2);
+        let total: u64 = manifest.config.as_ref().unwrap().size
+            + manifest.layers.iter().map(|l| l.size).sum::<u64>();
+        assert_eq!(total, 3100);
+    }
+
+    #[test]
+    fn platform_display_includes_variant() {
+        let platform = Platform {
+            os: "linux".into(),
+            architecture: "arm64".into(),
+            variant: Some("v8".into()),
+        };
+        assert_eq!(platform.to_string(), "linux/arm64/v8");
+        let plain = Platform {
+            os: "linux".into(),
+            architecture: "amd64".into(),
+            variant: None,
+        };
+        assert_eq!(plain.to_string(), "linux/amd64");
     }
 }

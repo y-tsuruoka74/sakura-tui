@@ -10,13 +10,31 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+/// 認証情報の出どころ。TUI 内で切り替えるための識別子でもある。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// 環境変数 `SAKURA_ACCESS_TOKEN` / `SAKURA_ACCESS_TOKEN_SECRET`。
+    Env,
+    /// usacloud のプロファイル。
+    Profile(String),
+}
+
+impl CredentialSource {
+    /// ヘッダーやピッカーに出す表示名。
+    pub fn label(&self) -> String {
+        match self {
+            CredentialSource::Env => "環境変数".to_string(),
+            CredentialSource::Profile(name) => name.clone(),
+        }
+    }
+}
+
 /// さくらのクラウド API のアクセストークンとシークレット。
 #[derive(Debug, Clone)]
 pub struct ApiCredentials {
     pub token: String,
     pub secret: String,
-    /// どこから読んだかの説明（ステータスバー表示用）。
-    pub source: String,
+    pub source: CredentialSource,
 }
 
 fn env_multi(names: &[&str]) -> Option<String> {
@@ -25,19 +43,24 @@ fn env_multi(names: &[&str]) -> Option<String> {
         .find_map(|n| std::env::var(n).ok().filter(|v| !v.is_empty()))
 }
 
-/// 環境変数 → usacloud プロファイルの順で API 認証情報を探す。
-pub fn load_api_credentials() -> Result<ApiCredentials> {
-    let token = env_multi(&["SAKURA_ACCESS_TOKEN", "SAKURACLOUD_ACCESS_TOKEN"]);
+/// 環境変数から認証情報を読む。両方揃っていなければ `None`。
+fn credentials_from_env() -> Option<ApiCredentials> {
+    let token = env_multi(&["SAKURA_ACCESS_TOKEN", "SAKURACLOUD_ACCESS_TOKEN"])?;
     let secret = env_multi(&[
         "SAKURA_ACCESS_TOKEN_SECRET",
         "SAKURACLOUD_ACCESS_TOKEN_SECRET",
-    ]);
-    if let (Some(token), Some(secret)) = (token, secret) {
-        return Ok(ApiCredentials {
-            token,
-            secret,
-            source: "環境変数".to_string(),
-        });
+    ])?;
+    Some(ApiCredentials {
+        token,
+        secret,
+        source: CredentialSource::Env,
+    })
+}
+
+/// 環境変数 → usacloud プロファイルの順で API 認証情報を探す。
+pub fn load_api_credentials() -> Result<ApiCredentials> {
+    if let Some(creds) = credentials_from_env() {
+        return Ok(creds);
     }
 
     let profile_name = env_multi(&["SAKURA_PROFILE", "SAKURACLOUD_PROFILE", "USACLOUD_PROFILE"]);
@@ -50,6 +73,49 @@ pub fn load_api_credentials() -> Result<ApiCredentials> {
              (プロファイル読み込み時のエラー: {err})"
         )),
     }
+}
+
+/// 指定の出どころから認証情報を読み直す（TUI 内での切り替え用）。
+pub fn load_credentials_from(source: &CredentialSource) -> Result<ApiCredentials> {
+    match source {
+        CredentialSource::Env => {
+            credentials_from_env().context("環境変数に認証情報が設定されていません")
+        }
+        CredentialSource::Profile(name) => load_usacloud_profile(Some(name)),
+    }
+}
+
+/// 選択肢として提示できる認証情報の一覧。
+///
+/// 環境変数が設定されていれば先頭に置き、続けて usacloud のプロファイルを名前順に並べる。
+pub fn available_credential_sources() -> Vec<CredentialSource> {
+    let mut sources = Vec::new();
+    if credentials_from_env().is_some() {
+        sources.push(CredentialSource::Env);
+    }
+    sources.extend(list_usacloud_profiles().into_iter().map(CredentialSource::Profile));
+    sources
+}
+
+/// `~/.usacloud/*/config.json` があるディレクトリ名をプロファイル名として集める。
+fn list_usacloud_profiles() -> Vec<String> {
+    let Ok(dir) = usacloud_config_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.path().join("config.json").is_file() {
+                return None;
+            }
+            entry.file_name().into_string().ok()
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// usacloud のプロファイル格納ディレクトリ（`~/.usacloud`）。
@@ -101,7 +167,7 @@ fn load_usacloud_profile(name: Option<&str>) -> Result<ApiCredentials> {
     Ok(ApiCredentials {
         token: config.access_token,
         secret: config.access_token_secret,
-        source: format!("usacloudプロファイル({name})"),
+        source: CredentialSource::Profile(name),
     })
 }
 
