@@ -1,0 +1,22 @@
+[package]
+name = "sakura-tui"
+version = "0.1.0"
+edition = "2024"
+description = "さくらインターネットのサービスをターミナルから操作する TUI"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+dirs = "6.0.0"
+futures = "0.3.33"
+ratatui = "0.30.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "gzip", "http2", "charset", "system-proxy", "query"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+toml = "1.1.4"
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+http = "1.5.0"
