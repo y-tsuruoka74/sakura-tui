@@ -97,8 +97,8 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, tab)| Line::from(format!("{} {}", i + 1, tab.title())))
         .collect();
-    let selected = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
-    let highlight = if app.focus == Focus::Detail {
+    let selected = Tab::ALL.iter().position(|t| *t == app.registry.tab).unwrap_or(0);
+    let highlight = if app.registry.focus == Focus::Detail {
         Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(DIM).add_modifier(Modifier::BOLD)
@@ -113,7 +113,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     // 絞り込み編集中はステータス行を入力欄として使う。
-    if app.filtering {
+    if app.registry.filtering {
         let line = Line::from(vec![
             Span::styled(" /", Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)),
             Span::raw(app.active_filter().to_string()),
@@ -158,13 +158,13 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
     let mut hints: Vec<&str> = vec!["↑↓/jk 移動", "←→/hl ペイン", "Tab タブ", "r 更新"];
     // 書き込み系のキーは、書き込みモードのときだけ案内する。
     if app.mode == Mode::Write {
-        match app.tab {
+        match app.registry.tab {
             Tab::Overview => hints.extend(["n 作成", "E 編集", "D 削除"]),
             Tab::Users => hints.extend(["a 追加", "e 編集", "d 削除"]),
             Tab::Images => hints.push("d イメージ削除"),
         }
     }
-    if app.tab == Tab::Images {
+    if app.registry.tab == Tab::Images {
         if app.is_logged_in() {
             hints.extend(["L ログイン変更", "O ログアウト"]);
         } else {

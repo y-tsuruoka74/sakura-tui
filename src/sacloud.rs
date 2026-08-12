@@ -19,6 +19,8 @@ const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/zone";
 /// グローバルリソース用の既定ゾーン。
 const DEFAULT_ZONE: &str = "is1a";
 const API_SUFFIX: &str = "api/cloud/1.1";
+/// `commonserviceitem` のうちコンテナレジストリを表す `Provider.Class`。
+const REGISTRY_CLASS: &str = "containerregistry";
 /// Find の 1 ページあたりの取得件数。
 const PAGE_SIZE: usize = 100;
 
@@ -127,13 +129,13 @@ pub struct RegistryUser {
 struct NakedRegistry {
     #[serde(rename = "ID")]
     id: ResourceId,
-    #[serde(rename = "Name", default)]
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
     name: String,
-    #[serde(rename = "Description", default)]
+    #[serde(rename = "Description", default, deserialize_with = "null_as_default")]
     description: String,
-    #[serde(rename = "Tags", default)]
+    #[serde(rename = "Tags", default, deserialize_with = "null_as_default")]
     tags: Vec<String>,
-    #[serde(rename = "Availability", default)]
+    #[serde(rename = "Availability", default, deserialize_with = "null_as_default")]
     availability: String,
     #[serde(rename = "CreatedAt")]
     created_at: Option<String>,
@@ -155,18 +157,30 @@ struct NakedSettings {
 
 #[derive(Debug, Deserialize)]
 struct NakedSetting {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     public: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     virtual_domain: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct NakedStatus {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     registry_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     hostname: String,
+}
+
+/// JSON の `null` を型の既定値として受け取る。
+///
+/// さくらのクラウド API は未設定の項目をキーごと省くこともあれば `null` で返すこともあり、
+/// `#[serde(default)]` だけでは後者で失敗するため。
+fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
 impl From<NakedRegistry> for ContainerRegistry {
@@ -193,19 +207,39 @@ impl From<NakedRegistry> for ContainerRegistry {
     }
 }
 
+/// `commonserviceitem` は DNS・GSLB・シンプル監視などと共用のエンドポイントなので、
+/// 各項目をいったん生の JSON で受けて、コンテナレジストリだけを取り出す。
 #[derive(Debug, Deserialize)]
 struct FindResponse {
-    #[serde(rename = "CommonServiceItems", default)]
-    items: Vec<NakedRegistry>,
+    #[serde(rename = "CommonServiceItems", default, deserialize_with = "null_as_default")]
+    items: Vec<serde_json::Value>,
     #[serde(rename = "Total", default)]
     total: usize,
+}
+
+/// コンテナレジストリの項目か。
+///
+/// `Provider.Class` を第一の判断材料にするが、レスポンスに `Provider` が
+/// 含まれない場合に全件落としてしまわないよう、`Settings.ContainerRegistry` の
+/// 有無でも判定する。
+fn is_container_registry(item: &serde_json::Value) -> bool {
+    let class = item
+        .get("Provider")
+        .and_then(|provider| provider.get("Class"))
+        .and_then(serde_json::Value::as_str);
+    if let Some(class) = class {
+        return class == REGISTRY_CLASS;
+    }
+    item.get("Settings")
+        .and_then(|settings| settings.get("ContainerRegistry"))
+        .is_some_and(|value| !value.is_null())
 }
 
 /// 作成・取得時の単体レスポンス。
 #[derive(Debug, Deserialize)]
 struct ItemResponse {
     #[serde(rename = "CommonServiceItem")]
-    item: Option<NakedRegistry>,
+    item: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,12 +300,21 @@ impl SacloudClient {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        let url = format!("{}/{}", self.base, path);
+        let mut url = reqwest::Url::parse(&format!("{}/{}", self.base, path))
+            .with_context(|| format!("URLの組み立てに失敗しました: {}/{path}", self.base))?;
+
+        // さくらのクラウド API は GET のリクエストボディを読まない。
+        // 検索条件は JSON をそのままクエリ文字列に載せて渡す。
+        let send_as_query = method == Method::GET;
+        if send_as_query && let Some(body) = &body {
+            url.set_query(Some(&serde_json::to_string(body)?));
+        }
+
         let mut req = self
             .http
-            .request(method, &url)
+            .request(method, url.clone())
             .basic_auth(&self.token, Some(&self.secret));
-        if let Some(body) = &body {
+        if !send_as_query && let Some(body) = &body {
             req = req.json(body);
         }
 
@@ -300,9 +343,10 @@ impl SacloudClient {
     pub async fn list_registries(&self) -> Result<Vec<ContainerRegistry>> {
         let mut out = Vec::new();
         let mut from = 0usize;
+        let mut fetched = 0usize;
         loop {
             let body = json!({
-                "Filter": { "Provider.Class": "containerregistry" },
+                "Filter": { "Provider.Class": REGISTRY_CLASS },
                 "From": from,
                 "Count": PAGE_SIZE,
                 "Sort": ["Name"],
@@ -311,9 +355,16 @@ impl SacloudClient {
                 .request(Method::GET, "commonserviceitem", Some(body))
                 .await?;
             let received = res.items.len();
-            out.extend(res.items.into_iter().map(ContainerRegistry::from));
+            // サーバ側フィルタが効かなかった場合に備えて、ここでも種別を確かめる。
+            for item in res.items.into_iter().filter(is_container_registry) {
+                let naked: NakedRegistry = serde_json::from_value(item)
+                    .context("コンテナレジストリの解析に失敗しました")?;
+                out.push(ContainerRegistry::from(naked));
+            }
             // 進捗が無い場合に無限ループしないよう received == 0 で必ず抜ける。
-            if received == 0 || out.len() >= res.total {
+            // `total` は絞り込み前の件数なので、受信件数の累計で判定する。
+            fetched += received;
+            if received == 0 || fetched >= res.total {
                 break;
             }
             from += received;
@@ -349,9 +400,12 @@ impl SacloudClient {
         let res: ItemResponse = self
             .request(Method::POST, "commonserviceitem", Some(body))
             .await?;
-        res.item
-            .map(ContainerRegistry::from)
-            .context("作成レスポンスにレジストリが含まれていません")
+        let item = res
+            .item
+            .context("作成レスポンスにレジストリが含まれていません")?;
+        let naked: NakedRegistry =
+            serde_json::from_value(item).context("作成したレジストリの解析に失敗しました")?;
+        Ok(ContainerRegistry::from(naked))
     }
 
     /// 名前・説明・独自ドメインを更新する。
@@ -506,7 +560,9 @@ mod tests {
             "is_ok": true
         }"#;
         let parsed: FindResponse = serde_json::from_str(body).unwrap();
-        let registry = ContainerRegistry::from(parsed.items.into_iter().next().unwrap());
+        let item = parsed.items.into_iter().next().unwrap();
+        let naked: NakedRegistry = serde_json::from_value(item).unwrap();
+        let registry = ContainerRegistry::from(naked);
         assert_eq!(registry.id, ResourceId(112_900_000_000));
         assert_eq!(registry.name, "example");
         assert_eq!(registry.fqdn, "example.sakuracr.jp");
@@ -552,5 +608,117 @@ mod tests {
         let message = format_api_error(StatusCode::BAD_GATEWAY, "<html>oops</html>");
         assert!(message.contains("502"), "{message}");
         assert!(message.contains("oops"), "{message}");
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::*;
+
+    /// `commonserviceitem` は DNS などと共用なので、種別で絞れること。
+    #[test]
+    fn filters_out_other_common_service_items() {
+        let body = r#"{
+            "From": 0, "Count": 2, "Total": 2,
+            "CommonServiceItems": [
+                {
+                    "ID": "113701924283",
+                    "Name": "example.jp",
+                    "Provider": {"Class": "dns"},
+                    "Settings": {"DNS": {"ResourceRecordSets": [
+                        {"Name": "app", "Type": "ALIAS", "RData": null}
+                    ]}}
+                },
+                {
+                    "ID": "112900000000",
+                    "Name": "my-registry",
+                    "Provider": {"Class": "containerregistry"},
+                    "Settings": {"ContainerRegistry": {"public": "none", "virtual_domain": ""}},
+                    "Status": {"registry_name": "my-registry", "hostname": "my-registry.sakuracr.jp"}
+                }
+            ]
+        }"#;
+        let res: FindResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(res.items.len(), 2, "生の項目は全件受け取る");
+
+        let registries: Vec<ContainerRegistry> = res
+            .items
+            .into_iter()
+            .filter(is_container_registry)
+            .map(|item| {
+                let naked: NakedRegistry = serde_json::from_value(item).unwrap();
+                ContainerRegistry::from(naked)
+            })
+            .collect();
+        assert_eq!(registries.len(), 1);
+        assert_eq!(registries[0].name, "my-registry");
+    }
+
+    /// 未設定の項目が `null` で返ってきても既定値として受けられること。
+    #[test]
+    fn accepts_null_strings() {
+        let body = r#"{
+            "ID": 1,
+            "Name": "x",
+            "Description": null,
+            "Tags": null,
+            "Availability": null,
+            "Settings": {"ContainerRegistry": {"public": null, "virtual_domain": null}},
+            "Status": {"registry_name": null, "hostname": null}
+        }"#;
+        let naked: NakedRegistry = serde_json::from_str(body).unwrap();
+        let registry = ContainerRegistry::from(naked);
+        assert_eq!(registry.description, "");
+        assert!(registry.tags.is_empty());
+        assert_eq!(registry.availability, "");
+        assert_eq!(registry.fqdn, "");
+    }
+
+    /// GET は検索条件をクエリ文字列で送る（ボディは読まれない）。
+    #[test]
+    fn get_puts_search_conditions_in_query_string() {
+        let mut url = reqwest::Url::parse("https://example.com/api/commonserviceitem").unwrap();
+        let body = json!({ "Filter": { "Provider.Class": REGISTRY_CLASS } });
+        url.set_query(Some(&serde_json::to_string(&body).unwrap()));
+        let query = url.query().unwrap();
+        assert!(query.contains("Provider.Class"), "{query}");
+        assert!(query.contains(REGISTRY_CLASS), "{query}");
+    }
+}
+
+#[cfg(test)]
+mod class_tests {
+    use super::*;
+
+    #[test]
+    fn detects_registry_by_provider_class() {
+        let item = serde_json::json!({"Provider": {"Class": "containerregistry"}});
+        assert!(is_container_registry(&item));
+    }
+
+    #[test]
+    fn rejects_other_classes() {
+        let item = serde_json::json!({
+            "Provider": {"Class": "dns"},
+            "Settings": {"DNS": {"ResourceRecordSets": []}}
+        });
+        assert!(!is_container_registry(&item));
+    }
+
+    /// Provider が返らない場合でも Settings で判定できること。
+    #[test]
+    fn falls_back_to_settings_shape() {
+        let registry = serde_json::json!({
+            "Settings": {"ContainerRegistry": {"public": "none"}}
+        });
+        assert!(is_container_registry(&registry));
+
+        let dns = serde_json::json!({"Settings": {"DNS": {"ResourceRecordSets": []}}});
+        assert!(!is_container_registry(&dns));
+    }
+
+    #[test]
+    fn rejects_items_without_any_signal() {
+        assert!(!is_container_registry(&serde_json::json!({"ID": "1"})));
     }
 }

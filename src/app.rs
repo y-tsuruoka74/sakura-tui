@@ -62,8 +62,9 @@ pub enum Message {
 }
 
 /// 遅延ロードするデータの状態。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Loadable<T> {
+    #[default]
     Idle,
     Loading,
     Ready(T),
@@ -139,8 +140,9 @@ fn matches(filter: &str, fields: &[&str]) -> bool {
         .any(|field| field.to_lowercase().contains(&needle))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
+    #[default]
     Overview,
     Users,
     Images,
@@ -181,15 +183,17 @@ impl Mode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
+    #[default]
     Registries,
     Detail,
 }
 
 /// イメージタブ内で選択中のペイン。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ImagePane {
+    #[default]
     Repositories,
     Tags,
 }
@@ -342,19 +346,9 @@ pub enum Overlay {
     },
 }
 
-pub struct App {
-    sacloud: Arc<SacloudClient>,
-    tx: UnboundedSender<Message>,
-    pub config: Config,
-    pub registry_clients: RegistryClients,
-    pub credential_source: CredentialSource,
-
-    pub mode: Mode,
-    pub should_quit: bool,
-    /// 実行中の非同期リクエスト数（スピナー表示用）。
-    pub inflight: usize,
-    pub tick: u64,
-
+/// コンテナレジストリ画面が持つ状態。
+#[derive(Debug, Default)]
+pub struct RegistryView {
     pub registries: Loadable<Vec<ContainerRegistry>>,
     pub registry_state: TableState,
 
@@ -374,6 +368,23 @@ pub struct App {
     pub filters: Filters,
     /// 絞り込み文字列を編集中かどうか。
     pub filtering: bool,
+}
+
+pub struct App {
+    sacloud: Arc<SacloudClient>,
+    tx: UnboundedSender<Message>,
+    pub config: Config,
+    pub registry_clients: RegistryClients,
+    pub credential_source: CredentialSource,
+
+    pub mode: Mode,
+    pub should_quit: bool,
+    /// 実行中の非同期リクエスト数（スピナー表示用）。
+    pub inflight: usize,
+    pub tick: u64,
+
+    /// コンテナレジストリ画面の状態。
+    pub registry: RegistryView,
 
     pub overlay: Option<Overlay>,
     pub status: Option<(String, StatusKind)>,
@@ -397,20 +408,7 @@ impl App {
             should_quit: false,
             inflight: 0,
             tick: 0,
-            registries: Loadable::Idle,
-            registry_state: TableState::default(),
-            tab: Tab::Overview,
-            focus: Focus::Registries,
-            users: HashMap::new(),
-            user_state: ListState::default(),
-            image_pane: ImagePane::Repositories,
-            repositories: HashMap::new(),
-            repository_state: ListState::default(),
-            tags: HashMap::new(),
-            tag_state: ListState::default(),
-            tag_details: HashMap::new(),
-            filters: Filters::default(),
-            filtering: false,
+            registry: RegistryView::default(),
             overlay: None,
             status: None,
         };
@@ -423,10 +421,10 @@ impl App {
     // 選択位置は常に「絞り込み後のリスト」に対する添字として扱う。
 
     pub fn visible_registries(&self) -> Vec<&ContainerRegistry> {
-        let Some(items) = self.registries.ready() else {
+        let Some(items) = self.registry.registries.ready() else {
             return Vec::new();
         };
-        let filter = &self.filters.registries;
+        let filter = &self.registry.filters.registries;
         items
             .iter()
             .filter(|r| matches(filter, &[&r.name, r.host(), &r.description]))
@@ -434,7 +432,7 @@ impl App {
     }
 
     pub fn selected_registry(&self) -> Option<&ContainerRegistry> {
-        let index = self.registry_state.selected()?;
+        let index = self.registry.registry_state.selected()?;
         self.visible_registries().into_iter().nth(index)
     }
 
@@ -442,7 +440,7 @@ impl App {
     pub fn visible_users(&self) -> Loadable<Vec<RegistryUser>> {
         let loadable = self
             .selected_registry()
-            .and_then(|r| self.users.get(&r.id))
+            .and_then(|r| self.registry.users.get(&r.id))
             .cloned()
             .unwrap_or(Loadable::Idle);
         let Loadable::Ready(users) = loadable else {
@@ -451,20 +449,20 @@ impl App {
         Loadable::Ready(
             users
                 .into_iter()
-                .filter(|u| matches(&self.filters.users, &[&u.username, u.permission.as_str()]))
+                .filter(|u| matches(&self.registry.filters.users, &[&u.username, u.permission.as_str()]))
                 .collect(),
         )
     }
 
     pub fn selected_user(&self) -> Option<RegistryUser> {
-        let index = self.user_state.selected()?;
+        let index = self.registry.user_state.selected()?;
         self.visible_users().ready()?.get(index).cloned()
     }
 
     pub fn visible_repositories(&self) -> Loadable<Vec<String>> {
         let loadable = self
             .selected_registry()
-            .and_then(|r| self.repositories.get(r.host()))
+            .and_then(|r| self.registry.repositories.get(r.host()))
             .cloned()
             .unwrap_or(Loadable::Idle);
         let Loadable::Ready(repositories) = loadable else {
@@ -473,13 +471,13 @@ impl App {
         Loadable::Ready(
             repositories
                 .into_iter()
-                .filter(|r| matches(&self.filters.repositories, &[r]))
+                .filter(|r| matches(&self.registry.filters.repositories, &[r]))
                 .collect(),
         )
     }
 
     pub fn selected_repository(&self) -> Option<String> {
-        let index = self.repository_state.selected()?;
+        let index = self.registry.repository_state.selected()?;
         self.visible_repositories().ready()?.get(index).cloned()
     }
 
@@ -491,6 +489,7 @@ impl App {
             return Loadable::Idle;
         };
         let loadable = self
+            .registry
             .tags
             .get(&(registry.host().to_string(), repository))
             .cloned()
@@ -500,13 +499,13 @@ impl App {
         };
         Loadable::Ready(
             tags.into_iter()
-                .filter(|t| matches(&self.filters.tags, &[&t.name]))
+                .filter(|t| matches(&self.registry.filters.tags, &[&t.name]))
                 .collect(),
         )
     }
 
     pub fn selected_tag(&self) -> Option<TagInfo> {
-        let index = self.tag_state.selected()?;
+        let index = self.registry.tag_state.selected()?;
         self.visible_tags().ready()?.get(index).cloned()
     }
 
@@ -521,7 +520,7 @@ impl App {
     /// 選択中タグの詳細。
     pub fn selected_tag_detail(&self) -> Loadable<TagDetail> {
         self.selected_tag_key()
-            .and_then(|key| self.tag_details.get(&key))
+            .and_then(|key| self.registry.tag_details.get(&key))
             .cloned()
             .unwrap_or(Loadable::Idle)
     }
@@ -534,12 +533,12 @@ impl App {
 
     /// 現在キー操作の対象になっているリスト。
     pub fn active_pane(&self) -> Pane {
-        match self.focus {
+        match self.registry.focus {
             Focus::Registries => Pane::Registries,
-            Focus::Detail => match self.tab {
+            Focus::Detail => match self.registry.tab {
                 Tab::Overview => Pane::None,
                 Tab::Users => Pane::Users,
-                Tab::Images => match self.image_pane {
+                Tab::Images => match self.registry.image_pane {
                     ImagePane::Repositories => Pane::Repositories,
                     ImagePane::Tags => Pane::Tags,
                 },
@@ -549,13 +548,13 @@ impl App {
 
     /// 現在のペインに掛かっている絞り込み文字列。
     pub fn active_filter(&self) -> &str {
-        self.filters.get(self.active_pane())
+        self.registry.filters.get(self.active_pane())
     }
 
     // --- 非同期処理の起動 ---
 
     fn load_registries(&mut self) {
-        self.registries = Loadable::Loading;
+        self.registry.registries = Loadable::Loading;
         self.inflight += 1;
         let client = self.sacloud.clone();
         let tx = self.tx.clone();
@@ -566,7 +565,7 @@ impl App {
     }
 
     fn load_users(&mut self, id: ResourceId) {
-        self.users.insert(id, Loadable::Loading);
+        self.registry.users.insert(id, Loadable::Loading);
         self.inflight += 1;
         let client = self.sacloud.clone();
         let tx = self.tx.clone();
@@ -580,7 +579,7 @@ impl App {
         let Some(client) = self.registry_clients.get(&host) else {
             return;
         };
-        self.repositories.insert(host.clone(), Loadable::Loading);
+        self.registry.repositories.insert(host.clone(), Loadable::Loading);
         self.inflight += 1;
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -593,7 +592,7 @@ impl App {
         let Some(client) = self.registry_clients.get(&host) else {
             return;
         };
-        self.tags
+        self.registry.tags
             .insert((host.clone(), repository.clone()), Loadable::Loading);
         self.inflight += 1;
         let tx = self.tx.clone();
@@ -612,7 +611,7 @@ impl App {
         let Some(client) = self.registry_clients.get(&key.0) else {
             return;
         };
-        self.tag_details.insert(key.clone(), Loadable::Loading);
+        self.registry.tag_details.insert(key.clone(), Loadable::Loading);
         self.inflight += 1;
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -634,10 +633,10 @@ impl App {
         // 先に選択位置を整えてから、その選択に紐づくデータの要否を判断する。
         self.normalize_selection();
 
-        match self.tab {
+        match self.registry.tab {
             Tab::Overview => {}
             Tab::Users => {
-                if self.users.get(&id).is_none_or(Loadable::is_idle) {
+                if self.registry.users.get(&id).is_none_or(Loadable::is_idle) {
                     self.load_users(id);
                 }
             }
@@ -646,18 +645,18 @@ impl App {
                 self.try_auto_login(&host);
             }
             Tab::Images => {
-                if self.repositories.get(&host).is_none_or(Loadable::is_idle) {
+                if self.registry.repositories.get(&host).is_none_or(Loadable::is_idle) {
                     self.load_repositories(host.clone());
                 }
                 if let Some(repository) = self.selected_repository() {
                     let key = (host.clone(), repository.clone());
-                    if self.tags.get(&key).is_none_or(Loadable::is_idle) {
+                    if self.registry.tags.get(&key).is_none_or(Loadable::is_idle) {
                         self.load_tags(host, repository);
                     }
                 }
                 // 詳細は選択中のタグの分だけ取る。
                 if let Some(key) = self.selected_tag_key()
-                    && self.tag_details.get(&key).is_none_or(Loadable::is_idle)
+                    && self.registry.tag_details.get(&key).is_none_or(Loadable::is_idle)
                 {
                     self.load_tag_detail(key);
                 }
@@ -675,11 +674,11 @@ impl App {
         }
 
         let users = self.visible_users().ready().map_or(0, Vec::len);
-        fill(&mut self.user_state, users);
+        fill(&mut self.registry.user_state, users);
         let repositories = self.visible_repositories().ready().map_or(0, Vec::len);
-        fill(&mut self.repository_state, repositories);
+        fill(&mut self.registry.repository_state, repositories);
         let tags = self.visible_tags().ready().map_or(0, Vec::len);
-        fill(&mut self.tag_state, tags);
+        fill(&mut self.registry.tag_state, tags);
     }
 
     /// 設定ファイルにログイン情報があれば自動でクライアントを作る。
@@ -689,11 +688,11 @@ impl App {
         };
         match self.registry_clients.insert(host, login) {
             Ok(_) => {
-                self.repositories.insert(host.to_string(), Loadable::Idle);
+                self.registry.repositories.insert(host.to_string(), Loadable::Idle);
                 self.load_repositories(host.to_string());
             }
             Err(err) => {
-                self.repositories
+                self.registry.repositories
                     .insert(host.to_string(), Loadable::Failed(fmt_error(err)));
             }
         }
@@ -711,39 +710,39 @@ impl App {
                 let index = previous
                     .and_then(|id| items.iter().position(|r| r.id == id))
                     .or(if items.is_empty() { None } else { Some(0) });
-                self.registries = Loadable::Ready(items);
-                self.registry_state.select(index);
+                self.registry.registries = Loadable::Ready(items);
+                self.registry.registry_state.select(index);
                 self.set_status(format!("コンテナレジストリ {count} 件"), StatusKind::Info);
                 self.ensure_loaded();
             }
             Message::Registries(Err(err)) => {
-                self.registries = Loadable::Failed(err.clone());
+                self.registry.registries = Loadable::Failed(err.clone());
                 self.set_status(err, StatusKind::Error);
             }
             Message::Users { id, result } => {
                 match result {
                     Ok(users) => {
-                        self.user_state
+                        self.registry.user_state
                             .select(if users.is_empty() { None } else { Some(0) });
-                        self.users.insert(id, Loadable::Ready(users));
+                        self.registry.users.insert(id, Loadable::Ready(users));
                     }
                     Err(err) => {
                         self.set_status(err.clone(), StatusKind::Error);
-                        self.users.insert(id, Loadable::Failed(err));
+                        self.registry.users.insert(id, Loadable::Failed(err));
                     }
                 };
             }
             Message::Repositories { host, result } => {
                 match result {
                     Ok(repos) => {
-                        self.repository_state
+                        self.registry.repository_state
                             .select(if repos.is_empty() { None } else { Some(0) });
-                        self.repositories.insert(host, Loadable::Ready(repos));
+                        self.registry.repositories.insert(host, Loadable::Ready(repos));
                         self.ensure_loaded();
                     }
                     Err(err) => {
                         self.set_status(err.clone(), StatusKind::Error);
-                        self.repositories.insert(host, Loadable::Failed(err));
+                        self.registry.repositories.insert(host, Loadable::Failed(err));
                     }
                 };
             }
@@ -755,13 +754,13 @@ impl App {
                 let key = (host, repository);
                 match result {
                     Ok(tags) => {
-                        self.tag_state
+                        self.registry.tag_state
                             .select(if tags.is_empty() { None } else { Some(0) });
-                        self.tags.insert(key, Loadable::Ready(tags));
+                        self.registry.tags.insert(key, Loadable::Ready(tags));
                     }
                     Err(err) => {
                         self.set_status(err.clone(), StatusKind::Error);
-                        self.tags.insert(key, Loadable::Failed(err));
+                        self.registry.tags.insert(key, Loadable::Failed(err));
                     }
                 };
             }
@@ -771,7 +770,7 @@ impl App {
                     // タグ詳細は付加情報なのでステータス行を汚さず枠内にだけ出す。
                     Err(err) => Loadable::Failed(err),
                 };
-                self.tag_details.insert(key, loadable);
+                self.registry.tag_details.insert(key, loadable);
             }
             Message::LoginVerified {
                 host,
@@ -795,7 +794,7 @@ impl App {
                     } else {
                         self.set_status(format!("{host} にログインしました"), StatusKind::Success);
                     }
-                    self.repositories.insert(host.clone(), Loadable::Idle);
+                    self.registry.repositories.insert(host.clone(), Loadable::Idle);
                     self.load_repositories(host);
                 }
                 Err(err) => {
@@ -831,9 +830,9 @@ impl App {
                 Ok(()) => {
                     self.set_status(format!("{label}しました"), StatusKind::Success);
                     // 同じダイジェストの他のタグも消えているので一覧ごと取り直す。
-                    self.tag_details
+                    self.registry.tag_details
                         .retain(|(h, r, _), _| h != &host || r != &repository);
-                    self.tag_state.select(None);
+                    self.registry.tag_state.select(None);
                     self.load_tags(host, repository);
                 }
                 Err(err) => {
@@ -877,7 +876,7 @@ impl App {
         }
         if self.overlay.is_some() {
             self.on_key_overlay(key);
-        } else if self.filtering {
+        } else if self.registry.filtering {
             self.on_key_filter(key);
         } else {
             self.on_key_main(key);
@@ -891,9 +890,9 @@ impl App {
             // Esc は「ひとつ戻る」。絞り込みが効いていればまずそれを解除する。
             KeyCode::Esc => {
                 let pane = self.active_pane();
-                if self.filters.get(pane).is_empty() {
+                if self.registry.filters.get(pane).is_empty() {
                     self.focus_left();
-                } else if let Some(filter) = self.filters.get_mut(pane) {
+                } else if let Some(filter) = self.registry.filters.get_mut(pane) {
                     filter.clear();
                     self.clamp_selection(pane);
                 }
@@ -966,22 +965,22 @@ impl App {
         if self.active_pane() == Pane::None {
             return;
         }
-        self.filtering = true;
+        self.registry.filtering = true;
     }
 
     /// 絞り込み文字列の編集中のキー入力。
     fn on_key_filter(&mut self, key: KeyEvent) {
         let pane = self.active_pane();
-        let Some(filter) = self.filters.get_mut(pane) else {
-            self.filtering = false;
+        let Some(filter) = self.registry.filters.get_mut(pane) else {
+            self.registry.filtering = false;
             return;
         };
         match key.code {
             // Enter は確定、Esc は取り消して絞り込みを解除。
-            KeyCode::Enter => self.filtering = false,
+            KeyCode::Enter => self.registry.filtering = false,
             KeyCode::Esc => {
                 filter.clear();
-                self.filtering = false;
+                self.registry.filtering = false;
             }
             KeyCode::Backspace => {
                 filter.pop();
@@ -1007,11 +1006,11 @@ impl App {
         // 絞り込みでレジストリやリポジトリが変わると下位の選択も無効になる。
         match pane {
             Pane::Registries => {
-                self.user_state.select(None);
-                self.repository_state.select(None);
-                self.tag_state.select(None);
+                self.registry.user_state.select(None);
+                self.registry.repository_state.select(None);
+                self.registry.tag_state.select(None);
             }
-            Pane::Repositories => self.tag_state.select(None),
+            Pane::Repositories => self.registry.tag_state.select(None),
             _ => {}
         }
     }
@@ -1028,10 +1027,10 @@ impl App {
 
     fn list_state(&mut self, pane: Pane) -> Option<&mut dyn SelectableList> {
         match pane {
-            Pane::Registries => Some(&mut self.registry_state),
-            Pane::Users => Some(&mut self.user_state),
-            Pane::Repositories => Some(&mut self.repository_state),
-            Pane::Tags => Some(&mut self.tag_state),
+            Pane::Registries => Some(&mut self.registry.registry_state),
+            Pane::Users => Some(&mut self.registry.user_state),
+            Pane::Repositories => Some(&mut self.registry.repository_state),
+            Pane::Tags => Some(&mut self.registry.tag_state),
             Pane::None => None,
         }
     }
@@ -1115,12 +1114,12 @@ impl App {
         self.sacloud = client;
         self.credential_source = source;
         // ユーザーはレジストリIDに紐づくので、契約が変われば無効。
-        self.users.clear();
-        self.registry_state.select(None);
-        self.user_state.select(None);
-        self.repository_state.select(None);
-        self.tag_state.select(None);
-        self.filters = Filters::default();
+        self.registry.users.clear();
+        self.registry.registry_state.select(None);
+        self.registry.user_state.select(None);
+        self.registry.repository_state.select(None);
+        self.registry.tag_state.select(None);
+        self.registry.filters = Filters::default();
         self.set_status(
             format!("{} に切り替えました", self.credential_source.label()),
             StatusKind::Info,
@@ -1136,12 +1135,12 @@ impl App {
         };
         let id = registry.id;
         let host = registry.host().to_string();
-        match self.tab {
+        match self.registry.tab {
             Tab::Overview => self.load_registries(),
             Tab::Users => self.load_users(id),
-            Tab::Images => match self.image_pane {
+            Tab::Images => match self.registry.image_pane {
                 ImagePane::Repositories => {
-                    self.tags.retain(|(h, _), _| h != &host);
+                    self.registry.tags.retain(|(h, _), _| h != &host);
                     self.load_repositories(host);
                 }
                 ImagePane::Tags => {
@@ -1154,41 +1153,41 @@ impl App {
     }
 
     fn invalidate_all(&mut self) {
-        self.users.clear();
-        self.repositories.clear();
-        self.tags.clear();
+        self.registry.users.clear();
+        self.registry.repositories.clear();
+        self.registry.tags.clear();
     }
 
     fn set_tab(&mut self, tab: Tab) {
-        self.tab = tab;
-        self.focus = Focus::Detail;
+        self.registry.tab = tab;
+        self.registry.focus = Focus::Detail;
     }
 
     fn cycle_tab(&mut self, delta: i32) {
-        let current = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0) as i32;
+        let current = Tab::ALL.iter().position(|t| *t == self.registry.tab).unwrap_or(0) as i32;
         let len = Tab::ALL.len() as i32;
-        self.tab = Tab::ALL[(current + delta).rem_euclid(len) as usize];
-        self.focus = Focus::Detail;
+        self.registry.tab = Tab::ALL[(current + delta).rem_euclid(len) as usize];
+        self.registry.focus = Focus::Detail;
     }
 
     fn focus_left(&mut self) {
-        if self.focus == Focus::Detail
-            && self.tab == Tab::Images
-            && self.image_pane == ImagePane::Tags
+        if self.registry.focus == Focus::Detail
+            && self.registry.tab == Tab::Images
+            && self.registry.image_pane == ImagePane::Tags
         {
-            self.image_pane = ImagePane::Repositories;
+            self.registry.image_pane = ImagePane::Repositories;
             return;
         }
-        self.focus = Focus::Registries;
+        self.registry.focus = Focus::Registries;
     }
 
     fn focus_right(&mut self) {
-        if self.focus == Focus::Registries {
-            self.focus = Focus::Detail;
+        if self.registry.focus == Focus::Registries {
+            self.registry.focus = Focus::Detail;
             return;
         }
-        if self.tab == Tab::Images && self.image_pane == ImagePane::Repositories {
-            self.image_pane = ImagePane::Tags;
+        if self.registry.tab == Tab::Images && self.registry.image_pane == ImagePane::Repositories {
+            self.registry.image_pane = ImagePane::Tags;
         }
     }
 
@@ -1221,15 +1220,15 @@ impl App {
 
     /// レジストリやリポジトリの選択が変わったら、それにぶら下がる選択をリセットする。
     fn after_selection_change(&mut self) {
-        match (self.focus, self.tab, self.image_pane) {
+        match (self.registry.focus, self.registry.tab, self.registry.image_pane) {
             (Focus::Registries, _, _) => {
-                self.user_state.select(None);
-                self.repository_state.select(None);
-                self.tag_state.select(None);
-                self.image_pane = ImagePane::Repositories;
+                self.registry.user_state.select(None);
+                self.registry.repository_state.select(None);
+                self.registry.tag_state.select(None);
+                self.registry.image_pane = ImagePane::Repositories;
             }
             (Focus::Detail, Tab::Images, ImagePane::Repositories) => {
-                self.tag_state.select(None);
+                self.registry.tag_state.select(None);
             }
             _ => {}
         }
@@ -1237,25 +1236,25 @@ impl App {
 
     /// 現在フォーカスしているリストの状態と要素数。
     fn active_list(&mut self) -> Option<(&mut dyn SelectableList, usize)> {
-        match self.focus {
+        match self.registry.focus {
             Focus::Registries => {
-                let len = self.registries.ready().map_or(0, Vec::len);
-                Some((&mut self.registry_state, len))
+                let len = self.registry.registries.ready().map_or(0, Vec::len);
+                Some((&mut self.registry.registry_state, len))
             }
-            Focus::Detail => match self.tab {
+            Focus::Detail => match self.registry.tab {
                 Tab::Overview => None,
                 Tab::Users => {
                     let len = self.visible_users().ready().map_or(0, Vec::len);
-                    Some((&mut self.user_state, len))
+                    Some((&mut self.registry.user_state, len))
                 }
-                Tab::Images => match self.image_pane {
+                Tab::Images => match self.registry.image_pane {
                     ImagePane::Repositories => {
                         let len = self.visible_repositories().ready().map_or(0, Vec::len);
-                        Some((&mut self.repository_state, len))
+                        Some((&mut self.registry.repository_state, len))
                     }
                     ImagePane::Tags => {
                         let len = self.visible_tags().ready().map_or(0, Vec::len);
-                        Some((&mut self.tag_state, len))
+                        Some((&mut self.registry.tag_state, len))
                     }
                 },
             },
@@ -1274,8 +1273,8 @@ impl App {
         else {
             return;
         };
-        self.tab = Tab::Users;
-        self.focus = Focus::Detail;
+        self.registry.tab = Tab::Users;
+        self.registry.focus = Focus::Detail;
         self.overlay = Some(Overlay::UserForm(UserForm {
             registry: id,
             registry_name: name,
@@ -1291,7 +1290,7 @@ impl App {
         if !self.require_write() {
             return;
         }
-        if self.tab != Tab::Users {
+        if self.registry.tab != Tab::Users {
             return;
         }
         let Some(registry) = self.selected_registry() else {
@@ -1318,7 +1317,7 @@ impl App {
     }
 
     fn confirm_delete_user(&mut self) {
-        if self.tab != Tab::Users {
+        if self.registry.tab != Tab::Users {
             return;
         }
         let Some(registry) = self.selected_registry() else {
@@ -1452,8 +1451,8 @@ impl App {
             }
             ConfirmAction::ForgetLogin { host } => {
                 self.registry_clients.remove(&host);
-                self.repositories.remove(&host);
-                self.tags.retain(|(h, _), _| h != &host);
+                self.registry.repositories.remove(&host);
+                self.registry.tags.retain(|(h, _), _| h != &host);
                 let removed = self.config.registries.remove(&host).is_some();
                 if removed {
                     match self.config.save() {
@@ -1645,8 +1644,8 @@ impl App {
             return;
         }
         let saved = self.config.registries.get(&host).cloned();
-        self.tab = Tab::Images;
-        self.focus = Focus::Detail;
+        self.registry.tab = Tab::Images;
+        self.registry.focus = Focus::Detail;
         self.overlay = Some(Overlay::Login(LoginForm {
             username: saved.as_ref().map(|l| l.username.clone()).unwrap_or_default(),
             password: String::new(),

@@ -10,8 +10,8 @@ use super::{DIM, SAKURA, border_style};
 use crate::app::{App, Focus, Loadable};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Registries;
-    let count = app.registries.ready().map_or(0, Vec::len);
+    let focused = app.registry.focus == Focus::Registries;
+    let count = app.registry.registries.ready().map_or(0, Vec::len);
     let title = if count > 0 {
         format!(" レジストリ ({count}) ")
     } else {
@@ -24,7 +24,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ))
         .border_style(border_style(focused));
 
-    match &app.registries {
+    match &app.registry.registries {
         Loadable::Idle | Loadable::Loading => {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -81,7 +81,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
                 })
                 .highlight_symbol("")
                 .block(block);
-            frame.render_stateful_widget(table, area, &mut app.registry_state);
+            frame.render_stateful_widget(table, area, &mut app.registry.registry_state);
         }
     }
 }

@@ -21,7 +21,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    match app.tab {
+    match app.registry.tab {
         Tab::Overview => draw_overview(frame, area, app, &registry),
         Tab::Users => draw_users(frame, area, app, &registry),
         Tab::Images => draw_images(frame, area, app, &registry),
@@ -84,7 +84,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App, registry: &ContainerR
         }
     }
 
-    let focused = app.focus == Focus::Detail;
+    let focused = app.registry.focus == Focus::Detail;
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::bordered()
@@ -97,7 +97,7 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App, registry: &ContainerR
 }
 
 fn draw_users(frame: &mut Frame, area: Rect, app: &mut App, _registry: &ContainerRegistry) {
-    let focused = app.focus == Focus::Detail;
+    let focused = app.registry.focus == Focus::Detail;
     let users = app.visible_users();
     let block = Block::bordered()
         .title(" ユーザー ")
@@ -133,7 +133,7 @@ fn draw_users(frame: &mut Frame, area: Rect, app: &mut App, _registry: &Containe
                 .block(block)
                 .highlight_style(highlight_style(focused))
                 .highlight_symbol("▌");
-            frame.render_stateful_widget(list, area, &mut app.user_state);
+            frame.render_stateful_widget(list, area, &mut app.registry.user_state);
         }
     }
 }
@@ -167,7 +167,7 @@ fn draw_images(frame: &mut Frame, area: Rect, app: &mut App, registry: &Containe
             Paragraph::new(lines).wrap(Wrap { trim: false }).block(
                 Block::bordered()
                     .title(" イメージ ")
-                    .border_style(border_style(app.focus == Focus::Detail))
+                    .border_style(border_style(app.registry.focus == Focus::Detail))
                     .padding(ratatui::widgets::Padding::horizontal(1)),
             ),
             area,
@@ -267,7 +267,7 @@ fn short_media_type(media_type: &str) -> &str {
 }
 
 fn draw_repositories(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Detail && app.image_pane == ImagePane::Repositories;
+    let focused = app.registry.focus == Focus::Detail && app.registry.image_pane == ImagePane::Repositories;
     let repositories = app.visible_repositories();
     let count = repositories.ready().map_or(0, Vec::len);
     let block = Block::bordered()
@@ -293,13 +293,13 @@ fn draw_repositories(frame: &mut Frame, area: Rect, app: &mut App) {
                 .block(block)
                 .highlight_style(highlight_style(focused))
                 .highlight_symbol("▌");
-            frame.render_stateful_widget(list, area, &mut app.repository_state);
+            frame.render_stateful_widget(list, area, &mut app.registry.repository_state);
         }
     }
 }
 
 fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Detail && app.image_pane == ImagePane::Tags;
+    let focused = app.registry.focus == Focus::Detail && app.registry.image_pane == ImagePane::Tags;
     let repository = app.selected_repository();
     let tags = app.visible_tags();
     let block = Block::bordered()
@@ -347,7 +347,7 @@ fn draw_tags(frame: &mut Frame, area: Rect, app: &mut App) {
                 .block(block)
                 .highlight_style(highlight_style(focused))
                 .highlight_symbol("▌");
-            frame.render_stateful_widget(list, area, &mut app.tag_state);
+            frame.render_stateful_widget(list, area, &mut app.registry.tag_state);
         }
     }
 }
