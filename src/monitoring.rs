@@ -292,6 +292,13 @@ impl MonitoringClient {
         .await
     }
 
+    /// 指定ゾーンのアラートプロジェクト件数だけを数える。
+    pub async fn count_projects(&self, zone: &str) -> Result<usize> {
+        let query = [("from", "0".to_string()), ("count", "1".to_string())];
+        let res: Paginated<RawProject> = self.get(zone, "alerts/projects/", &query).await?;
+        Ok(res.total)
+    }
+
     pub async fn list_rules(&self, zone: &str, project: i64) -> Result<Vec<AlertRule>> {
         let path = format!("alerts/projects/{project}/rules/");
         self.collect(|from| {

@@ -15,6 +15,30 @@ const PAGE_SIZE: usize = 100;
 /// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
 const MAX_PAGES: usize = 100;
 
+/// API から取得できないときに使うゾーン一覧。
+///
+/// 認証情報を作る前はゾーン一覧を引けないため、既知のものを並べておく。
+/// （sacloud/iaas-api-go の `types::ZoneNames` と同じ並び）
+pub const KNOWN_ZONES: [(&str, &str); 6] = [
+    ("tk1a", "東京第1"),
+    ("tk1b", "東京第2"),
+    ("is1a", "石狩第1"),
+    ("is1b", "石狩第2"),
+    ("is1c", "石狩第3"),
+    ("tk1v", "サンドボックス"),
+];
+
+/// 既知のゾーンを `Zone` として返す。
+pub fn known_zones() -> Vec<Zone> {
+    KNOWN_ZONES
+        .iter()
+        .map(|(name, description)| Zone {
+            name: name.to_string(),
+            description: description.to_string(),
+        })
+        .collect()
+}
+
 /// ゾーン 1 件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Zone {
@@ -289,6 +313,17 @@ impl SacloudClient {
         Ok(out)
     }
 
+    /// 指定ゾーンのサーバー件数だけを数える。
+    ///
+    /// 一覧を全部引かずに済むよう、1 件だけ要求して `Total` を読む。
+    pub async fn count_servers(&self, zone: &str) -> Result<usize> {
+        let body = json!({ "From": 0, "Count": 1 });
+        let res: ServerFindResponse = self
+            .request_in_zone(zone, Method::GET, "server", Some(body))
+            .await?;
+        Ok(res.total)
+    }
+
     /// 電源操作。
     pub async fn power_action(
         &self,
@@ -379,5 +414,30 @@ mod tests {
         assert!(PowerAction::Reset.is_risky());
         assert!(!PowerAction::Boot.is_risky());
         assert!(!PowerAction::Shutdown.is_risky());
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    /// 件数だけを知りたいので、1 件だけ返る応答から Total を読めること。
+    #[test]
+    fn reads_total_from_single_record_response() {
+        let body = r#"{"Total": 42, "From": 0, "Count": 1, "Servers": [
+            {"ID": "1", "Name": "web-01"}
+        ]}"#;
+        let res: ServerFindResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(res.total, 42);
+        assert_eq!(res.servers.len(), 1, "1件だけ受け取る");
+    }
+
+    /// 0 件のゾーンでも落ちないこと。
+    #[test]
+    fn zero_servers_is_fine() {
+        let body = r#"{"Total": 0, "From": 0, "Count": 0, "Servers": []}"#;
+        let res: ServerFindResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(res.total, 0);
+        assert!(res.servers.is_empty());
     }
 }

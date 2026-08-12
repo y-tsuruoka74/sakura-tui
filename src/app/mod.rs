@@ -4,7 +4,7 @@
 //! API 呼び出しは全て `tokio::spawn` して `Message` として結果を受け取るため、
 //! 通信中も UI がブロックしない。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,7 +24,7 @@ pub use server::ServerView;
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::commonservice::{DnsZone, SimpleMonitor};
-use crate::config::{Config, CredentialSource, RegistryLogin};
+use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
 use crate::monitoring::{AlertHistory, AlertProject, AlertRule, MonitoringClient, Storage};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
@@ -136,7 +136,27 @@ pub enum Message {
         zone: String,
         result: Result<Vec<Storage>, String>,
     },
+    /// プロファイル作成時の検証結果。検証が通ってから書き出す。
+    ProfileVerified {
+        form: Box<ProfileForm>,
+        result: Result<(), String>,
+    },
+    /// 認証情報の読み込み結果（キーチェーンを触るため別スレッドで実行する）。
+    CredentialsLoaded {
+        source: Box<CredentialSource>,
+        result: Box<Result<ApiCredentials, String>>,
+    },
+    /// 保存済みのレジストリログイン（キーチェーンから読み出した結果）。
+    SavedLogin {
+        host: String,
+        login: Option<RegistryLogin>,
+    },
     Zones(Result<Vec<Zone>, String>),
+    ZoneCount {
+        service: Service,
+        zone: String,
+        result: Result<usize, String>,
+    },
     Servers {
         zone: String,
         result: Result<Vec<Server>, String>,
@@ -266,7 +286,7 @@ impl Tab {
 }
 
 /// TUI が扱うサービス。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Service {
     #[default]
     Registry,
@@ -322,6 +342,18 @@ impl Service {
         Service::ALL
             .into_iter()
             .find(|svc| svc.arg_name().eq_ignore_ascii_case(name))
+    }
+
+    /// ゾーンごとの件数を数えるときの対象の呼び名。
+    ///
+    /// ゾーンに依存しないサービスは数えない。
+    pub fn countable_label(self) -> Option<&'static str> {
+        match self {
+            Service::Server => Some("サーバー"),
+            Service::Secrets => Some("Vault"),
+            Service::Monitoring => Some("プロジェクト"),
+            _ => None,
+        }
     }
 
     /// ゾーンを選ぶ意味があるサービスか。
@@ -401,6 +433,117 @@ impl UserForm {
 
     pub fn permission(&self) -> Permission {
         Permission::ALL[self.permission % Permission::ALL.len()]
+    }
+}
+
+/// 資格情報の保存先。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileStorage {
+    /// `~/.usacloud/<名前>/config.json`。usacloud・Terraform・Packer と共用できる。
+    #[default]
+    Usacloud,
+    /// OS のキーチェーン。平文は残らないが、この TUI からしか使えない。
+    Keychain,
+}
+
+impl ProfileStorage {
+    pub const ALL: [ProfileStorage; 2] = [ProfileStorage::Usacloud, ProfileStorage::Keychain];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            ProfileStorage::Usacloud => "usacloud 互換",
+            ProfileStorage::Keychain => "キーチェーン",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            ProfileStorage::Usacloud => {
+                "~/.usacloud に平文(0600)。usacloud/Terraform/Packer と共用できます"
+            }
+            ProfileStorage::Keychain => {
+                "OSのキーチェーンに保存。平文は残りませんが他ツールからは使えません"
+            }
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            ProfileStorage::Usacloud => ProfileStorage::Keychain,
+            ProfileStorage::Keychain => ProfileStorage::Usacloud,
+        }
+    }
+}
+
+/// 資格情報の作成フォーム。
+#[derive(Debug, Clone, Default)]
+pub struct ProfileForm {
+    pub name: String,
+    pub token: String,
+    pub secret: String,
+    /// 選べるゾーン。API から取れていればそれを、無ければ既知の一覧を使う。
+    pub zones: Vec<Zone>,
+    pub zone_index: usize,
+    pub storage: ProfileStorage,
+    pub field: usize,
+    /// 検証中はキー入力を受け付けない。
+    pub verifying: bool,
+}
+
+impl ProfileForm {
+    /// 入力欄の数（末尾の 2 つは選択式）。
+    pub const FIELDS: usize = 5;
+    /// ゾーンを選ぶ欄の位置。
+    pub const ZONE_FIELD: usize = 3;
+    /// 保存先を選ぶ欄の位置。
+    pub const STORAGE_FIELD: usize = 4;
+
+    pub fn label(index: usize) -> &'static str {
+        match index {
+            0 => "名前",
+            1 => "アクセストークン",
+            2 => "シークレット",
+            3 => "既定ゾーン",
+            _ => "保存先",
+        }
+    }
+
+    /// 文字入力を受け付ける欄か。
+    fn is_text(index: usize) -> bool {
+        index < Self::ZONE_FIELD
+    }
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.token,
+            2 => &self.secret,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.token),
+            2 => Some(&mut self.secret),
+            _ => None,
+        }
+    }
+
+    /// 選択中のゾーン。
+    pub fn zone(&self) -> &Zone {
+        &self.zones[self.zone_index.min(self.zones.len() - 1)]
+    }
+
+    fn cycle_zone(&mut self, delta: i32) {
+        let len = self.zones.len() as i32;
+        self.zone_index = ((self.zone_index as i32 + delta).rem_euclid(len)) as usize;
+    }
+
+    /// トークンとシークレットは伏せ字にする。
+    pub fn is_secret(index: usize) -> bool {
+        matches!(index, 1 | 2)
     }
 }
 
@@ -484,6 +627,9 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    DeleteCredential {
+        name: String,
+    },
     DeleteTag {
         host: String,
         repository: String,
@@ -516,6 +662,8 @@ pub enum Overlay {
         title: String,
         body: String,
         kind: StatusKind,
+        /// 長い本文を読み切れるようにするためのスクロール位置。
+        scroll: u16,
     },
     Confirm {
         title: String,
@@ -544,6 +692,8 @@ pub enum Overlay {
     ServicePicker {
         index: usize,
     },
+    /// usacloud プロファイルの新規作成。
+    ProfileForm(ProfileForm),
 }
 
 /// コンテナレジストリ画面が持つ状態。
@@ -564,6 +714,8 @@ pub struct RegistryView {
     pub tags: HashMap<(String, String), Loadable<Vec<TagInfo>>>,
     pub tag_state: ListState,
     pub tag_details: HashMap<TagKey, Loadable<TagDetail>>,
+    /// 保存済みログインの読み出しを試したホスト。同じホストを何度も読まないための印。
+    pub auto_login_tried: HashSet<String>,
 }
 
 pub struct App {
@@ -587,6 +739,10 @@ pub struct App {
     /// ゾーンに属するリソース（サーバーなど）を見るときのゾーン。
     pub zone: String,
     pub zones: Loadable<Vec<Zone>>,
+    /// `(サービス, ゾーン)` ごとのリソース件数。ゾーン選択の判断材料に出す。
+    pub zone_counts: HashMap<(Service, String), Loadable<usize>>,
+    /// ゾーン一覧の取得を待ってピッカーを開くかどうか。
+    pending_zone_picker: bool,
 
     /// コンテナレジストリ画面の状態。
     pub registry: RegistryView,
@@ -635,6 +791,8 @@ impl App {
             service: Service::Registry,
             zone: default_zone,
             zones: Loadable::Idle,
+            zone_counts: HashMap::new(),
+            pending_zone_picker: false,
             registry: RegistryView::default(),
             apprun: AppRunView::default(),
             dedicated: DedicatedView::default(),
@@ -976,24 +1134,33 @@ impl App {
         fill(&mut self.registry.tag_state, tags);
     }
 
-    /// 設定ファイルにログイン情報があれば自動でクライアントを作る。
+    /// 保存済みのログイン情報があれば自動でクライアントを作る。
+    ///
+    /// パスワードの取り出しはキーチェーンに触るため別スレッドで行う。
+    /// UI スレッドで呼ぶと、OS の確認ダイアログが出ている間 TUI が固まる。
     fn try_auto_login(&mut self, host: &str) {
-        let Some(login) = self.config.registries.get(host).cloned() else {
+        // 一度試したホストは再試行しない。
+        //
+        // `ensure_loaded` はキー入力とメッセージのたびに走るため、ここで印を
+        // 付けないと失敗するたびに読み直してしまう。キーチェーンは読むたびに
+        // OS の確認ダイアログを出しうるので、それが延々と繰り返される。
+        if !self.registry.auto_login_tried.insert(host.to_string()) {
             return;
-        };
-        match self.registry_clients.insert(host, login) {
-            Ok(_) => {
-                self.registry
-                    .repositories
-                    .insert(host.to_string(), Loadable::Idle);
-                self.load_repositories(host.to_string());
-            }
-            Err(err) => {
-                self.registry
-                    .repositories
-                    .insert(host.to_string(), Loadable::Failed(fmt_error(err)));
-            }
         }
+        if !self.config.registries.contains_key(host) {
+            return;
+        }
+        self.registry
+            .repositories
+            .insert(host.to_string(), Loadable::Loading);
+        self.inflight += 1;
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        let host = host.to_string();
+        tokio::task::spawn_blocking(move || {
+            let login = config.registry_login(&host);
+            let _ = tx.send(Message::SavedLogin { host, login });
+        });
     }
 
     // --- 非同期処理の結果反映 ---
@@ -1091,20 +1258,24 @@ impl App {
             } => match result {
                 Ok(()) => {
                     if save {
-                        self.config.registries.insert(host.clone(), login);
-                        match self.config.save() {
-                            Ok(path) => self.set_status(
-                                format!("{host} にログインしました（{} に保存）", path.display()),
+                        match self.config.save_registry_login(&host, &login) {
+                            Ok(_) => self.set_status(
+                                format!("{host} にログインしました（パスワードはキーチェーンに保存）"),
                                 StatusKind::Success,
                             ),
+                            // 保存できないときに平文へ退避したりはしない。
                             Err(err) => self.set_status(
-                                format!("ログインしましたが設定の保存に失敗: {}", fmt_error(err)),
+                                format!(
+                                    "ログインしました。保存はできませんでした（このセッションのみ有効）: {}",
+                                    fmt_error(err)
+                                ),
                                 StatusKind::Error,
                             ),
                         }
                     } else {
                         self.set_status(format!("{host} にログインしました"), StatusKind::Success);
                     }
+                    self.registry.auto_login_tried.remove(&host);
                     self.registry
                         .repositories
                         .insert(host.clone(), Loadable::Idle);
@@ -1116,6 +1287,7 @@ impl App {
                         title: "ログイン失敗".to_string(),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1171,6 +1343,7 @@ impl App {
                         title: format!("{label}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1259,6 +1432,7 @@ impl App {
                         title: format!("{name} の値"),
                         body: value,
                         kind: StatusKind::Info,
+                        scroll: 0,
                     });
                     self.set_status("値を表示しました", StatusKind::Success);
                 }
@@ -1267,6 +1441,7 @@ impl App {
                         title: "値を取得できませんでした".to_string(),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1300,9 +1475,72 @@ impl App {
                 self.monitoring.storages.insert(zone, loadable);
                 self.ensure_loaded();
             }
-            Message::Zones(Ok(zones)) => self.zones = Loadable::Ready(zones),
+            Message::ProfileVerified { form, result } => match result {
+                Ok(()) => self.save_verified_profile(*form),
+                Err(err) => {
+                    let mut form = *form;
+                    form.verifying = false;
+                    self.set_status(
+                        format!("トークンを検証できませんでした: {err}"),
+                        StatusKind::Error,
+                    );
+                    self.overlay = Some(Overlay::ProfileForm(form));
+                }
+            },
+            Message::ZoneCount {
+                service,
+                zone,
+                result,
+            } => {
+                let loadable = match result {
+                    Ok(count) => Loadable::Ready(count),
+                    // 数えられないゾーン（未契約など）もあるので静かに落とす。
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.zone_counts.insert((service, zone), loadable);
+            }
+            Message::CredentialsLoaded { source, result } => match *result {
+                Ok(credentials) => self.apply_credentials(*source, credentials),
+                Err(err) => {
+                    self.show_error(format!("{} に切り替えられません", source.label()), err)
+                }
+            },
+            Message::SavedLogin { host, login } => match login {
+                Some(login) => match self.registry_clients.insert(&host, login) {
+                    Ok(_) => {
+                        self.registry
+                            .repositories
+                            .insert(host.clone(), Loadable::Idle);
+                        self.load_repositories(host);
+                    }
+                    Err(err) => {
+                        self.registry
+                            .repositories
+                            .insert(host, Loadable::Failed(fmt_error(err)));
+                    }
+                },
+                // 取り出せなければ改めてログインしてもらう。
+                None => {
+                    self.registry.repositories.insert(
+                        host,
+                        Loadable::Failed(
+                            "保存されたパスワードを取り出せませんでした。L キーでログインし直してください。"
+                                .to_string(),
+                        ),
+                    );
+                }
+            },
+            Message::Zones(Ok(zones)) => {
+                self.zones = Loadable::Ready(zones);
+                // ゾーン一覧が揃ってから件数を数えに行く。
+                self.load_zone_counts();
+                if std::mem::take(&mut self.pending_zone_picker) {
+                    self.open_zone_picker();
+                }
+            }
             Message::Zones(Err(err)) => {
                 self.zones = Loadable::Failed(err.clone());
+                self.pending_zone_picker = false;
                 self.set_status(err, StatusKind::Error);
             }
             Message::Servers { zone, result } => {
@@ -1342,6 +1580,7 @@ impl App {
                         title: format!("{label}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1356,6 +1595,7 @@ impl App {
                         title: format!("{label}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1380,6 +1620,7 @@ impl App {
                         title: format!("{label}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1394,6 +1635,7 @@ impl App {
                         title: format!("{label}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
+                        scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
                 }
@@ -1410,6 +1652,20 @@ impl App {
                 Loadable::Failed(err)
             }
         }
+    }
+
+    /// 長い・複数行になりうるエラーは、ステータス行ではなくダイアログに出す。
+    ///
+    /// ステータス行は 1 行に潰して表示するため、原因や対処が読み切れないため。
+    pub fn show_error(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        let body = body.into();
+        self.set_status(body.replace('\n', " "), StatusKind::Error);
+        self.overlay = Some(Overlay::Message {
+            title: title.into(),
+            body,
+            kind: StatusKind::Error,
+            scroll: 0,
+        });
     }
 
     pub fn set_status(&mut self, text: impl Into<String>, kind: StatusKind) {
@@ -1559,9 +1815,15 @@ impl App {
             Loadable::Ready(zones) if !zones.is_empty() => {
                 let index = zones.iter().position(|z| z.name == self.zone).unwrap_or(0);
                 self.overlay = Some(Overlay::ZonePicker { zones, index });
+                self.load_zone_counts();
             }
-            Loadable::Loading => self.set_status("ゾーン一覧を取得中です…", StatusKind::Info),
+            // 取得を待って自動で開く（利用者に2回押させない）。
+            Loadable::Loading => {
+                self.pending_zone_picker = true;
+                self.set_status("ゾーン一覧を取得中です…", StatusKind::Info);
+            }
             _ => {
+                self.pending_zone_picker = true;
                 self.load_zones();
                 self.set_status("ゾーン一覧を取得しています…", StatusKind::Info);
             }
@@ -1577,6 +1839,45 @@ impl App {
             let result = client.list_zones().await.map_err(fmt_error);
             let _ = tx.send(Message::Zones(result));
         });
+    }
+
+    /// 各ゾーンのリソース件数を数える。
+    ///
+    /// ゾーンを選ぶ前に「どこに何があるか」が分かるようにするためのもの。
+    /// 一覧そのものは引かず、総件数だけを取る軽いリクエストを投げる。
+    fn load_zone_counts(&mut self) {
+        let service = self.service;
+        if service.countable_label().is_none() {
+            return;
+        }
+        let Some(zones) = self.zones.ready().cloned() else {
+            return;
+        };
+        for zone in zones {
+            let key = (service, zone.name.clone());
+            if !self.zone_counts.get(&key).is_none_or(Loadable::is_idle) {
+                continue;
+            }
+            self.zone_counts.insert(key, Loadable::Loading);
+            self.inflight += 1;
+            let sacloud = self.sacloud.clone();
+            let monitoring = self.monitoring_client.clone();
+            let tx = self.tx.clone();
+            let name = zone.name.clone();
+            tokio::spawn(async move {
+                let result = match service {
+                    Service::Server => sacloud.count_servers(&name).await,
+                    Service::Secrets => sacloud.count_vaults(&name).await,
+                    Service::Monitoring => monitoring.count_projects(&name).await,
+                    _ => Ok(0),
+                };
+                let _ = tx.send(Message::ZoneCount {
+                    service,
+                    zone: name,
+                    result: result.map_err(fmt_error),
+                });
+            });
+        }
     }
 
     fn switch_zone(&mut self, zone: String) {
@@ -1842,6 +2143,142 @@ impl App {
         self.overlay = Some(Overlay::ProfilePicker { sources, index });
     }
 
+    /// キーチェーンに預けた資格情報の削除を確認する。
+    fn confirm_delete_credential(&mut self, source: &CredentialSource) {
+        let CredentialSource::Keychain(name) = source else {
+            self.set_status(
+                "削除できるのはキーチェーンに保存したものだけです（usacloud のプロファイルは他のツールも使うため消しません）",
+                StatusKind::Info,
+            );
+            return;
+        };
+        if *source == self.credential_source {
+            self.set_status("使用中の資格情報は削除できません", StatusKind::Info);
+            return;
+        }
+        self.overlay = Some(Overlay::Confirm {
+            title: "資格情報の削除".to_string(),
+            body: format!(
+                "「{name}」をキーチェーンと設定ファイルから削除します。\n\
+                 アクセストークン自体はさくらのコントロールパネルに残ります。"
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteCredential { name: name.clone() },
+        });
+    }
+
+    /// 資格情報の作成フォームを開く。
+    fn open_profile_form(&mut self) {
+        // API から取れていればそれを、まだなら既知の一覧を使う。
+        let zones = match self.zones.ready() {
+            Some(zones) if !zones.is_empty() => zones.clone(),
+            _ => crate::iaas::known_zones(),
+        };
+        // 既定は今見ているゾーンに合わせる。
+        let zone_index = zones.iter().position(|z| z.name == self.zone).unwrap_or(0);
+        self.overlay = Some(Overlay::ProfileForm(ProfileForm {
+            zones,
+            zone_index,
+            ..ProfileForm::default()
+        }));
+    }
+
+    /// 入力内容を検証してから保存する。
+    ///
+    /// 打ち間違えたトークンを保存してしまわないよう、実際に API を 1 回叩いて
+    /// 通ることを確かめてから書き出す。
+    fn submit_profile_form(&mut self, mut form: ProfileForm) {
+        if let Err(err) = crate::config::validate_profile_name(&form.name) {
+            self.set_status(fmt_error(err), StatusKind::Error);
+            self.overlay = Some(Overlay::ProfileForm(form));
+            return;
+        }
+        if form.token.trim().is_empty() || form.secret.trim().is_empty() {
+            self.set_status(
+                "アクセストークンとシークレットを入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::ProfileForm(form));
+            return;
+        }
+
+        let credentials = crate::config::ApiCredentials {
+            token: form.token.trim().to_string(),
+            secret: form.secret.trim().to_string(),
+            source: CredentialSource::Env,
+            zone: Some(form.zone().name.clone()),
+        };
+        let client = match SacloudClient::new(&credentials) {
+            Ok(client) => client,
+            Err(err) => {
+                self.set_status(fmt_error(err), StatusKind::Error);
+                self.overlay = Some(Overlay::ProfileForm(form));
+                return;
+            }
+        };
+
+        form.verifying = true;
+        self.overlay = Some(Overlay::ProfileForm(form.clone()));
+        self.inflight += 1;
+        self.set_status("トークンを検証しています…", StatusKind::Info);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            // ゾーン一覧はどのアカウントでも読める、最も軽い読み取り。
+            let result = client.list_zones().await.map(|_| ()).map_err(fmt_error);
+            let _ = tx.send(Message::ProfileVerified {
+                form: Box::new(form),
+                result,
+            });
+        });
+    }
+
+    /// 検証が通った資格情報を保存する。
+    fn save_verified_profile(&mut self, form: ProfileForm) {
+        let saved = match form.storage {
+            ProfileStorage::Usacloud => crate::config::create_usacloud_profile(
+                &form.name,
+                &form.token,
+                &form.secret,
+                &form.zone().name,
+            ),
+            ProfileStorage::Keychain => crate::config::create_keychain_credential(
+                &form.name,
+                &form.token,
+                &form.secret,
+                &form.zone().name,
+            ),
+        };
+        match saved {
+            Ok(path) => {
+                // 保存先の設定を読み直してから、一覧に反映した状態でピッカーへ戻る。
+                if form.storage == ProfileStorage::Keychain
+                    && let Ok(config) = Config::load()
+                {
+                    self.config = config;
+                }
+                self.set_status(
+                    format!(
+                        "{} を作成しました（{}）: {}",
+                        form.name,
+                        form.storage.title(),
+                        path.display()
+                    ),
+                    StatusKind::Success,
+                );
+                self.open_profile_picker();
+            }
+            Err(err) => {
+                self.overlay = Some(Overlay::Message {
+                    title: "作成に失敗しました".to_string(),
+                    body: fmt_error(err),
+                    kind: StatusKind::Error,
+                    scroll: 0,
+                });
+            }
+        }
+    }
+
     /// 認証情報に割り当てる色を順に切り替えて保存する。
     ///
     /// dev と prod のように名前が似ている契約を、自分で決めた色で
@@ -1874,37 +2311,59 @@ impl App {
         }
     }
 
-    /// 認証情報を切り替え、クラウド API 側のキャッシュを捨てて読み直す。
+    /// 認証情報の読み込みを別スレッドで始める。
     ///
-    /// レジストリへのログインはホスト単位でクラウドの契約とは独立なので保持する。
+    /// キーチェーンの読み出しは OS が確認ダイアログを出すことがあり、
+    /// その間ブロックする。UI スレッドで呼ぶと TUI ごと固まるため切り離す。
     fn switch_credentials(&mut self, source: CredentialSource) {
         if source == self.credential_source {
             return;
         }
-        let credentials = match crate::config::load_credentials_from(&source) {
-            Ok(credentials) => credentials,
-            Err(err) => {
-                self.set_status(
-                    format!(
-                        "{} に切り替えられません: {}",
-                        source.label(),
-                        fmt_error(err)
-                    ),
-                    StatusKind::Error,
+        self.inflight += 1;
+        self.set_status(
+            format!("{} の認証情報を読み込んでいます…", source.label()),
+            StatusKind::Info,
+        );
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = crate::config::load_credentials_from(&source).map_err(fmt_error);
+            let _ = tx.send(Message::CredentialsLoaded {
+                source: Box::new(source),
+                result: Box::new(result),
+            });
+        });
+    }
+
+    /// 読み込めた認証情報に切り替え、クラウド API 側のキャッシュを捨てて読み直す。
+    ///
+    /// レジストリへのログインはホスト単位でクラウドの契約とは独立なので保持する。
+    fn apply_credentials(&mut self, source: CredentialSource, credentials: ApiCredentials) {
+        // 各サービスのクライアントを作り直す。
+        let clients = (
+            SacloudClient::new(&credentials),
+            AppRunClient::new(&credentials),
+            DedicatedClient::new(&credentials),
+            MonitoringClient::new(&credentials),
+        );
+        let (sacloud, apprun, dedicated, monitoring) = match clients {
+            (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+            _ => {
+                self.show_error(
+                    "クライアントを初期化できませんでした",
+                    format!("{} への切り替えを中止しました", source.label()),
                 );
                 return;
             }
         };
-        let client = match SacloudClient::new(&credentials) {
-            Ok(client) => Arc::new(client),
-            Err(err) => {
-                self.set_status(fmt_error(err), StatusKind::Error);
-                return;
-            }
-        };
 
-        self.sacloud = client;
+        self.sacloud = Arc::new(sacloud);
+        self.apprun_client = Arc::new(apprun);
+        self.dedicated_client = Arc::new(dedicated);
+        self.monitoring_client = Arc::new(monitoring);
         self.credential_source = source;
+        // 契約が変われば取得済みのゾーンや件数も当てにならない。
+        self.zones = Loadable::Idle;
+        self.zone_counts.clear();
         // ユーザーはレジストリIDに紐づくので、契約が変われば無効。
         self.registry.users.clear();
         self.registry.registry_state.select(None);
@@ -2288,6 +2747,18 @@ impl App {
                 app_name,
                 version,
             } => self.run_route_traffic(application, app_name, version),
+            ConfirmAction::DeleteCredential { name } => {
+                match crate::config::delete_keychain_credential(&name) {
+                    Ok(()) => {
+                        if let Ok(config) = Config::load() {
+                            self.config = config;
+                        }
+                        self.set_status(format!("{name} を削除しました"), StatusKind::Success);
+                        self.open_profile_picker();
+                    }
+                    Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
+                }
+            }
             ConfirmAction::UnveilSecret { zone, vault, name } => self.run_unveil(zone, vault, name),
             ConfirmAction::PowerAction {
                 id,
@@ -2297,25 +2768,22 @@ impl App {
             } => self.run_power_action(id, zone, name, action),
             ConfirmAction::ForgetLogin { host } => {
                 self.registry_clients.remove(&host);
+                self.registry.auto_login_tried.remove(&host);
                 self.registry.repositories.remove(&host);
                 self.registry.tags.retain(|(h, _), _| h != &host);
-                let removed = self.config.registries.remove(&host).is_some();
-                if removed {
-                    match self.config.save() {
-                        Ok(_) => self.set_status(
-                            format!("{host} のログイン情報を削除しました"),
-                            StatusKind::Success,
-                        ),
-                        Err(err) => self.set_status(
-                            format!("設定の保存に失敗: {}", fmt_error(err)),
-                            StatusKind::Error,
-                        ),
-                    }
-                } else {
-                    self.set_status(
+                match self.config.forget_registry_login(&host) {
+                    Ok(true) => self.set_status(
+                        format!("{host} のログイン情報を削除しました（キーチェーンからも削除）"),
+                        StatusKind::Success,
+                    ),
+                    Ok(false) => self.set_status(
                         format!("{host} からログアウトしました"),
                         StatusKind::Success,
-                    );
+                    ),
+                    Err(err) => self.set_status(
+                        format!("ログイン情報の削除に失敗: {}", fmt_error(err)),
+                        StatusKind::Error,
+                    ),
                 }
             }
         }
@@ -2492,14 +2960,11 @@ impl App {
             );
             return;
         }
-        let saved = self.config.registries.get(&host).cloned();
+        let saved = self.config.registries.get(&host);
         self.registry.tab = Tab::Images;
         self.registry.focus = Focus::Detail;
         self.overlay = Some(Overlay::Login(LoginForm {
-            username: saved
-                .as_ref()
-                .map(|l| l.username.clone())
-                .unwrap_or_default(),
+            username: saved.map(|a| a.username.clone()).unwrap_or_default(),
             password: String::new(),
             save: saved.is_some(),
             host,
@@ -2570,8 +3035,35 @@ impl App {
             return;
         };
         match overlay {
-            // 何かキーを押したら閉じる（`take()` 済みなので何もしなくてよい）。
-            Overlay::Help | Overlay::Message { .. } => {}
+            // ヘルプは何かキーを押したら閉じる（`take()` 済み）。
+            Overlay::Help => {}
+            // メッセージは長いことがあるので、読み終えるまで開いたままにする。
+            Overlay::Message {
+                title,
+                body,
+                kind,
+                mut scroll,
+            } => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {}
+                code => {
+                    let lines = body.lines().count() as u16;
+                    scroll = match code {
+                        KeyCode::Down | KeyCode::Char('j') => scroll.saturating_add(1),
+                        KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
+                        KeyCode::PageDown => scroll.saturating_add(10),
+                        KeyCode::PageUp => scroll.saturating_sub(10),
+                        KeyCode::Home | KeyCode::Char('g') => 0,
+                        KeyCode::End | KeyCode::Char('G') => lines,
+                        _ => scroll,
+                    };
+                    self.overlay = Some(Overlay::Message {
+                        title,
+                        body,
+                        kind,
+                        scroll,
+                    });
+                }
+            },
             Overlay::Confirm {
                 title,
                 body,
@@ -2629,24 +3121,46 @@ impl App {
                     self.overlay = Some(Overlay::UserForm(form));
                 }
             },
-            Overlay::ProfilePicker { sources, mut index } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {}
-                KeyCode::Enter => self.switch_credentials(sources[index].0.clone()),
-                // 選択中の認証情報に色を割り当てる。
-                KeyCode::Char('c') => {
-                    self.cycle_profile_color(&sources[index].0);
-                    self.overlay = Some(Overlay::ProfilePicker { sources, index });
+            Overlay::ProfileForm(mut form) => match key.code {
+                // 検証中は結果を待つ。
+                _ if form.verifying => self.overlay = Some(Overlay::ProfileForm(form)),
+                KeyCode::Esc => self.open_profile_picker(),
+                KeyCode::Enter => self.submit_profile_form(form),
+                _ => {
+                    edit_profile_form(&mut form, key);
+                    self.overlay = Some(Overlay::ProfileForm(form));
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    index = (index + 1) % sources.len();
-                    self.overlay = Some(Overlay::ProfilePicker { sources, index });
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    index = (index + sources.len() - 1) % sources.len();
-                    self.overlay = Some(Overlay::ProfilePicker { sources, index });
-                }
-                _ => self.overlay = Some(Overlay::ProfilePicker { sources, index }),
             },
+            Overlay::ProfilePicker { sources, mut index } => {
+                // 一覧の最後に「新規作成」の行がある。
+                let rows = sources.len() + 1;
+                let on_new_row = index == sources.len();
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {}
+                    KeyCode::Enter if on_new_row => self.open_profile_form(),
+                    KeyCode::Enter => self.switch_credentials(sources[index].0.clone()),
+                    // 新規作成は n でも開ける。
+                    KeyCode::Char('n') => self.open_profile_form(),
+                    // キーチェーンに預けたものだけ削除できる。
+                    KeyCode::Char('d') if !on_new_row => {
+                        self.confirm_delete_credential(&sources[index].0)
+                    }
+                    // 選択中の認証情報に色を割り当てる。
+                    KeyCode::Char('c') if !on_new_row => {
+                        self.cycle_profile_color(&sources[index].0);
+                        self.overlay = Some(Overlay::ProfilePicker { sources, index });
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        index = (index + 1) % rows;
+                        self.overlay = Some(Overlay::ProfilePicker { sources, index });
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        index = (index + rows - 1) % rows;
+                        self.overlay = Some(Overlay::ProfilePicker { sources, index });
+                    }
+                    _ => self.overlay = Some(Overlay::ProfilePicker { sources, index }),
+                }
+            }
             Overlay::RegistryForm(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => self.submit_registry_form(form),
@@ -2759,6 +3273,38 @@ fn edit_registry_form(form: &mut RegistryForm, key: KeyEvent) {
             }
         }
         KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_profile_form(form: &mut ProfileForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % ProfileForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + ProfileForm::FIELDS - 1) % ProfileForm::FIELDS
+        }
+        KeyCode::Left if form.field == ProfileForm::ZONE_FIELD => form.cycle_zone(-1),
+        KeyCode::Right | KeyCode::Char(' ') if form.field == ProfileForm::ZONE_FIELD => {
+            form.cycle_zone(1)
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.field == ProfileForm::STORAGE_FIELD =>
+        {
+            form.storage = form.storage.toggled()
+        }
+        KeyCode::Backspace => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.pop();
+            }
+        }
+        // 選択欄では文字入力を受け付けない。
+        KeyCode::Char(c) if ProfileForm::is_text(form.field) => {
             let field = form.field;
             if let Some(value) = form.value_mut(field) {
                 value.push(c);

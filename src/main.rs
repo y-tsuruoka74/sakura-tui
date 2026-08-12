@@ -9,6 +9,7 @@ mod commonservice;
 mod config;
 mod http;
 mod iaas;
+mod keychain;
 mod monitoring;
 mod registry;
 mod sacloud;
@@ -117,13 +118,30 @@ async fn main() -> Result<()> {
     let apprun_client = Arc::new(apprun::AppRunClient::new(&credentials)?);
     let dedicated_client = Arc::new(apprun_dedicated::DedicatedClient::new(&credentials)?);
     let monitoring_client = Arc::new(monitoring::MonitoringClient::new(&credentials)?);
-    let settings = match config::Config::load() {
+    let mut settings = match config::Config::load() {
         Ok(settings) => settings,
         Err(err) => {
             eprintln!("警告: 設定ファイルを読めませんでした: {err}");
             config::Config::default()
         }
     };
+    if let Err(err) = keychain::availability() {
+        eprintln!(
+            "警告: {err}\n\
+             レジストリのログイン情報は保存されず、起動中のみ有効になります。"
+        );
+    }
+    // 以前のバージョンが平文で保存したパスワードがあれば、キーチェーンへ移す。
+    match settings.migrate_plaintext_passwords() {
+        Ok(0) => {}
+        Ok(moved) => {
+            eprintln!("設定ファイルにあった {moved} 件のパスワードをOSのキーチェーンへ移しました。")
+        }
+        Err(err) => eprintln!(
+            "警告: 平文パスワードをキーチェーンへ移せませんでした: {err}\n\
+             設定ファイルに平文のまま残っています。"
+        ),
+    }
 
     let terminal = ratatui::init();
     let result = run(

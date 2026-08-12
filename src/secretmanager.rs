@@ -125,6 +125,15 @@ impl SacloudClient {
         Ok(out)
     }
 
+    /// 指定ゾーンの Vault 件数だけを数える。
+    pub async fn count_vaults(&self, zone: &str) -> Result<usize> {
+        let body = json!({ "From": 0, "Count": 1 });
+        let res: PaginatedVaultList = self
+            .request_in_zone(zone, Method::GET, "secretmanager/vaults", Some(body))
+            .await?;
+        Ok(res.total)
+    }
+
     pub async fn list_secrets(&self, zone: &str, vault_id: &str) -> Result<Vec<Secret>> {
         let path = format!("secretmanager/vaults/{vault_id}/secrets");
         let mut out = Vec::new();

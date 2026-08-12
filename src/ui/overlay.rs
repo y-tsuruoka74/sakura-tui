@@ -7,10 +7,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, SAKURA};
-use crate::app::Service;
 use crate::app::{
-    App, LoginForm, Overlay, RegistryForm, RegistryFormMode, StatusKind, UserForm, UserFormMode,
+    App, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
+    StatusKind, UserForm, UserFormMode,
 };
+use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
 use crate::iaas::Zone;
 use crate::sacloud::Permission;
@@ -21,7 +22,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
     };
     match overlay {
         Overlay::Help => draw_help(frame),
-        Overlay::Message { title, body, kind } => draw_message(frame, title, body, *kind),
+        Overlay::Message {
+            title,
+            body,
+            kind,
+            scroll,
+        } => draw_message(frame, title, body, *kind, *scroll),
         Overlay::Confirm {
             title,
             body,
@@ -35,9 +41,119 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
         }
-        Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, zones, *index, &app.zone),
+        Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, app, zones, *index),
         Overlay::ServicePicker { index } => draw_service_picker(frame, *index, app.service),
+        Overlay::ProfileForm(form) => draw_profile_form(frame, form),
     }
+}
+
+/// 選択肢を横に並べた行を作る。
+fn choice_line<T: Copy + PartialEq>(
+    label: &str,
+    options: &[T],
+    selected: T,
+    focused: bool,
+    title: impl Fn(T) -> String,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        super::pad(label, 14),
+        if focused {
+            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DIM)
+        },
+    )];
+    for (i, option) in options.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!(" {} ", title(*option)),
+            if *option == selected {
+                Style::default()
+                    .fg(SAKURA)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ));
+    }
+    Line::from(spans)
+}
+
+fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
+    let mut lines: Vec<Line> = (0..ProfileForm::ZONE_FIELD)
+        .map(|i| {
+            input_line(
+                ProfileForm::label(i),
+                form.value(i),
+                form.field == i,
+                ProfileForm::is_secret(i),
+            )
+        })
+        .collect();
+
+    // ゾーンは選択式。名前だけだと分かりにくいので説明も添える。
+    let zone_names: Vec<&str> = form.zones.iter().map(|z| z.name.as_str()).collect();
+    lines.push(choice_line(
+        ProfileForm::label(ProfileForm::ZONE_FIELD),
+        &zone_names,
+        form.zone().name.as_str(),
+        form.field == ProfileForm::ZONE_FIELD,
+        |name| name.to_string(),
+    ));
+    lines.push(Line::from(Span::styled(
+        format!("{}{}", " ".repeat(14), form.zone().label()),
+        Style::default().fg(DIM),
+    )));
+
+    // 保存先も同じ見た目で選ばせる。
+    lines.push(choice_line(
+        ProfileForm::label(ProfileForm::STORAGE_FIELD),
+        &ProfileStorage::ALL,
+        form.storage,
+        form.field == ProfileForm::STORAGE_FIELD,
+        |storage| storage.title().to_string(),
+    ));
+    lines.push(Line::from(Span::styled(
+        format!("{}{}", " ".repeat(14), form.storage.description()),
+        Style::default().fg(DIM),
+    )));
+
+    lines.push(Line::raw(""));
+    if form.verifying {
+        lines.push(Line::from(Span::styled(
+            "トークンを検証しています…",
+            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "保存前に API を 1 回呼んでトークンが通ることを確かめます。",
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 項目移動   "),
+            Span::styled("← →", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 選択   "),
+            Span::styled(
+                "Enter",
+                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" 作成   "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 戻る"),
+        ]));
+    }
+
+    let area = centered(frame, 74, dialog_height(&lines, 74));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("資格情報の新規作成", SAKURA)),
+        area,
+    );
 }
 
 fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
@@ -58,19 +174,48 @@ fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
     );
 }
 
-fn draw_zone_picker(frame: &mut Frame, zones: &[Zone], index: usize, current: &str) {
-    let rows = zones
-        .iter()
-        .enumerate()
-        .map(|(i, zone)| picker_row(i == index, zone.name == current, &zone.label()));
+fn draw_zone_picker(frame: &mut Frame, app: &App, zones: &[Zone], index: usize) {
+    let current = &app.zone;
+    let countable = app.service.countable_label();
     let mut lines = vec![
         Line::from(Span::styled(
-            "サーバーを表示するゾーンを選んでください",
+            format!("{} を表示するゾーンを選んでください", app.service.title()),
             Style::default().fg(DIM),
         )),
         Line::raw(""),
     ];
-    lines.extend(rows);
+
+    for (i, zone) in zones.iter().enumerate() {
+        let selected = i == index;
+        let is_current = zone.name == *current;
+        let mut spans = vec![
+            Span::styled(
+                if selected { "▌ " } else { "  " },
+                Style::default().fg(SAKURA),
+            ),
+            Span::styled(
+                if is_current { "● " } else { "○ " },
+                Style::default().fg(if is_current { SAKURA } else { DIM }),
+            ),
+            Span::styled(
+                super::pad(&zone.label(), 22),
+                if selected {
+                    Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ];
+        // ゾーンに入らなくても、どこにリソースがあるか分かるようにする。
+        if let Some(label) = countable {
+            spans.push(zone_count_span(app, &zone.name, label));
+        }
+        if is_current {
+            spans.push(Span::styled("  (現在)", Style::default().fg(DIM)));
+        }
+        lines.push(Line::from(spans));
+    }
+
     lines.push(Line::raw(""));
     lines.push(picker_hint("切り替え"));
 
@@ -82,6 +227,21 @@ fn draw_zone_picker(frame: &mut Frame, zones: &[Zone], index: usize, current: &s
             .block(dialog("ゾーンの切り替え", SAKURA)),
         area,
     );
+}
+
+/// ゾーンごとの件数。0 件は薄く、取得中は「…」で出す。
+fn zone_count_span(app: &App, zone: &str, label: &str) -> Span<'static> {
+    match app.zone_counts.get(&(app.service, zone.to_string())) {
+        Some(Loadable::Ready(0)) => Span::styled(format!("{label} なし"), Style::default().fg(DIM)),
+        Some(Loadable::Ready(count)) => Span::styled(
+            format!("{label} {count}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(Loadable::Failed(_)) => Span::styled("取得できず", Style::default().fg(Color::Red)),
+        _ => Span::styled("…", Style::default().fg(DIM)),
+    }
 }
 
 /// ピッカーの 1 行（選択中は ▌、現在値は ●）。
@@ -169,9 +329,17 @@ fn draw_profile_picker(
             )),
             None => spans.push(Span::styled("ゾーン未設定", Style::default().fg(DIM))),
         }
+        // 保存形式（usacloud 互換かキーチェーンか）を明示する。
+        spans.push(Span::styled(
+            format!("  {:10}", source.kind_label()),
+            Style::default().fg(DIM),
+        ));
         // 割り当てた色を色名でも示す（色覚や端末設定に依存しないように）。
         spans.push(Span::styled(
-            format!("  {}", app.config.profile_color(source).unwrap_or("既定")),
+            app.config
+                .profile_color(source)
+                .unwrap_or("既定")
+                .to_string(),
             Style::default().fg(DIM),
         ));
         if is_current {
@@ -179,16 +347,35 @@ fn draw_profile_picker(
         }
         lines.push(Line::from(spans));
     }
+    // 一覧の最後に置くことで「作れる」ことに気づけるようにする。
+    let on_new_row = index == sources.len();
+    lines.push(Line::from(vec![
+        Span::styled(
+            if on_new_row { "▌ " } else { "  " },
+            Style::default().fg(SAKURA),
+        ),
+        Span::styled(
+            "＋ 新規作成…",
+            if on_new_row {
+                Style::default().fg(SAKURA).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ),
+        Span::styled("  (n)", Style::default().fg(DIM)),
+    ]));
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled(
             "c",
             Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" 色を割り当て   ", Style::default().fg(DIM)),
         Span::styled(
-            " で色を割り当て（設定ファイルに保存されます）",
-            Style::default().fg(DIM),
+            "d",
+            Style::default().fg(SAKURA).add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" 削除（キーチェーンのみ）", Style::default().fg(DIM)),
     ]));
     lines.push(Line::from(Span::styled(
         "切り替えはこのセッションのみで、~/.usacloud/current は書き換えません。",
@@ -294,7 +481,7 @@ fn draw_help(frame: &mut Frame) {
                 ("/", "表示中のリストを絞り込み"),
                 ("y", "選択中の項目をコピー"),
                 ("p", "認証情報（プロファイル）を切替"),
-                ("", "  ピッカー内で c を押すと色を割り当て"),
+                ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("s / S", "サービスを切り替え（4種）"),
                 ("z", "ゾーンを切り替え（サーバー）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),
@@ -338,25 +525,44 @@ fn draw_help(frame: &mut Frame) {
     );
 }
 
-fn draw_message(frame: &mut Frame, title: &str, body: &str, kind: StatusKind) {
+fn draw_message(frame: &mut Frame, title: &str, body: &str, kind: StatusKind, scroll: u16) {
     let color = match kind {
         StatusKind::Error => Color::Red,
         StatusKind::Success => Color::Green,
         StatusKind::Info => SAKURA,
     };
-    let text = vec![
-        Line::raw(body.to_string()),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "何かキーを押すと閉じます",
-            Style::default().fg(DIM),
-        )),
-    ];
-    let area = centered(frame, 70, dialog_height(&text, 70));
+
+    // 本文は改行を保って出す。長いものは画面に収まる範囲で高さを取り、残りはスクロールで読む。
+    let body_lines: Vec<Line> = body.lines().map(|l| Line::raw(l.to_string())).collect();
+    let width: u16 = 76;
+    let screen = frame.area();
+    let needed = dialog_height(&body_lines, width) + 2;
+    // 画面の 8 割までは広げる。
+    let height = needed.min(screen.height.saturating_mul(4) / 5).max(7);
+    let inner = height.saturating_sub(6);
+    let scrollable = needed.saturating_sub(2) > inner;
+    let max_scroll = dialog_height(&body_lines, width)
+        .saturating_sub(2)
+        .saturating_sub(inner);
+    let scroll = scroll.min(max_scroll);
+
+    let mut lines = body_lines;
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        if scrollable {
+            "↑↓/PgUp/PgDn でスクロール   Esc / Enter / q で閉じる"
+        } else {
+            "Esc / Enter / q で閉じる"
+        },
+        Style::default().fg(DIM),
+    )));
+
+    let area = centered(frame, width, height);
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(lines)
             .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
             .block(dialog(title, color)),
         area,
     );
@@ -546,7 +752,7 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
         ]),
         Line::raw(""),
         Line::from(Span::styled(
-            "保存先: ~/.config/sakura-tui/config.toml (パスワードは平文・0600)",
+            "パスワードはOSのキーチェーンに保存します（設定ファイルには書きません）",
             Style::default().fg(DIM),
         )),
         Line::from(Span::styled(

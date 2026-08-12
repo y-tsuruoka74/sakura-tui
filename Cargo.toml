@@ -11,6 +11,7 @@ chrono = "0.4.45"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dirs = "6.0.0"
 futures = "0.3.33"
+keyring = { version = "4.1.6", features = ["apple-native-keyring-store", "windows-native-keyring-store", "zbus-secret-service-keyring-store"] }
 ratatui = "0.30.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "gzip", "http2", "charset", "system-proxy", "query"] }
 serde = { version = "1.0.229", features = ["derive"] }

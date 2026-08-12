@@ -17,7 +17,12 @@ use tokio::sync::Mutex;
 use crate::config::RegistryLogin;
 
 /// 1 ページあたりの取得件数。
-const PAGE_SIZE: usize = 200;
+///
+/// さくらのコンテナレジストリは大きすぎる値を `PAGINATION_NUMBER_INVALID` で
+/// 拒否する。Docker Distribution の一般的な上限に合わせて 100 にしている。
+const PAGE_SIZE: usize = 100;
+/// 件数指定が拒否されたときのエラーコード。
+const PAGINATION_ERROR: &str = "PAGINATION_NUMBER_INVALID";
 /// マニフェスト情報を同時に取りに行く本数。
 const MANIFEST_CONCURRENCY: usize = 8;
 
@@ -153,6 +158,22 @@ impl RegistryClient {
         Ok(())
     }
 
+    /// 件数を指定して取得し、拒否されたら指定なしで取り直す。
+    ///
+    /// レジストリによって `n` に許される上限が違い、超えると
+    /// `PAGINATION_NUMBER_INVALID` で 400 が返る。その場合はレジストリ既定の
+    /// 件数に任せる（Link ヘッダを辿るので全件は取得できる）。
+    async fn send_paginated(&self, url: &mut String, scope: &str) -> Result<Response> {
+        match self.send(Method::GET, url, scope, None).await {
+            Ok(res) => Ok(res),
+            Err(err) if is_pagination_error(&err) && url.contains("?n=") => {
+                *url = strip_page_size(url);
+                self.send(Method::GET, url, scope, None).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// リポジトリ一覧を取得する（Link ヘッダを辿って全件）。
     pub async fn list_repositories(&self) -> Result<Vec<String>> {
         #[derive(Deserialize)]
@@ -164,9 +185,7 @@ impl RegistryClient {
         let mut url = format!("https://{}/v2/_catalog?n={PAGE_SIZE}", self.host);
         let mut out = Vec::new();
         loop {
-            let res = self
-                .send(Method::GET, &url, "registry:catalog:*", None)
-                .await?;
+            let res = self.send_paginated(&mut url, "registry:catalog:*").await?;
             let next = next_page_url(&self.host, &res);
             let page: Catalog = json_body(res).await?;
             out.extend(page.repositories);
@@ -194,7 +213,7 @@ impl RegistryClient {
         );
         let mut names = Vec::new();
         loop {
-            let res = self.send(Method::GET, &url, &scope, None).await?;
+            let res = self.send_paginated(&mut url, &scope).await?;
             let next = next_page_url(&self.host, &res);
             let page: TagList = json_body(res).await?;
             names.extend(page.tags.unwrap_or_default());
@@ -540,6 +559,67 @@ fn next_page_url(host: &str, res: &Response) -> Option<String> {
     }
 }
 
+/// Docker Registry v2 が返すエラー本文。
+#[derive(Debug, Deserialize)]
+struct RegistryErrors {
+    #[serde(default)]
+    errors: Vec<RegistryError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryError {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+/// エラー本文を `メッセージ [コード]` の形にする。
+fn format_registry_errors(status: StatusCode, body: &str) -> String {
+    let parsed = serde_json::from_str::<RegistryErrors>(body)
+        .unwrap_or(RegistryErrors { errors: Vec::new() });
+    let described: Vec<String> = parsed
+        .errors
+        .iter()
+        .filter(|e| !e.message.is_empty() || !e.code.is_empty())
+        .map(|e| match (e.message.is_empty(), e.code.is_empty()) {
+            (false, false) => format!("{} [{}]", e.message, e.code),
+            (false, true) => e.message.clone(),
+            _ => e.code.clone(),
+        })
+        .collect();
+    if !described.is_empty() {
+        return format!("レジストリAPIエラー ({status}): {}", described.join(" / "));
+    }
+    let head: String = body.trim().chars().take(200).collect();
+    if head.is_empty() {
+        format!("レジストリAPIエラー ({status})")
+    } else {
+        format!("レジストリAPIエラー ({status}): {head}")
+    }
+}
+
+/// 件数指定が拒否されたエラーか。
+fn is_pagination_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains(PAGINATION_ERROR)
+}
+
+/// URL から `n=...` の指定だけを取り除く。他のクエリ（`last=` など）は残す。
+fn strip_page_size(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let rest: Vec<&str> = query
+        .split('&')
+        .filter(|param| !param.starts_with("n="))
+        .collect();
+    if rest.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", rest.join("&"))
+    }
+}
+
 async fn check_status(res: Response) -> Result<Response> {
     let status = res.status();
     if status.is_success() {
@@ -552,11 +632,7 @@ async fn check_status(res: Response) -> Result<Response> {
         bail!("レジストリに該当のリソースがありません ({status})");
     }
     let body = res.text().await.unwrap_or_default();
-    let head: String = body.trim().chars().take(200).collect();
-    if head.is_empty() {
-        bail!("レジストリAPIエラー ({status})");
-    }
-    bail!("レジストリAPIエラー ({status}): {head}");
+    bail!("{}", format_registry_errors(status, &body));
 }
 
 async fn json_body<T: serde::de::DeserializeOwned>(res: Response) -> Result<T> {
@@ -737,5 +813,70 @@ mod detail_tests {
             variant: None,
         };
         assert_eq!(plain.to_string(), "linux/amd64");
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+
+    /// さくらのコンテナレジストリが実際に返したエラー本文。
+    const SAKURA_PAGINATION_ERROR: &str = r#"{"errors":[{"code":"PAGINATION_NUMBER_INVALID","message":"invalid number of results requested","detail":{"n":200}}]}"#;
+
+    /// 生の JSON ではなくメッセージとコードを出すこと。
+    #[test]
+    fn formats_registry_error_body() {
+        let message = format_registry_errors(StatusCode::BAD_REQUEST, SAKURA_PAGINATION_ERROR);
+        assert!(
+            message.contains("invalid number of results requested"),
+            "{message}"
+        );
+        assert!(message.contains(PAGINATION_ERROR), "{message}");
+        assert!(
+            !message.contains("{\"errors\""),
+            "生JSONが混ざっている: {message}"
+        );
+    }
+
+    #[test]
+    fn detects_pagination_error() {
+        let err = anyhow::anyhow!(
+            "{}",
+            format_registry_errors(StatusCode::BAD_REQUEST, SAKURA_PAGINATION_ERROR)
+        );
+        assert!(is_pagination_error(&err));
+
+        let other = anyhow::anyhow!("レジストリの認証に失敗しました。");
+        assert!(!is_pagination_error(&other));
+    }
+
+    /// `n` だけを外し、ページングの継続に必要な `last` は残すこと。
+    #[test]
+    fn strips_only_the_page_size() {
+        assert_eq!(
+            strip_page_size("https://r.example.jp/v2/_catalog?n=100"),
+            "https://r.example.jp/v2/_catalog"
+        );
+        assert_eq!(
+            strip_page_size("https://r.example.jp/v2/_catalog?n=100&last=foo"),
+            "https://r.example.jp/v2/_catalog?last=foo"
+        );
+        assert_eq!(
+            strip_page_size("https://r.example.jp/v2/app/tags/list?last=v1&n=100"),
+            "https://r.example.jp/v2/app/tags/list?last=v1"
+        );
+        // クエリが無いものはそのまま。
+        assert_eq!(
+            strip_page_size("https://r.example.jp/v2/_catalog"),
+            "https://r.example.jp/v2/_catalog"
+        );
+    }
+
+    /// 空の errors 配列でも生 JSON を垂れ流さないこと。
+    #[test]
+    fn falls_back_to_body_excerpt() {
+        let message = format_registry_errors(StatusCode::BAD_GATEWAY, "<html>oops</html>");
+        assert!(message.contains("502"), "{message}");
+        assert!(message.contains("oops"), "{message}");
     }
 }
