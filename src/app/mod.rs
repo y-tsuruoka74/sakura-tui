@@ -22,7 +22,9 @@ pub use account::AccountView;
 pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
-pub use observability::{DnsView, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView};
+pub use observability::{
+    DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
+};
 pub use server::ServerView;
 
 use crate::account::AuthStatus;
@@ -310,6 +312,69 @@ impl Tab {
     }
 }
 
+/// 資格情報の世代を添えて結果を返す送信口。
+///
+/// プロファイルを切り替えても、前の資格情報で投げた通信は飛び続ける。
+/// それが後から届いて画面に入ると、切り替えたのに前の内容が残り、
+/// `r` を押すまで直らない。世代を添えておき、古いものは捨てる。
+#[derive(Debug, Clone)]
+pub struct Tx {
+    inner: UnboundedSender<(u64, Message)>,
+    /// この送信口が作られたときの世代。複製すると一緒に運ばれる。
+    epoch: u64,
+}
+
+impl Tx {
+    pub fn new(inner: UnboundedSender<(u64, Message)>) -> Self {
+        Tx { inner, epoch: 0 }
+    }
+
+    pub fn send(&self, message: Message) -> Result<(), ()> {
+        self.inner.send((self.epoch, message)).map_err(|_| ())
+    }
+}
+
+impl Message {
+    /// 世代が変わっても捨ててはいけないもの。
+    ///
+    /// 資格情報そのものの受け渡しと、レジストリのログインは
+    /// 「今どのアカウントを見ているか」と無関係に効かせる必要がある。
+    fn ignores_epoch(&self) -> bool {
+        matches!(
+            self,
+            Message::CredentialsLoaded { .. }
+                | Message::ProfileVerified { .. }
+                | Message::LoginVerified { .. }
+                | Message::SavedLogin { .. }
+        )
+    }
+}
+
+/// サービスが今の資格情報で使えるかどうか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    /// 判断する材料がまだ無い。
+    Unknown,
+    Usable,
+    /// 使えない。添えてあるのは短い理由。
+    Unusable(&'static str),
+}
+
+/// エラー文から短い理由を起こす。
+///
+/// 一覧に出すので、原因が一目で分かる長さに切り詰める。
+fn availability_reason(error: &str) -> &'static str {
+    if error.contains("403") || error.contains("許可されていません") {
+        "権限なし"
+    } else if error.contains("404") {
+        "未提供"
+    } else if error.contains("401") {
+        "認証エラー"
+    } else {
+        "取得できず"
+    }
+}
+
 /// サービスの大分類。
 ///
 /// 利用者がコントロールパネルで探すときの括りに合わせる。
@@ -472,8 +537,10 @@ impl Service {
             Service::Secrets => Some("Vault"),
             Service::SimpleMonitor => Some("件"),
             Service::Monitoring => Some("プロジェクト"),
-            // 請求と権限はリソースの数を持たない。
-            Service::Account | Service::Billing => None,
+            // 今年の請求の件数。実際に引くので、権限が無ければそこで分かる。
+            Service::Billing => Some("件"),
+            // 権限画面はリソースの数を持たない。
+            Service::Account => None,
         }
     }
 
@@ -871,7 +938,7 @@ pub struct App {
     apprun_client: Arc<AppRunClient>,
     dedicated_client: Arc<DedicatedClient>,
     monitoring_client: Arc<MonitoringClient>,
-    tx: UnboundedSender<Message>,
+    tx: Tx,
     pub config: Config,
     pub registry_clients: RegistryClients,
     pub credential_source: CredentialSource,
@@ -880,6 +947,8 @@ pub struct App {
     pub should_quit: bool,
     /// 実行中の非同期リクエスト数（スピナー表示用）。
     pub inflight: usize,
+    /// 資格情報の世代。切り替えるたびに増やす。
+    epoch: u64,
     pub tick: u64,
 
     /// 表示中のサービス。
@@ -926,7 +995,7 @@ pub struct App {
 impl App {
     pub fn new(
         clients: crate::Clients,
-        tx: UnboundedSender<Message>,
+        tx: Tx,
         config: Config,
         credential_source: CredentialSource,
     ) -> Self {
@@ -945,6 +1014,7 @@ impl App {
             mode: Mode::ReadOnly,
             should_quit: false,
             inflight: 0,
+            epoch: 0,
             tick: 0,
             service: Service::Registry,
             zone: default_zone,
@@ -1100,28 +1170,24 @@ impl App {
             Service::AppRun => self.apprun_active_pane(),
             Service::Dedicated => self.dedicated_active_pane(),
             Service::Server => Pane::Servers,
-            Service::Dns => {
-                // レコードを選んでいればレコード側、そうでなければゾーン側。
-                if self.dns.record_state.selected().is_some() {
-                    Pane::DnsRecords
-                } else {
-                    Pane::DnsZones
-                }
-            }
+            Service::Dns => match self.dns.focus {
+                ListFocus::Left => Pane::DnsZones,
+                ListFocus::Right => Pane::DnsRecords,
+            },
             Service::SimpleMonitor => Pane::Monitors,
-            Service::Secrets => {
-                if self.secrets.secret_state.selected().is_some() {
-                    Pane::Secrets
-                } else {
-                    Pane::Vaults
-                }
-            }
+            Service::Secrets => match self.secrets.focus {
+                ListFocus::Left => Pane::Vaults,
+                ListFocus::Right => Pane::Secrets,
+            },
             Service::Account => Pane::Account,
             Service::Billing => self.billing_active_pane(),
-            Service::Monitoring => match self.monitoring.tab {
-                MonitoringTab::Rules => Pane::Rules,
-                MonitoringTab::Histories => Pane::Histories,
-                MonitoringTab::Storages => Pane::Storages,
+            Service::Monitoring => match self.monitoring.focus {
+                ListFocus::Left => Pane::Projects,
+                ListFocus::Right => match self.monitoring.tab {
+                    MonitoringTab::Rules => Pane::Rules,
+                    MonitoringTab::Histories => Pane::Histories,
+                    MonitoringTab::Storages => Pane::Storages,
+                },
             },
         }
     }
@@ -1236,6 +1302,13 @@ impl App {
     }
 
     fn registry_ensure_loaded(&mut self) {
+        // 一覧そのものが未取得ならまずそれを引く。
+        // ここを飛ばすと、資格情報を切り替えたあと誰も読み込まず、
+        // 「読み込み中…」のまま止まる。
+        if self.registry.registries.is_idle() {
+            self.load_registries();
+            return;
+        }
         let Some(registry) = self.selected_registry() else {
             return;
         };
@@ -1332,8 +1405,12 @@ impl App {
 
     // --- 非同期処理の結果反映 ---
 
-    pub fn on_message(&mut self, message: Message) {
+    pub fn on_message(&mut self, epoch: u64, message: Message) {
         self.inflight = self.inflight.saturating_sub(1);
+        // 前の資格情報で投げた通信の結果は、届いても画面に入れない。
+        if epoch != self.epoch && !message.ignores_epoch() {
+            return;
+        }
         match message {
             Message::Registries(Ok(items)) => {
                 let previous = self.selected_registry().map(|r| r.id);
@@ -1984,8 +2061,9 @@ impl App {
             // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
             Service::Account => {}
             Service::Billing => self.on_key_billing(key),
-            // DNS とシンプル監視は共通キーだけで足りる。
-            Service::Dns | Service::SimpleMonitor => {}
+            Service::Dns => self.on_key_dns(key),
+            // シンプル監視は一覧が 1 つなので共通キーだけで足りる。
+            Service::SimpleMonitor => {}
         }
     }
 
@@ -2191,6 +2269,7 @@ impl App {
             let monitoring = self.monitoring_client.clone();
             let tx = self.tx.clone();
             let zone = self.zone.clone();
+            let year = billing::current_year();
             tokio::spawn(async move {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&zone).await,
@@ -2202,13 +2281,33 @@ impl App {
                     Service::SimpleMonitor => sacloud.list_simple_monitors().await.map(|v| v.len()),
                     Service::AppRun => apprun.list_applications().await.map(|v| v.len()),
                     Service::Dedicated => dedicated.list_clusters().await.map(|v| v.len()),
-                    Service::Account | Service::Billing => Ok(0),
+                    // 請求はアカウントIDを引いてから年を指定して数える。
+                    Service::Billing => match sacloud.billing_identity().await {
+                        Ok(identity) => sacloud
+                            .list_bills(&identity.account_id, year)
+                            .await
+                            .map(|v| v.len()),
+                        Err(err) => Err(err),
+                    },
+                    Service::Account => Ok(0),
                 };
                 let _ = tx.send(Message::ServiceCount {
                     service,
                     result: result.map_err(fmt_error),
                 });
             });
+        }
+    }
+
+    /// サービス一覧に出す、そのサービスが使えるかどうか。
+    ///
+    /// 実際に呼んだ結果だけで判断する。権限の値から推測すると、
+    /// 権限の意味を取り違えたときに「使えるのに使えない」と嘘をつくため。
+    pub fn service_availability(&self, service: Service) -> Availability {
+        match self.service_counts.get(&service) {
+            Some(Loadable::Failed(err)) => Availability::Unusable(availability_reason(err)),
+            Some(Loadable::Ready(_)) => Availability::Usable,
+            _ => Availability::Unknown,
         }
     }
 
@@ -2223,7 +2322,13 @@ impl App {
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
             Service::Secrets => self.secrets.vaults.get(&self.zone)?.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
-            Service::Account | Service::Billing => return None,
+            // 請求画面で別の年に移っていることがあるので、
+            // 今年を見ているときだけ流用する。
+            Service::Billing if self.billing.year == billing::current_year() => {
+                self.billing.bills.ready()?.len()
+            }
+            Service::Billing => return None,
+            Service::Account => return None,
         };
         Some(len)
     }
@@ -2740,6 +2845,10 @@ impl App {
     ///
     /// レジストリへのログインはホスト単位でクラウドの契約とは独立なので保持する。
     fn apply_credentials(&mut self, source: CredentialSource, credentials: ApiCredentials) {
+        // 世代を進める。前の資格情報で投げた通信の結果は、
+        // これ以降に届いても画面に入らない。
+        self.epoch += 1;
+        self.tx.epoch = self.epoch;
         // 各サービスのクライアントを作り直す。
         let clients = (
             SacloudClient::new(&credentials),
@@ -3861,6 +3970,49 @@ mod tests {
             }
         }
         assert_eq!(seen, from_services);
+    }
+
+    /// 前の資格情報で投げた通信の結果は捨てること。
+    ///
+    /// 捨てそこねると、切り替えたのに前のアカウントの内容が残り、
+    /// `r` を押すまで直らない。
+    #[test]
+    fn old_results_are_dropped() {
+        let (sender, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = Tx::new(sender);
+        // 通信を投げた時点の送信口を複製して持たせる。
+        let in_flight = tx.clone();
+        // ここで資格情報が切り替わる。
+        let mut current = tx;
+        current.epoch += 1;
+        assert_ne!(in_flight.epoch, current.epoch);
+    }
+
+    /// 資格情報そのものの受け渡しは、世代が違っても捨てないこと。
+    ///
+    /// 捨てると切り替え操作そのものが無視される。
+    #[test]
+    fn credential_messages_survive_epoch_change() {
+        let loaded = Message::CredentialsLoaded {
+            source: Box::new(CredentialSource::Env),
+            result: Box::new(Err("dummy".to_string())),
+        };
+        assert!(loaded.ignores_epoch());
+        // 一覧の取得結果は捨ててよい。
+        assert!(!Message::Registries(Ok(Vec::new())).ignores_epoch());
+    }
+
+    /// エラー文から使えない理由を起こせること。
+    #[test]
+    fn reads_reason_from_error() {
+        assert_eq!(
+            availability_reason("APIエラー (403 Forbidden): 要求された操作は許可されていません。"),
+            "権限なし"
+        );
+        assert_eq!(availability_reason("404 Not Found"), "未提供");
+        assert_eq!(availability_reason("401 Unauthorized"), "認証エラー");
+        // 分類できないものは断定しない。
+        assert_eq!(availability_reason("connection closed"), "取得できず");
     }
 
     /// `--service` に渡す名前が重複していないこと。

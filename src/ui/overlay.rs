@@ -8,8 +8,8 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, accent};
 use crate::app::{
-    App, Category, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
-    StatusKind, UserForm, UserFormMode,
+    App, Availability, Category, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm,
+    RegistryFormMode, StatusKind, UserForm, UserFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -201,25 +201,44 @@ fn service_picker_lines(
         }
         let selected = i == index;
         let is_current = *service == current;
+        let availability = app.service_availability(*service);
+        let unusable = matches!(availability, Availability::Unusable(_));
+        // 使えないサービスは印を変えて、名前も沈める。
+        let marker = if is_current {
+            "●"
+        } else if unusable {
+            "✕"
+        } else {
+            "○"
+        };
+        let name_style = if selected {
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+        } else if unusable {
+            Style::default().fg(DIM)
+        } else {
+            Style::default()
+        };
         let mut spans = vec![
             Span::styled(
                 if selected { "▌ " } else { "  " },
                 Style::default().fg(accent()),
             ),
-            Span::styled(
-                format!("{} {}", if is_current { "●" } else { "○" }, service.title()),
-                if selected {
-                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-            ),
+            Span::styled(format!("{marker} {}", service.title()), name_style),
         ];
         // どのサービスにどれだけあるかを、そのサービスに行かずに見せる。
         // 件数は桁を揃えたいので、先に空白で埋めてから置く。
-        if let Some(label) = service.count_label() {
-            let used = super::width(&spans);
+        let used = super::width(&spans);
+        let pad_then = |spans: &mut Vec<Span<'static>>| {
             spans.push(Span::raw(" ".repeat(COUNT_COLUMN.saturating_sub(used))));
+        };
+        if let Availability::Unusable(reason) = availability {
+            pad_then(&mut spans);
+            spans.push(Span::styled(
+                format!("利用できません（{reason}）"),
+                Style::default().fg(Color::Red),
+            ));
+        } else if let Some(label) = service.count_label() {
+            pad_then(&mut spans);
             spans.push(service_count_span(app, *service, label));
         }
         if is_current {
@@ -251,7 +270,8 @@ fn service_count_span(app: &App, service: Service, label: &str) -> Span<'static>
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Some(Loadable::Failed(_)) => Span::styled("取得できず", Style::default().fg(Color::Red)),
+        // 失敗は呼び出し側が「利用できません」として出す。
+        Some(Loadable::Failed(_)) => Span::raw(""),
         _ => Span::styled("…", Style::default().fg(DIM)),
     }
 }
@@ -561,6 +581,10 @@ fn draw_help(frame: &mut Frame) {
                 ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("z", "ゾーンを切り替え（サーバー）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),
+                (
+                    "Enter / Esc",
+                    "左の一覧と右の一覧を行き来（DNS・シークレット・監視）",
+                ),
                 ("← →", "請求: 表示する年を移動"),
                 ("↑ ↓", "請求: 月を選ぶ（明細に入ると明細の移動）"),
                 ("Enter / Esc", "請求: 明細に入る / 月一覧に戻る"),

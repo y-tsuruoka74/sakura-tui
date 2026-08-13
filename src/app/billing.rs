@@ -95,7 +95,7 @@ fn pane_for(focus: BillingFocus, tab: BillingTab) -> Pane {
 }
 
 /// 今の年。請求の初期表示に使う。
-fn current_year() -> i32 {
+pub(super) fn current_year() -> i32 {
     use chrono::Datelike;
     chrono::Local::now().year()
 }

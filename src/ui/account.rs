@@ -1,10 +1,10 @@
 //! 権限画面: このAPIキーで何ができるか。
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, Cell, Row, Table};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
 use super::{DIM, accent, border_style, error_paragraph, format_datetime, placeholder};
 use crate::app::{App, Loadable};
@@ -19,6 +19,61 @@ fn section_style(section: &str) -> Style {
 }
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
+    // 列に収まらない値があるので、選択した行だけ下に全文を出す。
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(6), Constraint::Length(4)])
+        .split(area);
+    draw_table(frame, chunks[0], app);
+    draw_selected(frame, chunks[1], app);
+}
+
+/// 選択中の行の値と説明を、切らずに出す。
+fn draw_selected(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered()
+        .title(" 選択中の項目 ")
+        .border_style(border_style(false))
+        .padding(ratatui::widgets::Padding::horizontal(1));
+    let rows = app.visible_account_rows();
+    let selected = app
+        .account
+        .state
+        .selected()
+        .and_then(|index| rows.into_iter().nth(index));
+    let lines = match selected {
+        Some(row) => {
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    format!("{} / {}  ", row.section, row.label),
+                    Style::default().fg(DIM),
+                ),
+                Span::styled(
+                    row.value.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+            ])];
+            if !row.note.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    row.note.clone(),
+                    Style::default().fg(if row.warn { Color::Yellow } else { DIM }),
+                )));
+            }
+            lines
+        }
+        None => vec![Line::from(Span::styled(
+            "項目を選択してください",
+            Style::default().fg(DIM),
+        ))],
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        area,
+    );
+}
+
+fn draw_table(frame: &mut Frame, area: Rect, app: &mut App) {
     let rows = app.visible_account_rows();
     let block = Block::bordered()
         .title(Span::styled(

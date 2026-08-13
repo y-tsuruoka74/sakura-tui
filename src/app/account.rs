@@ -6,7 +6,7 @@
 use ratatui::widgets::TableState;
 
 use super::{App, Loadable, Message, Pane, fmt_error, matches};
-use crate::account::{AuthStatus, ExternalPermission};
+use crate::account::AuthStatus;
 
 /// 権限画面の 1 行。
 #[derive(Debug, Clone)]
@@ -62,37 +62,6 @@ pub fn rows(status: &AuthStatus) -> Vec<AccountRow> {
         AccountRow::new("権限", "操作権限", or_none(&status.permission_raw))
             .note(status.permission.description())
             .warn(!status.permission.can_write()),
-        AccountRow::new(
-            "権限",
-            "外部サービス",
-            if status.external.is_empty() {
-                "なし".to_string()
-            } else {
-                status
-                    .external
-                    .iter()
-                    .map(|p| p.label())
-                    .collect::<Vec<_>>()
-                    .join(" / ")
-            },
-        )
-        .note(format!("生の値: {}", or_none(&status.external_raw))),
-        // 請求だけは可否を明示する。403 の原因として一番よく踏むため。
-        AccountRow::new(
-            "権限",
-            "請求の閲覧",
-            if status.has_external(ExternalPermission::Bill) {
-                "可"
-            } else {
-                "不可"
-            },
-        )
-        .note(if status.has_external(ExternalPermission::Bill) {
-            String::new()
-        } else {
-            "APIキーに請求の権限がありません".to_string()
-        })
-        .warn(!status.has_external(ExternalPermission::Bill)),
         AccountRow::new("権限", "認証方法", or_none(&status.auth_method)).note(
             if status.is_api_key {
                 "APIキーで認証しています"
@@ -114,6 +83,24 @@ pub fn rows(status: &AuthStatus) -> Vec<AccountRow> {
             status.rest_filter.clone().unwrap_or("なし".to_string()),
         ),
     ];
+
+    if status.access.is_empty() {
+        out.push(
+            AccountRow::new("アクセス権", "(なし)", or_none(&status.access_raw))
+                .note("このキーには追加のサービスアクセス権がありません"),
+        );
+    } else {
+        for access in &status.access {
+            out.push(
+                AccountRow::new("アクセス権", access.display(), "あり")
+                    // 生の値も添える。和名の対応表が古くても中身が分かるように。
+                    .note(match access.label {
+                        Some(_) => access.token.clone(),
+                        None => format!("{}（和名が未対応の値です）", access.token),
+                    }),
+            );
+        }
+    }
 
     let account = &status.account;
     out.extend([
@@ -187,7 +174,7 @@ impl App {
         self.load_auth_status();
     }
 
-    fn load_auth_status(&mut self) {
+    pub(super) fn load_auth_status(&mut self) {
         self.account.status = Loadable::Loading;
         self.inflight += 1;
         let client = self.sacloud.clone();
@@ -214,8 +201,8 @@ mod tests {
             is_api_key: true,
             permission: crate::account::KeyPermission::Create,
             permission_raw: "create".into(),
-            external: Vec::new(),
-            external_raw: "none".into(),
+            access: Vec::new(),
+            access_raw: "none".into(),
             operation_penalty: "none".into(),
             rest_filter: None,
             account: crate::account::Account {
@@ -236,13 +223,35 @@ mod tests {
         }
     }
 
-    /// 請求が引けない理由が行として見えること。
+    /// アクセス権が無いときも、その旨が行として出ること。
     #[test]
-    fn shows_billing_permission() {
+    fn shows_absence_of_access_rights() {
         let rows = rows(&sample());
-        let billing = rows.iter().find(|r| r.label == "請求の閲覧").unwrap();
-        assert_eq!(billing.value, "不可");
-        assert!(billing.warn);
+        let row = rows.iter().find(|r| r.section == "アクセス権").unwrap();
+        assert_eq!(row.label, "(なし)");
+    }
+
+    /// アクセス権は 1 件ずつ行になり、生の値も添えること。
+    #[test]
+    fn lists_access_rights_one_per_row() {
+        let mut status = sample();
+        status.access = vec![
+            crate::account::ServiceAccess {
+                token: "bill".into(),
+                label: Some("請求閲覧"),
+            },
+            crate::account::ServiceAccess {
+                token: "mystery".into(),
+                label: None,
+            },
+        ];
+        let rows = rows(&status);
+        let access: Vec<&AccountRow> = rows.iter().filter(|r| r.section == "アクセス権").collect();
+        assert_eq!(access.len(), 2);
+        assert_eq!(access[0].label, "請求閲覧");
+        assert_eq!(access[0].note, "bill");
+        // 和名が分からない値も落とさない。
+        assert_eq!(access[1].label, "mystery");
     }
 
     /// 上限に近い使用量に印が付くこと。

@@ -339,9 +339,30 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         }
         // 以下はすべて閲覧のみなので書き込み系のヒントは無い。
         Service::Dedicated => hints.push("Tab タブ"),
-        Service::Dns | Service::SimpleMonitor | Service::Account => {}
-        Service::Secrets => hints.extend(["z ゾーン", "u 値を表示"]),
-        Service::Monitoring => hints.extend(["z ゾーン", "Tab タブ"]),
+        Service::Dns => hints.push(if app.dns.focus == crate::app::ListFocus::Left {
+            "Enter レコードへ"
+        } else {
+            "Esc DNSゾーンへ"
+        }),
+        Service::SimpleMonitor | Service::Account => {}
+        Service::Secrets => {
+            hints.push("z ゾーン");
+            hints.push(if app.secrets.focus == crate::app::ListFocus::Left {
+                "Enter シークレットへ"
+            } else {
+                "Esc Vault へ"
+            });
+            hints.push("u 値を表示");
+        }
+        Service::Monitoring => {
+            hints.push("z ゾーン");
+            hints.push(if app.monitoring.focus == crate::app::ListFocus::Left {
+                "Enter 中身へ"
+            } else {
+                "Esc プロジェクトへ"
+            });
+            hints.push("Tab タブ");
+        }
         Service::Billing => {
             // 月一覧では ↑↓ が月、明細に入ると ↑↓ が明細になる。
             hints.extend(["↑↓ 月", "←→ 年"]);

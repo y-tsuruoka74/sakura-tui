@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Tabs, Wrap};
 
 use super::{DIM, accent, border_style, error_paragraph, field, format_datetime, placeholder};
-use crate::app::{App, Loadable, MonitoringTab};
+use crate::app::{App, ListFocus, Loadable, MonitoringTab};
 use crate::monitoring::StorageKind;
 
 /// 一覧テーブルの体裁。中身が無いときの文言と列だけ差し替える。
@@ -97,7 +97,7 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|(name, count)| Row::new(vec![Cell::from(name.clone()), dim(format!("{count} 件"))]))
         .collect();
-    let focus_records = app.dns.record_state.selected().is_some();
+    let focus_records = app.dns.focus == ListFocus::Right;
     let data = app.dns.zones.clone();
     table_pane(
         frame,
@@ -350,7 +350,7 @@ pub fn draw_secrets(frame: &mut Frame, area: Rect, app: &mut App) {
             ])
         })
         .collect();
-    let focus_secrets = app.secrets.secret_state.selected().is_some();
+    let focus_secrets = app.secrets.focus == ListFocus::Right;
     let vault_data = app
         .secrets
         .vaults
@@ -476,7 +476,7 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
                 Constraint::Min(8),
                 Constraint::Length(17),
             ],
-            focused: false,
+            focused: app.monitoring.focus == ListFocus::Left,
         },
         &project_data,
         project_rows,
@@ -563,7 +563,7 @@ fn draw_rules(frame: &mut Frame, area: Rect, app: &mut App) {
                 Constraint::Min(16),
                 Constraint::Length(20),
             ],
-            focused: true,
+            focused: app.monitoring.focus == ListFocus::Right,
         },
         &rules,
         rows,
@@ -620,7 +620,7 @@ fn draw_histories(frame: &mut Frame, area: Rect, app: &mut App) {
                 Constraint::Min(12),
                 Constraint::Length(16),
             ],
-            focused: true,
+            focused: app.monitoring.focus == ListFocus::Right,
         },
         &histories,
         rows,
@@ -674,7 +674,7 @@ fn draw_storages(frame: &mut Frame, area: Rect, app: &mut App) {
                 Constraint::Length(9),
                 Constraint::Min(10),
             ],
-            focused: true,
+            focused: app.monitoring.focus == ListFocus::Right,
         },
         &storages,
         rows,

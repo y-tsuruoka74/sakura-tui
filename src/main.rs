@@ -217,8 +217,8 @@ async fn run(
     credential_source: config::CredentialSource,
     args: Args,
 ) -> Result<()> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(clients, tx, settings, credential_source);
+    let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(clients, app::Tx::new(sender), settings, credential_source);
     if let Some(zone) = args.zone {
         app.zone = zone;
     }
@@ -248,8 +248,8 @@ async fn run(
                 Event::Resize(_, _) => true,
                 _ => false,
             },
-            Some(message) = rx.recv() => {
-                app.on_message(message);
+            Some((epoch, message)) = rx.recv() => {
+                app.on_message(epoch, message);
                 true
             }
             _ = ticker.tick() => {

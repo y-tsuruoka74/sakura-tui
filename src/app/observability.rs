@@ -10,12 +10,24 @@ use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::monitoring::{AlertHistory, AlertProject, AlertRule, Storage};
 use crate::secretmanager::{Secret, Vault};
 
+/// 左右に並んだ一覧の、どちらを操作しているか。
+///
+/// 「右に選択があるかどうか」で判定すると、いちど右を選んだあと
+/// 左に戻れなくなる（選択は自動で入るため）。明示的に持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ListFocus {
+    #[default]
+    Left,
+    Right,
+}
+
 /// DNS 画面（ゾーン → レコード）。
 #[derive(Debug, Default)]
 pub struct DnsView {
     pub zones: Loadable<Vec<DnsZone>>,
     pub zone_state: TableState,
     pub record_state: TableState,
+    pub focus: ListFocus,
 }
 
 /// シンプル監視画面。
@@ -31,6 +43,7 @@ pub struct SecretsView {
     /// ゾーンごとの Vault 一覧。
     pub vaults: HashMap<String, Loadable<Vec<Vault>>>,
     pub vault_state: TableState,
+    pub focus: ListFocus,
     /// `(ゾーン, VaultID)` をキーにしたシークレット一覧。値は含まない。
     pub secrets: HashMap<(String, String), Loadable<Vec<Secret>>>,
     pub secret_state: TableState,
@@ -66,6 +79,7 @@ impl MonitoringTab {
 pub struct MonitoringView {
     pub projects: HashMap<String, Loadable<Vec<AlertProject>>>,
     pub project_state: TableState,
+    pub focus: ListFocus,
     pub tab: MonitoringTab,
     /// `(ゾーン, プロジェクトID)` をキーにしたルール・履歴。
     pub rules: HashMap<(String, i64), Loadable<Vec<AlertRule>>>,
@@ -449,10 +463,25 @@ impl App {
 
     // --- キー入力 ---
 
+    pub(super) fn on_key_dns(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                self.dns.focus = ListFocus::Right;
+                self.fill_selection(Pane::DnsRecords);
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => self.dns.focus = ListFocus::Left,
+            _ => {}
+        }
+    }
+
     pub(super) fn on_key_secrets(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
-                self.secrets.secret_state.select(None)
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                self.secrets.focus = ListFocus::Right;
+                self.fill_selection(Pane::Secrets);
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+                self.secrets.focus = ListFocus::Left
             }
             // 値の取得は明示操作のときだけ。
             KeyCode::Char('u') => self.confirm_unveil(),
@@ -506,13 +535,25 @@ impl App {
 
     pub(super) fn on_key_monitoring(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                self.monitoring.focus = ListFocus::Right
+            }
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+                self.monitoring.focus = ListFocus::Left
+            }
             KeyCode::Tab => self.cycle_monitoring_tab(1),
             KeyCode::BackTab => self.cycle_monitoring_tab(-1),
-            KeyCode::Char('1') => self.monitoring.tab = MonitoringTab::Rules,
-            KeyCode::Char('2') => self.monitoring.tab = MonitoringTab::Histories,
-            KeyCode::Char('3') => self.monitoring.tab = MonitoringTab::Storages,
+            KeyCode::Char('1') => self.set_monitoring_tab(MonitoringTab::Rules),
+            KeyCode::Char('2') => self.set_monitoring_tab(MonitoringTab::Histories),
+            KeyCode::Char('3') => self.set_monitoring_tab(MonitoringTab::Storages),
             _ => {}
         }
+    }
+
+    /// タブを選んだらその中身を操作したいはずなので、右に移る。
+    fn set_monitoring_tab(&mut self, tab: MonitoringTab) {
+        self.monitoring.tab = tab;
+        self.monitoring.focus = ListFocus::Right;
     }
 
     fn cycle_monitoring_tab(&mut self, delta: i32) {
@@ -522,6 +563,7 @@ impl App {
             .unwrap_or(0) as i32;
         let len = MonitoringTab::ALL.len() as i32;
         self.monitoring.tab = MonitoringTab::ALL[(current + delta).rem_euclid(len) as usize];
+        self.monitoring.focus = ListFocus::Right;
     }
 
     pub(super) fn observability_invalidate(&mut self) {
@@ -529,5 +571,21 @@ impl App {
         self.simple_monitor = SimpleMonitorView::default();
         self.secrets = SecretsView::default();
         self.monitoring = MonitoringView::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 右の一覧に入っても、左の一覧に戻れること。
+    ///
+    /// 「右に選択があるか」で判定していたころは、いちど右に入ると
+    /// 左の選択を動かせず、最初の 1 件しか中身を見られなかった。
+    #[test]
+    fn focus_starts_on_the_left_list() {
+        assert_eq!(DnsView::default().focus, ListFocus::Left);
+        assert_eq!(SecretsView::default().focus, ListFocus::Left);
+        assert_eq!(MonitoringView::default().focus, ListFocus::Left);
     }
 }

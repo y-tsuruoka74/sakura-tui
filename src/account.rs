@@ -54,33 +54,49 @@ impl KeyPermission {
     }
 }
 
-/// APIキーに付いている、IaaS 以外のサービスへの権限。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalPermission {
-    /// 請求情報の閲覧。
-    Bill,
-    /// ウェブアクセラレータ。
-    Cdn,
-    /// 将来増えた値。
-    Unknown,
+/// APIキーに付いた「サービスへのアクセス権」の 1 つ。
+///
+/// コントロールパネルのチェックボックスに対応する。名前は環境や時期で
+/// 増えるので、既知のものだけ和名を当て、知らないものは生の値のまま見せる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceAccess {
+    /// API が返した生の値。
+    pub token: String,
+    /// 和名。対応が分からないときは `None`。
+    pub label: Option<&'static str>,
 }
 
-impl ExternalPermission {
-    pub fn parse(value: &str) -> Self {
-        match value {
-            "bill" => ExternalPermission::Bill,
-            "cdn" => ExternalPermission::Cdn,
-            _ => ExternalPermission::Unknown,
+impl ServiceAccess {
+    fn new(token: &str) -> Self {
+        ServiceAccess {
+            token: token.to_string(),
+            label: service_access_label(token),
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            ExternalPermission::Bill => "請求",
-            ExternalPermission::Cdn => "ウェブアクセラレータ",
-            ExternalPermission::Unknown => "不明",
-        }
+    /// 画面に出す名前。和名が分からなければ生の値。
+    pub fn display(&self) -> &str {
+        self.label.unwrap_or(&self.token)
     }
+}
+
+/// 既知のアクセス権の和名。
+///
+/// コントロールパネルの「サービスへのアクセス権」の並びに合わせている。
+/// ここに無い値は不明として生のまま出す。決め打ちで「無い」と判断すると、
+/// 対応表が古いだけのときに「使えるのに使えない」と嘘をつくため。
+fn service_access_label(token: &str) -> Option<&'static str> {
+    Some(match token {
+        "bill" => "請求閲覧",
+        "dstorage" | "objectstorage" => "オブジェクトストレージ",
+        "koukaryokudok" => "高火力 DOK",
+        "cdn" | "webaccel" => "ウェブアクセラレータ",
+        "phy" => "専用サーバ PHY",
+        "apprun" => "AppRun",
+        "apigateway" | "apigw" => "APIゲートウェイ",
+        "workflow" => "ワークフロー",
+        _ => return None,
+    })
 }
 
 /// `auth-status` の中身。
@@ -92,8 +108,10 @@ pub struct AuthStatus {
     pub permission: KeyPermission,
     /// 生の権限文字列。未知の値でもそのまま見せられるように持っておく。
     pub permission_raw: String,
-    pub external: Vec<ExternalPermission>,
-    pub external_raw: String,
+    /// サービスへのアクセス権。
+    pub access: Vec<ServiceAccess>,
+    /// API が返した生の文字列。対応表に無い値でも失われないように持っておく。
+    pub access_raw: String,
     pub operation_penalty: String,
     /// アクセス元の制限。無ければ `None`。
     pub rest_filter: Option<String>,
@@ -102,11 +120,6 @@ pub struct AuthStatus {
 }
 
 impl AuthStatus {
-    /// 指定した外部権限を持っているか。
-    pub fn has_external(&self, permission: ExternalPermission) -> bool {
-        self.external.contains(&permission)
-    }
-
     /// 操作制限が掛かっているか（未払いなどでペナルティが付くことがある）。
     pub fn is_penalized(&self) -> bool {
         !self.operation_penalty.is_empty() && self.operation_penalty != "none"
@@ -296,16 +309,17 @@ impl From<RawAuthStatus> for AuthStatus {
             ),
         ];
 
-        // "none" と空は「無し」。複数付くときはカンマ区切りで返る。
-        let external_raw = raw.external_permission;
-        let external = if external_raw.is_empty() || external_raw == "none" {
+        // "none" と空は「無し」。実際の区切りは "+"（bill+apprun+... ）だが、
+        // 環境で違いうるので他の区切りでも切れるようにしておく。
+        let access_raw = raw.external_permission;
+        let access = if access_raw.is_empty() || access_raw == "none" {
             Vec::new()
         } else {
-            external_raw
-                .split(',')
+            access_raw
+                .split(['+', ',', ' ', '/', '|'])
                 .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ExternalPermission::parse)
+                .filter(|s| !s.is_empty() && *s != "none")
+                .map(ServiceAccess::new)
                 .collect()
         };
 
@@ -321,8 +335,8 @@ impl From<RawAuthStatus> for AuthStatus {
             is_api_key: raw.is_api_key,
             permission: KeyPermission::parse(&raw.permission),
             permission_raw: raw.permission,
-            external,
-            external_raw,
+            access,
+            access_raw,
             operation_penalty: raw.operation_penalty,
             // null や空オブジェクトは「制限なし」。
             rest_filter: raw.rest_filter.and_then(|value| match value {
@@ -402,21 +416,63 @@ mod tests {
 
     /// "none" は権限なしとして扱うこと（"none" という権限があるわけではない）。
     #[test]
-    fn none_means_no_external_permission() {
+    fn none_means_no_access() {
         let status = parse(SAMPLE);
-        assert!(status.external.is_empty());
-        assert!(!status.has_external(ExternalPermission::Bill));
+        assert!(status.access.is_empty());
     }
 
     #[test]
-    fn parses_multiple_external_permissions() {
+    fn parses_multiple_access_rights() {
         let body = SAMPLE.replace(
             r#""ExternalPermission": "none""#,
-            r#""ExternalPermission": "bill,cdn""#,
+            r#""ExternalPermission": "bill,apprun""#,
         );
         let status = parse(&body);
-        assert!(status.has_external(ExternalPermission::Bill));
-        assert!(status.has_external(ExternalPermission::Cdn));
+        let names: Vec<&str> = status.access.iter().map(ServiceAccess::display).collect();
+        assert_eq!(names, ["請求閲覧", "AppRun"]);
+    }
+
+    /// 実際に返ってくる形（"+" 区切り）を切れること。
+    #[test]
+    fn splits_on_plus() {
+        let body = SAMPLE.replace(
+            r#""ExternalPermission": "none""#,
+            r#""ExternalPermission": "bill+koukaryokudok+apprun+dstorage""#,
+        );
+        let status = parse(&body);
+        let names: Vec<&str> = status.access.iter().map(ServiceAccess::display).collect();
+        assert_eq!(
+            names,
+            ["請求閲覧", "高火力 DOK", "AppRun", "オブジェクトストレージ"]
+        );
+    }
+
+    /// 区切りが変わっても切れること。
+    #[test]
+    fn splits_on_other_separators() {
+        let body = SAMPLE.replace(
+            r#""ExternalPermission": "none""#,
+            r#""ExternalPermission": "bill apprun/dstorage""#,
+        );
+        assert_eq!(parse(&body).access.len(), 3);
+    }
+
+    /// 知らない値でも捨てず、生のまま見せること。
+    ///
+    /// 対応表に無いからと落とすと、権限があるのに無いように見えてしまう。
+    #[test]
+    fn keeps_unknown_access_raw() {
+        let body = SAMPLE.replace(
+            r#""ExternalPermission": "none""#,
+            r#""ExternalPermission": "bill,futureservice""#,
+        );
+        let status = parse(&body);
+        assert_eq!(status.access.len(), 2);
+        let unknown = &status.access[1];
+        assert_eq!(unknown.label, None);
+        assert_eq!(unknown.display(), "futureservice");
+        // 生の文字列も丸ごと残す。
+        assert_eq!(status.access_raw, "bill,futureservice");
     }
 
     #[test]
