@@ -68,6 +68,41 @@ pub struct LogRouting {
     pub log_storage_id: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct MetricsRouting {
+    pub uid: String,
+    pub publisher_code: String,
+    pub publisher_description: String,
+    pub variant: String,
+    pub resource_id: Option<i64>,
+    pub metrics_storage_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Publisher {
+    pub code: String,
+    pub description: String,
+    pub variants: Vec<PublisherVariant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublisherVariant {
+    pub name: String,
+    pub label: String,
+    pub storage: String,
+    pub system: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DashboardProject {
+    pub id: i64,
+    pub resource_id: i64,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
+
 /// アラートの発報履歴 1 件。
 #[derive(Debug, Clone)]
 pub struct AlertHistory {
@@ -231,7 +266,7 @@ struct RawRule {
     threshold_duration_critical: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RawStorageRef {
     #[serde(default, deserialize_with = "flexible_number")]
     resource_id: i64,
@@ -261,6 +296,20 @@ struct RawPublisher {
     code: String,
     #[serde(default, deserialize_with = "null_as_default")]
     description: String,
+    #[serde(default)]
+    variants: Vec<RawPublisherVariant>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPublisherVariant {
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    label: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    storage: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    system: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +324,36 @@ struct RawLogRouting {
     resource_id: serde_json::Value,
     #[serde(default)]
     log_storage: Option<RawStorageRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMetricsRouting {
+    #[serde(default, deserialize_with = "null_as_default")]
+    uid: String,
+    #[serde(default)]
+    publisher: RawPublisher,
+    #[serde(default, deserialize_with = "null_as_default")]
+    variant: String,
+    #[serde(default)]
+    resource_id: serde_json::Value,
+    #[serde(default)]
+    metrics_storage: Option<RawStorageRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDashboardProject {
+    #[serde(default, deserialize_with = "flexible_number")]
+    id: i64,
+    #[serde(default, deserialize_with = "flexible_number")]
+    resource_id: i64,
+    #[serde(default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    description: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    tags: Vec<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
+    created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -730,6 +809,155 @@ impl MonitoringClient {
 
     pub async fn delete_log_routing(&self, zone: &str, uid: &str) -> Result<()> {
         let path = format!("logs/routings/{uid}/");
+        let _: serde_json::Value = self.send(zone, Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
+    pub async fn list_publishers(&self, zone: &str) -> Result<Vec<Publisher>> {
+        self.collect(|from| async move {
+            let res: Paginated<RawPublisher> = self
+                .get(zone, "publishers/", &Self::page_query(from))
+                .await?;
+            let total = res.total;
+            Ok((
+                res.items()
+                    .into_iter()
+                    .map(|publisher| Publisher {
+                        code: publisher.code,
+                        description: publisher.description,
+                        variants: publisher
+                            .variants
+                            .into_iter()
+                            .map(|variant| PublisherVariant {
+                                name: variant.name,
+                                label: variant.label,
+                                storage: variant.storage,
+                                system: variant.system,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                total,
+            ))
+        })
+        .await
+    }
+
+    pub async fn list_metrics_routings(&self, zone: &str) -> Result<Vec<MetricsRouting>> {
+        self.collect(|from| async move {
+            let res: Paginated<RawMetricsRouting> = self
+                .get(zone, "metrics/routings/", &Self::page_query(from))
+                .await?;
+            let total = res.total;
+            Ok((
+                res.items()
+                    .into_iter()
+                    .map(|routing| MetricsRouting {
+                        uid: routing.uid,
+                        publisher_code: routing.publisher.code,
+                        publisher_description: routing.publisher.description,
+                        variant: routing.variant,
+                        resource_id: optional_i64(&routing.resource_id),
+                        metrics_storage_id: storage_ref_id(routing.metrics_storage),
+                    })
+                    .collect(),
+                total,
+            ))
+        })
+        .await
+    }
+
+    pub async fn create_metrics_routing(
+        &self,
+        zone: &str,
+        input: &MetricsRoutingInput,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .send(
+                zone,
+                Method::POST,
+                "metrics/routings/",
+                Some(input.payload()),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_metrics_routing(
+        &self,
+        zone: &str,
+        uid: &str,
+        input: &MetricsRoutingInput,
+    ) -> Result<()> {
+        let path = format!("metrics/routings/{uid}/");
+        let _: serde_json::Value = self
+            .send(zone, Method::PATCH, &path, Some(input.payload()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_metrics_routing(&self, zone: &str, uid: &str) -> Result<()> {
+        let path = format!("metrics/routings/{uid}/");
+        let _: serde_json::Value = self.send(zone, Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
+    pub async fn list_dashboard_projects(&self, zone: &str) -> Result<Vec<DashboardProject>> {
+        self.collect(|from| async move {
+            let res: Paginated<RawDashboardProject> = self
+                .get(zone, "dashboards/projects/", &Self::page_query(from))
+                .await?;
+            let total = res.total;
+            Ok((
+                res.items()
+                    .into_iter()
+                    .map(|project| DashboardProject {
+                        id: project.id,
+                        resource_id: if project.resource_id > 0 {
+                            project.resource_id
+                        } else {
+                            project.id
+                        },
+                        name: project.name,
+                        description: project.description,
+                        tags: project.tags,
+                        created_at: project.created_at,
+                    })
+                    .collect(),
+                total,
+            ))
+        })
+        .await
+    }
+
+    pub async fn create_dashboard_project(
+        &self,
+        zone: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        let payload = json!({"name": name, "description": description});
+        let _: serde_json::Value = self
+            .send(zone, Method::POST, "dashboards/projects/", Some(payload))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_dashboard_project(
+        &self,
+        zone: &str,
+        resource_id: i64,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        let path = format!("dashboards/projects/{resource_id}/");
+        let payload = json!({"name": name, "description": description});
+        let _: serde_json::Value = self.send(zone, Method::PATCH, &path, Some(payload)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_dashboard_project(&self, zone: &str, resource_id: i64) -> Result<()> {
+        let path = format!("dashboards/projects/{resource_id}/");
         let _: serde_json::Value = self.send(zone, Method::DELETE, &path, None).await?;
         Ok(())
     }
@@ -1247,6 +1475,25 @@ impl LogRoutingInput {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MetricsRoutingInput {
+    pub publisher_code: String,
+    pub resource_id: Option<i64>,
+    pub variant: String,
+    pub metrics_storage_id: i64,
+}
+
+impl MetricsRoutingInput {
+    fn payload(&self) -> serde_json::Value {
+        json!({
+            "publisher_code": self.publisher_code,
+            "resource_id": self.resource_id,
+            "variant": self.variant,
+            "metrics_storage_id": self.metrics_storage_id,
+        })
+    }
+}
+
 impl LogMeasureRuleInput {
     fn payload(&self) -> serde_json::Value {
         json!({
@@ -1542,6 +1789,25 @@ mod tests {
         assert_eq!(payload["publisher_code"], "server");
         assert_eq!(payload["resource_id"], 113_700_000_001_i64);
         assert_eq!(payload["log_storage_id"], 113_700_000_002_i64);
+    }
+
+    #[test]
+    fn parses_publishers_metrics_routing_and_dashboard() {
+        let publishers: Paginated<RawPublisher> = serde_json::from_str(r#"{"total":1,"results":[{"code":"server","description":"Server","variants":[{"name":"activity","label":"Activity","storage":"metrics","system":"required"}]}]}"#).unwrap();
+        assert_eq!(publishers.items()[0].variants[0].storage, "metrics");
+        let routing: Paginated<RawMetricsRouting> = serde_json::from_str(r#"{"total":1,"results":[{"uid":"m-1","publisher":{"code":"server"},"variant":"activity","resource_id":"11","metrics_storage":{"resource_id":"22"}}]}"#).unwrap();
+        let raw = &routing.items()[0];
+        assert_eq!(optional_i64(&raw.resource_id), Some(11));
+        assert_eq!(storage_ref_id(raw.metrics_storage.clone()), 22);
+        let input = MetricsRoutingInput {
+            publisher_code: "server".into(),
+            resource_id: Some(11),
+            variant: "activity".into(),
+            metrics_storage_id: 22,
+        };
+        assert_eq!(input.payload()["metrics_storage_id"], 22);
+        let dashboards: Paginated<RawDashboardProject> = serde_json::from_str(r#"{"total":"1","results":[{"id":"31","resource_id":"32","name":"ops","description":null,"tags":[],"created_at":"2026-01-01T00:00:00Z"}]}"#).unwrap();
+        assert_eq!(dashboards.items()[0].resource_id, 32);
     }
 
     #[test]

@@ -37,9 +37,10 @@ use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
 use crate::monitoring::{
-    AlertHistory, AlertProject, AlertRule, AlertRuleInput, LogMeasureRule, LogMeasureRuleInput,
-    LogRouting, LogRoutingInput, MonitoringClient, NotificationRouting, NotificationTarget,
-    Storage, StorageAccessKey, StorageAccessKeySecret, StorageKind,
+    AlertHistory, AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule,
+    LogMeasureRuleInput, LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput,
+    MonitoringClient, NotificationRouting, NotificationTarget, Publisher, Storage,
+    StorageAccessKey, StorageAccessKeySecret, StorageKind,
 };
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
@@ -159,6 +160,18 @@ pub enum Message {
         zone: String,
         result: Result<Vec<LogRouting>, String>,
     },
+    MetricsRoutings {
+        zone: String,
+        result: Result<Vec<MetricsRouting>, String>,
+    },
+    Publishers {
+        zone: String,
+        result: Result<Vec<Publisher>, String>,
+    },
+    DashboardProjects {
+        zone: String,
+        result: Result<Vec<DashboardProject>, String>,
+    },
     AlertHistories {
         zone: String,
         project: i64,
@@ -202,6 +215,16 @@ pub enum Message {
         result: Result<(), String>,
     },
     LogRoutingAction {
+        zone: String,
+        label: String,
+        result: Result<(), String>,
+    },
+    MetricsRoutingAction {
+        zone: String,
+        label: String,
+        result: Result<(), String>,
+    },
+    DashboardAction {
         zone: String,
         label: String,
         result: Result<(), String>,
@@ -353,6 +376,8 @@ pub enum Pane {
     Rules,
     LogMeasureRules,
     LogRoutings,
+    MetricsRoutings,
+    Dashboards,
     Histories,
     NotificationTargets,
     NotificationRoutings,
@@ -1332,6 +1357,9 @@ pub struct LogRoutingForm {
     pub variant: String,
     pub resource_id: String,
     pub log_storage_id: String,
+    pub publishers: Vec<Publisher>,
+    pub publisher_index: usize,
+    pub variant_index: usize,
     pub field: usize,
 }
 
@@ -1349,7 +1377,18 @@ impl LogRoutingForm {
     }
 
     fn input(&self) -> Result<LogRoutingInput, String> {
-        if self.publisher_code.trim().is_empty() || self.variant.trim().is_empty() {
+        let publisher_code = self
+            .publishers
+            .get(self.publisher_index)
+            .map(|publisher| publisher.code.as_str())
+            .unwrap_or(&self.publisher_code);
+        let variant = self
+            .publishers
+            .get(self.publisher_index)
+            .and_then(|publisher| publisher.variants.get(self.variant_index))
+            .map(|variant| variant.name.as_str())
+            .unwrap_or(&self.variant);
+        if publisher_code.trim().is_empty() || variant.trim().is_empty() {
             return Err("パブリッシャーコードとバリアントを入力してください".to_string());
         }
         let resource_id = if self.resource_id.trim().is_empty() {
@@ -1371,11 +1410,109 @@ impl LogRoutingForm {
             return Err("ログストレージIDを入力してください".to_string());
         }
         Ok(LogRoutingInput {
-            publisher_code: self.publisher_code.trim().to_string(),
+            publisher_code: publisher_code.trim().to_string(),
             resource_id,
-            variant: self.variant.trim().to_string(),
+            variant: variant.trim().to_string(),
             log_storage_id,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsRoutingFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsRoutingForm {
+    pub mode: MetricsRoutingFormMode,
+    pub target: Option<MetricsRouting>,
+    pub publisher_code: String,
+    pub variant: String,
+    pub resource_id: String,
+    pub metrics_storage_id: String,
+    pub publishers: Vec<Publisher>,
+    pub publisher_index: usize,
+    pub variant_index: usize,
+    pub field: usize,
+}
+
+impl MetricsRoutingForm {
+    pub const FIELDS: usize = 4;
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.publisher_code),
+            1 => Some(&mut self.variant),
+            2 => Some(&mut self.resource_id),
+            3 => Some(&mut self.metrics_storage_id),
+            _ => None,
+        }
+    }
+
+    fn input(&self) -> Result<MetricsRoutingInput, String> {
+        let publisher_code = self
+            .publishers
+            .get(self.publisher_index)
+            .map(|publisher| publisher.code.as_str())
+            .unwrap_or(&self.publisher_code);
+        let variant = self
+            .publishers
+            .get(self.publisher_index)
+            .and_then(|publisher| publisher.variants.get(self.variant_index))
+            .map(|variant| variant.name.as_str())
+            .unwrap_or(&self.variant);
+        let resource_id = if self.resource_id.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.resource_id
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| "リソースIDは数値で入力してください".to_string())?,
+            )
+        };
+        let metrics_storage_id = self
+            .metrics_storage_id
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "メトリクスストレージIDは数値で入力してください".to_string())?;
+        if publisher_code.trim().is_empty() || variant.trim().is_empty() {
+            return Err("パブリッシャーとバリアントを選択してください".to_string());
+        }
+        Ok(MetricsRoutingInput {
+            publisher_code: publisher_code.trim().to_string(),
+            resource_id,
+            variant: variant.trim().to_string(),
+            metrics_storage_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct DashboardForm {
+    pub mode: DashboardFormMode,
+    pub target: Option<DashboardProject>,
+    pub name: String,
+    pub description: String,
+    pub field: usize,
+}
+
+impl DashboardForm {
+    pub const FIELDS: usize = 2;
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            _ => None,
+        }
     }
 }
 
@@ -1701,6 +1838,14 @@ pub enum ConfirmAction {
         zone: String,
         routing: LogRouting,
     },
+    DeleteMetricsRouting {
+        zone: String,
+        routing: MetricsRouting,
+    },
+    DeleteDashboardProject {
+        zone: String,
+        project: DashboardProject,
+    },
     DeleteNotificationTarget {
         zone: String,
         project: i64,
@@ -1769,6 +1914,8 @@ pub enum Overlay {
     AlertRuleForm(AlertRuleForm),
     LogMeasureRuleForm(LogMeasureRuleForm),
     LogRoutingForm(LogRoutingForm),
+    MetricsRoutingForm(MetricsRoutingForm),
+    DashboardForm(DashboardForm),
     NotificationTargetForm(NotificationTargetForm),
     NotificationRoutingForm(NotificationRoutingForm),
     StorageForm(StorageForm),
@@ -2076,6 +2223,8 @@ impl App {
             Service::Monitoring => match self.monitoring.focus {
                 ListFocus::Left if self.monitoring.tab == MonitoringTab::Storages => Pane::Storages,
                 _ if self.monitoring.tab == MonitoringTab::LogRoutings => Pane::LogRoutings,
+                _ if self.monitoring.tab == MonitoringTab::MetricsRoutings => Pane::MetricsRoutings,
+                _ if self.monitoring.tab == MonitoringTab::Dashboards => Pane::Dashboards,
                 ListFocus::Left => Pane::Projects,
                 ListFocus::Right => match self.monitoring.tab {
                     MonitoringTab::Rules => Pane::Rules,
@@ -2085,6 +2234,8 @@ impl App {
                     MonitoringTab::NotificationRoutings => Pane::NotificationRoutings,
                     MonitoringTab::LogMeasureRules => Pane::LogMeasureRules,
                     MonitoringTab::LogRoutings => Pane::LogRoutings,
+                    MonitoringTab::MetricsRoutings => Pane::MetricsRoutings,
+                    MonitoringTab::Dashboards => Pane::Dashboards,
                 },
             },
         }
@@ -2738,6 +2889,21 @@ impl App {
                 self.monitoring.log_routings.insert(zone, loadable);
                 self.ensure_loaded();
             }
+            Message::MetricsRoutings { zone, result } => {
+                let loadable = self.store_result(result);
+                self.monitoring.metrics_routings.insert(zone, loadable);
+                self.ensure_loaded();
+            }
+            Message::Publishers { zone, result } => {
+                let loadable = self.store_result(result);
+                self.monitoring.publishers.insert(zone, loadable);
+                self.ensure_loaded();
+            }
+            Message::DashboardProjects { zone, result } => {
+                let loadable = self.store_result(result);
+                self.monitoring.dashboard_projects.insert(zone, loadable);
+                self.ensure_loaded();
+            }
             Message::AlertHistories {
                 zone,
                 project,
@@ -2882,6 +3048,30 @@ impl App {
                     });
                     self.set_status(err, StatusKind::Error);
                 }
+            },
+            Message::MetricsRoutingAction {
+                zone,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.metrics_routings.remove(&zone);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => self.set_status(err, StatusKind::Error),
+            },
+            Message::DashboardAction {
+                zone,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.dashboard_projects.remove(&zone);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => self.set_status(err, StatusKind::Error),
             },
             Message::NotificationAction {
                 zone,
@@ -3387,6 +3577,18 @@ impl App {
                     value.push_str(text);
                 }
             }
+            Some(Overlay::MetricsRoutingForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::DashboardForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
             Some(Overlay::NotificationTargetForm(form)) => {
                 let field = form.field;
                 if let Some(value) = form.value_mut(field) {
@@ -3874,6 +4076,11 @@ impl App {
             Pane::Rules => self.visible_rules().ready().map_or(0, Vec::len),
             Pane::LogMeasureRules => self.visible_log_measure_rules().ready().map_or(0, Vec::len),
             Pane::LogRoutings => self.visible_log_routings().ready().map_or(0, Vec::len),
+            Pane::MetricsRoutings => self.visible_metrics_routings().ready().map_or(0, Vec::len),
+            Pane::Dashboards => self
+                .visible_dashboard_projects()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::Histories => self.visible_histories().ready().map_or(0, Vec::len),
             Pane::NotificationTargets => self
                 .visible_notification_targets()
@@ -3919,6 +4126,8 @@ impl App {
             Pane::Rules => Some(&mut self.monitoring.rule_state),
             Pane::LogMeasureRules => Some(&mut self.monitoring.log_measure_rule_state),
             Pane::LogRoutings => Some(&mut self.monitoring.log_routing_state),
+            Pane::MetricsRoutings => Some(&mut self.monitoring.metrics_routing_state),
+            Pane::Dashboards => Some(&mut self.monitoring.dashboard_state),
             Pane::Histories => Some(&mut self.monitoring.history_state),
             Pane::NotificationTargets => Some(&mut self.monitoring.notification_target_state),
             Pane::NotificationRoutings => Some(&mut self.monitoring.notification_routing_state),
@@ -3985,6 +4194,8 @@ impl App {
             Pane::Rules
             | Pane::LogMeasureRules
             | Pane::LogRoutings
+            | Pane::MetricsRoutings
+            | Pane::Dashboards
             | Pane::Histories
             | Pane::Storages
             | Pane::NotificationTargets
@@ -4395,6 +4606,9 @@ impl App {
                 self.monitoring.rules.clear();
                 self.monitoring.log_measure_rules.clear();
                 self.monitoring.log_routings.remove(&self.zone);
+                self.monitoring.metrics_routings.remove(&self.zone);
+                self.monitoring.publishers.remove(&self.zone);
+                self.monitoring.dashboard_projects.remove(&self.zone);
                 self.monitoring.histories.clear();
                 self.monitoring.notification_targets.clear();
                 self.monitoring.notification_routings.clear();
@@ -4808,6 +5022,12 @@ impl App {
             } => self.run_delete_log_measure_rule(zone, project, uid, name),
             ConfirmAction::DeleteLogRouting { zone, routing } => {
                 self.run_delete_log_routing(zone, routing)
+            }
+            ConfirmAction::DeleteMetricsRouting { zone, routing } => {
+                self.run_delete_metrics_routing(zone, routing)
+            }
+            ConfirmAction::DeleteDashboardProject { zone, project } => {
+                self.run_delete_dashboard(zone, project)
             }
             ConfirmAction::DeleteNotificationTarget {
                 zone,
@@ -5328,6 +5548,22 @@ impl App {
                     self.overlay = Some(Overlay::LogRoutingForm(form));
                 }
             },
+            Overlay::MetricsRoutingForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_metrics_routing_form(form),
+                _ => {
+                    edit_metrics_routing_form(&mut form, key);
+                    self.overlay = Some(Overlay::MetricsRoutingForm(form));
+                }
+            },
+            Overlay::DashboardForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_dashboard_form(form),
+                _ => {
+                    edit_dashboard_form(&mut form, key);
+                    self.overlay = Some(Overlay::DashboardForm(form));
+                }
+            },
             Overlay::NotificationTargetForm(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => self.submit_notification_target_form(form),
@@ -5692,6 +5928,94 @@ fn edit_log_routing_form(form: &mut LogRoutingForm, key: KeyEvent) {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % LogRoutingForm::FIELDS,
         KeyCode::BackTab | KeyCode::Up => {
             form.field = (form.field + LogRoutingForm::FIELDS - 1) % LogRoutingForm::FIELDS
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.field == 0 && !form.publishers.is_empty() =>
+        {
+            let delta = if key.code == KeyCode::Left {
+                form.publishers.len() - 1
+            } else {
+                1
+            };
+            form.publisher_index = (form.publisher_index + delta) % form.publishers.len();
+            form.variant_index = 0;
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.field == 1 && !form.publishers.is_empty() =>
+        {
+            let len = form.publishers[form.publisher_index].variants.len();
+            if len > 0 {
+                let delta = if key.code == KeyCode::Left {
+                    len - 1
+                } else {
+                    1
+                };
+                form.variant_index = (form.variant_index + delta) % len;
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_metrics_routing_form(form: &mut MetricsRoutingForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % MetricsRoutingForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + MetricsRoutingForm::FIELDS - 1) % MetricsRoutingForm::FIELDS
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.field == 0 && !form.publishers.is_empty() =>
+        {
+            let delta = if key.code == KeyCode::Left {
+                form.publishers.len() - 1
+            } else {
+                1
+            };
+            form.publisher_index = (form.publisher_index + delta) % form.publishers.len();
+            form.variant_index = 0;
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.field == 1 && !form.publishers.is_empty() =>
+        {
+            let len = form.publishers[form.publisher_index].variants.len();
+            if len > 0 {
+                let delta = if key.code == KeyCode::Left {
+                    len - 1
+                } else {
+                    1
+                };
+                form.variant_index = (form.variant_index + delta) % len;
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_dashboard_form(form: &mut DashboardForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % DashboardForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + DashboardForm::FIELDS - 1) % DashboardForm::FIELDS
         }
         KeyCode::Backspace => {
             if let Some(value) = form.value_mut(form.field) {

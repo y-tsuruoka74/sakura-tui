@@ -431,13 +431,21 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
         draw_storage_access_keys(frame, panes[1], app);
         return;
     }
-    if app.monitoring.tab == MonitoringTab::LogRoutings {
+    if matches!(
+        app.monitoring.tab,
+        MonitoringTab::LogRoutings | MonitoringTab::MetricsRoutings | MonitoringTab::Dashboards
+    ) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
         draw_monitoring_tabs(frame, rows[0], app);
-        draw_log_routings(frame, rows[1], app);
+        match app.monitoring.tab {
+            MonitoringTab::LogRoutings => draw_log_routings(frame, rows[1], app),
+            MonitoringTab::MetricsRoutings => draw_metrics_routings(frame, rows[1], app),
+            MonitoringTab::Dashboards => draw_dashboards(frame, rows[1], app),
+            _ => unreachable!(),
+        }
         return;
     }
 
@@ -505,6 +513,8 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
         MonitoringTab::NotificationRoutings => draw_notification_routings(frame, right[1], app),
         MonitoringTab::LogMeasureRules => draw_log_measure_rules(frame, right[1], app),
         MonitoringTab::LogRoutings => draw_log_routings(frame, right[1], app),
+        MonitoringTab::MetricsRoutings => draw_metrics_routings(frame, right[1], app),
+        MonitoringTab::Dashboards => draw_dashboards(frame, right[1], app),
         MonitoringTab::Storages => {}
     }
 }
@@ -845,6 +855,98 @@ fn draw_log_routings(frame: &mut Frame, area: Rect, app: &mut App) {
         &routings,
         rows,
         &mut app.monitoring.log_routing_state,
+    );
+}
+
+fn draw_metrics_routings(frame: &mut Frame, area: Rect, app: &mut App) {
+    let items = app.visible_metrics_routings();
+    let rows = items
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|r| {
+                    Row::new(vec![
+                        Cell::from(r.publisher_code.clone()),
+                        dim(r.publisher_description.clone()),
+                        Cell::from(r.variant.clone()),
+                        dim(r
+                            .resource_id
+                            .map_or_else(|| "-".to_string(), |id| id.to_string())),
+                        dim(r.metrics_storage_id.to_string()),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "メトリクス転送",
+            idle: "読み込み中…",
+            empty: "メトリクス転送設定がありません",
+            header: vec![
+                "パブリッシャー",
+                "説明",
+                "バリアント",
+                "リソースID",
+                "保管先ID",
+            ],
+            widths: vec![
+                Constraint::Min(14),
+                Constraint::Min(14),
+                Constraint::Min(10),
+                Constraint::Length(14),
+                Constraint::Length(14),
+            ],
+            focused: true,
+        },
+        &items,
+        rows,
+        &mut app.monitoring.metrics_routing_state,
+    );
+}
+
+fn draw_dashboards(frame: &mut Frame, area: Rect, app: &mut App) {
+    let items = app.visible_dashboard_projects();
+    let rows = items
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|p| {
+                    Row::new(vec![
+                        Cell::from(p.name.clone()),
+                        dim(p.description.clone()),
+                        dim(p.tags.join(", ")),
+                        dim(p.resource_id.to_string()),
+                        dim(format_datetime(&p.created_at)),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "ダッシュボードプロジェクト",
+            idle: "読み込み中…",
+            empty: "ダッシュボードプロジェクトがありません",
+            header: vec!["名前", "説明", "タグ", "リソースID", "作成日時"],
+            widths: vec![
+                Constraint::Min(16),
+                Constraint::Min(16),
+                Constraint::Min(10),
+                Constraint::Length(14),
+                Constraint::Length(17),
+            ],
+            focused: true,
+        },
+        &items,
+        rows,
+        &mut app.monitoring.dashboard_state,
     );
 }
 

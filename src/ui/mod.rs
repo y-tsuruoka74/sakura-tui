@@ -402,7 +402,12 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 "Enter 中身へ"
             } else if app.monitoring.tab == crate::app::MonitoringTab::Storages {
                 "Esc ストレージへ"
-            } else if app.monitoring.tab == crate::app::MonitoringTab::LogRoutings {
+            } else if matches!(
+                app.monitoring.tab,
+                crate::app::MonitoringTab::LogRoutings
+                    | crate::app::MonitoringTab::MetricsRoutings
+                    | crate::app::MonitoringTab::Dashboards
+            ) {
                 "Esc"
             } else {
                 "Esc プロジェクトへ"
@@ -412,7 +417,10 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 && app.monitoring.focus == crate::app::ListFocus::Left
                 && !matches!(
                     app.monitoring.tab,
-                    crate::app::MonitoringTab::Storages | crate::app::MonitoringTab::LogRoutings
+                    crate::app::MonitoringTab::Storages
+                        | crate::app::MonitoringTab::LogRoutings
+                        | crate::app::MonitoringTab::MetricsRoutings
+                        | crate::app::MonitoringTab::Dashboards
                 )
             {
                 hints.extend(["n プロジェクト作成", "E 編集", "D 削除"]);
@@ -428,6 +436,14 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 && app.monitoring.tab == crate::app::MonitoringTab::LogRoutings
             {
                 hints.extend(["a ログ転送作成", "e 編集", "d 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::MetricsRoutings
+            {
+                hints.extend(["a メトリクス転送作成", "e 編集", "d 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::Dashboards
+            {
+                hints.extend(["a ダッシュボード作成", "e 編集", "d 削除"]);
             } else if app.mode == Mode::Write
                 && app.monitoring.tab == crate::app::MonitoringTab::NotificationTargets
             {

@@ -7,17 +7,19 @@ use ratatui::widgets::TableState;
 
 use super::{
     AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, ConfirmAction,
-    DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable, LogMeasureRuleForm,
-    LogMeasureRuleFormMode, LogRoutingForm, LogRoutingFormMode, Message, NotificationRoutingForm,
-    NotificationRoutingFormMode, NotificationTargetForm, NotificationTargetFormMode, Overlay, Pane,
-    SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode, StatusKind,
-    StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm, StorageFormMode,
-    StorageRetentionForm, VaultForm, VaultFormMode, fmt_error, matches,
+    DashboardForm, DashboardFormMode, DnsRecordForm, DnsRecordFormMode, DnsZoneForm,
+    DnsZoneFormMode, Loadable, LogMeasureRuleForm, LogMeasureRuleFormMode, LogRoutingForm,
+    LogRoutingFormMode, Message, MetricsRoutingForm, MetricsRoutingFormMode,
+    NotificationRoutingForm, NotificationRoutingFormMode, NotificationTargetForm,
+    NotificationTargetFormMode, Overlay, Pane, SecretForm, SecretFormMode, SimpleMonitorForm,
+    SimpleMonitorFormMode, StatusKind, StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm,
+    StorageFormMode, StorageRetentionForm, VaultForm, VaultFormMode, fmt_error, matches,
 };
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor, SimpleMonitorInput};
 use crate::monitoring::{
-    AlertHistory, AlertProject, AlertRule, LogMeasureRule, LogRouting, NotificationRouting,
-    NotificationTarget, Storage, StorageAccessKey, StorageKind,
+    AlertHistory, AlertProject, AlertRule, DashboardProject, LogMeasureRule, LogRouting,
+    MetricsRouting, NotificationRouting, NotificationTarget, Publisher, Storage, StorageAccessKey,
+    StorageKind,
 };
 use crate::secretmanager::{Secret, Vault};
 
@@ -75,10 +77,12 @@ pub enum MonitoringTab {
     NotificationRoutings,
     LogMeasureRules,
     LogRoutings,
+    MetricsRoutings,
+    Dashboards,
 }
 
 impl MonitoringTab {
-    pub const ALL: [MonitoringTab; 7] = [
+    pub const ALL: [MonitoringTab; 9] = [
         MonitoringTab::Rules,
         MonitoringTab::Histories,
         MonitoringTab::Storages,
@@ -86,6 +90,8 @@ impl MonitoringTab {
         MonitoringTab::NotificationRoutings,
         MonitoringTab::LogMeasureRules,
         MonitoringTab::LogRoutings,
+        MonitoringTab::MetricsRoutings,
+        MonitoringTab::Dashboards,
     ];
 
     pub fn title(self) -> &'static str {
@@ -97,6 +103,8 @@ impl MonitoringTab {
             MonitoringTab::NotificationRoutings => "通知経路",
             MonitoringTab::LogMeasureRules => "ログ計測",
             MonitoringTab::LogRoutings => "ログ転送",
+            MonitoringTab::MetricsRoutings => "メトリクス転送",
+            MonitoringTab::Dashboards => "ダッシュボード",
         }
     }
 }
@@ -115,6 +123,11 @@ pub struct MonitoringView {
     pub log_measure_rule_state: TableState,
     pub log_routings: HashMap<String, Loadable<Vec<LogRouting>>>,
     pub log_routing_state: TableState,
+    pub metrics_routings: HashMap<String, Loadable<Vec<MetricsRouting>>>,
+    pub metrics_routing_state: TableState,
+    pub publishers: HashMap<String, Loadable<Vec<Publisher>>>,
+    pub dashboard_projects: HashMap<String, Loadable<Vec<DashboardProject>>>,
+    pub dashboard_state: TableState,
     pub histories: HashMap<(String, i64), Loadable<Vec<AlertHistory>>>,
     pub history_state: TableState,
     pub notification_targets: HashMap<(String, i64), Loadable<Vec<NotificationTarget>>>,
@@ -544,6 +557,90 @@ impl App {
         self.visible_log_routings().ready()?.get(index).cloned()
     }
 
+    pub fn visible_metrics_routings(&self) -> Loadable<Vec<MetricsRouting>> {
+        let loadable = self
+            .monitoring
+            .metrics_routings
+            .get(&self.zone)
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|routing| {
+                    matches(
+                        self.filters.get(Pane::MetricsRoutings),
+                        &[
+                            &routing.publisher_code,
+                            &routing.publisher_description,
+                            &routing.variant,
+                        ],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_metrics_routing(&self) -> Option<MetricsRouting> {
+        self.visible_metrics_routings()
+            .ready()?
+            .get(self.monitoring.metrics_routing_state.selected()?)
+            .cloned()
+    }
+
+    pub fn visible_dashboard_projects(&self) -> Loadable<Vec<DashboardProject>> {
+        let loadable = self
+            .monitoring
+            .dashboard_projects
+            .get(&self.zone)
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|project| {
+                    matches(
+                        self.filters.get(Pane::Dashboards),
+                        &[&project.name, &project.description],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_dashboard_project(&self) -> Option<DashboardProject> {
+        self.visible_dashboard_projects()
+            .ready()?
+            .get(self.monitoring.dashboard_state.selected()?)
+            .cloned()
+    }
+
+    fn routing_publishers(&self, storage: &str) -> Vec<Publisher> {
+        self.monitoring
+            .publishers
+            .get(&self.zone)
+            .and_then(Loadable::ready)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|publisher| {
+                        let mut publisher = publisher.clone();
+                        publisher
+                            .variants
+                            .retain(|variant| variant.storage == storage);
+                        (!publisher.variants.is_empty()).then_some(publisher)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn visible_notification_targets(&self) -> Loadable<Vec<NotificationTarget>> {
         let Some(project) = self.selected_project() else {
             return Loadable::Idle;
@@ -816,6 +913,7 @@ impl App {
         }
 
         if self.monitoring.tab == MonitoringTab::LogRoutings {
+            self.ensure_publishers(&zone);
             if self
                 .monitoring
                 .storages
@@ -855,6 +953,55 @@ impl App {
                 });
             } else {
                 self.fill_selection(Pane::LogRoutings);
+            }
+            return;
+        }
+        if self.monitoring.tab == MonitoringTab::MetricsRoutings {
+            self.ensure_publishers(&zone);
+            self.ensure_monitoring_storages(&zone);
+            if self
+                .monitoring
+                .metrics_routings
+                .get(&zone)
+                .is_none_or(Loadable::is_idle)
+            {
+                self.monitoring
+                    .metrics_routings
+                    .insert(zone.clone(), Loadable::Loading);
+                self.inflight += 1;
+                let client = self.monitoring_client.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = client.list_metrics_routings(&zone).await.map_err(fmt_error);
+                    let _ = tx.send(Message::MetricsRoutings { zone, result });
+                });
+            } else {
+                self.fill_selection(Pane::MetricsRoutings);
+            }
+            return;
+        }
+        if self.monitoring.tab == MonitoringTab::Dashboards {
+            if self
+                .monitoring
+                .dashboard_projects
+                .get(&zone)
+                .is_none_or(Loadable::is_idle)
+            {
+                self.monitoring
+                    .dashboard_projects
+                    .insert(zone.clone(), Loadable::Loading);
+                self.inflight += 1;
+                let client = self.monitoring_client.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .list_dashboard_projects(&zone)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::DashboardProjects { zone, result });
+                });
+            } else {
+                self.fill_selection(Pane::Dashboards);
             }
             return;
         }
@@ -1068,6 +1215,49 @@ impl App {
             }
             MonitoringTab::Storages => {}
             MonitoringTab::LogRoutings => unreachable!(),
+            MonitoringTab::MetricsRoutings | MonitoringTab::Dashboards => unreachable!(),
+        }
+    }
+
+    fn ensure_publishers(&mut self, zone: &str) {
+        if self
+            .monitoring
+            .publishers
+            .get(zone)
+            .is_none_or(Loadable::is_idle)
+        {
+            self.monitoring
+                .publishers
+                .insert(zone.to_string(), Loadable::Loading);
+            self.inflight += 1;
+            let client = self.monitoring_client.clone();
+            let tx = self.tx.clone();
+            let zone = zone.to_string();
+            tokio::spawn(async move {
+                let result = client.list_publishers(&zone).await.map_err(fmt_error);
+                let _ = tx.send(Message::Publishers { zone, result });
+            });
+        }
+    }
+
+    fn ensure_monitoring_storages(&mut self, zone: &str) {
+        if self
+            .monitoring
+            .storages
+            .get(zone)
+            .is_none_or(Loadable::is_idle)
+        {
+            self.monitoring
+                .storages
+                .insert(zone.to_string(), Loadable::Loading);
+            self.inflight += 1;
+            let client = self.monitoring_client.clone();
+            let tx = self.tx.clone();
+            let zone = zone.to_string();
+            tokio::spawn(async move {
+                let result = client.list_storages(&zone).await.map_err(fmt_error);
+                let _ = tx.send(Message::Storages { zone, result });
+            });
         }
     }
 
@@ -1705,11 +1895,16 @@ impl App {
             KeyCode::Char('5') => self.set_monitoring_tab(MonitoringTab::NotificationRoutings),
             KeyCode::Char('6') => self.set_monitoring_tab(MonitoringTab::LogMeasureRules),
             KeyCode::Char('7') => self.set_monitoring_tab(MonitoringTab::LogRoutings),
+            KeyCode::Char('8') => self.set_monitoring_tab(MonitoringTab::MetricsRoutings),
+            KeyCode::Char('9') => self.set_monitoring_tab(MonitoringTab::Dashboards),
             KeyCode::Char('n')
                 if self.monitoring.focus == ListFocus::Left
                     && !matches!(
                         self.monitoring.tab,
-                        MonitoringTab::Storages | MonitoringTab::LogRoutings
+                        MonitoringTab::Storages
+                            | MonitoringTab::LogRoutings
+                            | MonitoringTab::MetricsRoutings
+                            | MonitoringTab::Dashboards
                     ) =>
             {
                 self.open_create_alert_project()
@@ -1718,7 +1913,10 @@ impl App {
                 if self.monitoring.focus == ListFocus::Left
                     && !matches!(
                         self.monitoring.tab,
-                        MonitoringTab::Storages | MonitoringTab::LogRoutings
+                        MonitoringTab::Storages
+                            | MonitoringTab::LogRoutings
+                            | MonitoringTab::MetricsRoutings
+                            | MonitoringTab::Dashboards
                     ) =>
             {
                 self.open_edit_alert_project()
@@ -1727,7 +1925,10 @@ impl App {
                 if self.monitoring.focus == ListFocus::Left
                     && !matches!(
                         self.monitoring.tab,
-                        MonitoringTab::Storages | MonitoringTab::LogRoutings
+                        MonitoringTab::Storages
+                            | MonitoringTab::LogRoutings
+                            | MonitoringTab::MetricsRoutings
+                            | MonitoringTab::Dashboards
                     ) =>
             {
                 self.confirm_delete_alert_project()
@@ -1785,6 +1986,24 @@ impl App {
                     && self.monitoring.tab == MonitoringTab::LogRoutings =>
             {
                 self.confirm_delete_log_routing()
+            }
+            KeyCode::Char('a') if self.monitoring.tab == MonitoringTab::MetricsRoutings => {
+                self.open_create_metrics_routing()
+            }
+            KeyCode::Char('e') if self.monitoring.tab == MonitoringTab::MetricsRoutings => {
+                self.open_edit_metrics_routing()
+            }
+            KeyCode::Char('d') if self.monitoring.tab == MonitoringTab::MetricsRoutings => {
+                self.confirm_delete_metrics_routing()
+            }
+            KeyCode::Char('a') if self.monitoring.tab == MonitoringTab::Dashboards => {
+                self.open_create_dashboard()
+            }
+            KeyCode::Char('e') if self.monitoring.tab == MonitoringTab::Dashboards => {
+                self.open_edit_dashboard()
+            }
+            KeyCode::Char('d') if self.monitoring.tab == MonitoringTab::Dashboards => {
+                self.confirm_delete_dashboard()
             }
             KeyCode::Char('a')
                 if self.monitoring.focus == ListFocus::Right
@@ -2070,6 +2289,14 @@ impl App {
         if !self.require_write() {
             return;
         }
+        let publishers = self.routing_publishers("logs");
+        if publishers.is_empty() {
+            self.set_status(
+                "ログ用パブリッシャーを読み込み中です。少し待って再実行してください",
+                StatusKind::Info,
+            );
+            return;
+        }
         let log_storage_id = self
             .monitoring
             .storages
@@ -2085,6 +2312,9 @@ impl App {
             variant: String::new(),
             resource_id: String::new(),
             log_storage_id,
+            publishers,
+            publisher_index: 0,
+            variant_index: 0,
             field: 0,
         }));
     }
@@ -2097,6 +2327,20 @@ impl App {
             self.set_status("ログ転送設定を選択してください", StatusKind::Info);
             return;
         };
+        let publishers = self.routing_publishers("logs");
+        let publisher_index = publishers
+            .iter()
+            .position(|publisher| publisher.code == routing.publisher_code)
+            .unwrap_or(0);
+        let variant_index = publishers
+            .get(publisher_index)
+            .and_then(|publisher| {
+                publisher
+                    .variants
+                    .iter()
+                    .position(|variant| variant.name == routing.variant)
+            })
+            .unwrap_or(0);
         self.overlay = Some(Overlay::LogRoutingForm(LogRoutingForm {
             mode: LogRoutingFormMode::Edit,
             publisher_code: routing.publisher_code.clone(),
@@ -2106,6 +2350,9 @@ impl App {
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
             log_storage_id: routing.log_storage_id.to_string(),
+            publishers,
+            publisher_index,
+            variant_index,
             target: Some(routing),
             field: 0,
         }));
@@ -2130,6 +2377,144 @@ impl App {
             action: ConfirmAction::DeleteLogRouting {
                 zone: self.zone.clone(),
                 routing,
+            },
+        });
+    }
+
+    fn open_create_metrics_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let publishers = self.routing_publishers("metrics");
+        if publishers.is_empty() {
+            self.set_status(
+                "メトリクス用パブリッシャーを読み込み中です。少し待って再実行してください",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let metrics_storage_id = self
+            .monitoring
+            .storages
+            .get(&self.zone)
+            .and_then(Loadable::ready)
+            .and_then(|items| items.iter().find(|item| item.kind == StorageKind::Metrics))
+            .map(|storage| storage.resource_id.to_string())
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::MetricsRoutingForm(MetricsRoutingForm {
+            mode: MetricsRoutingFormMode::Create,
+            target: None,
+            publisher_code: String::new(),
+            variant: String::new(),
+            resource_id: String::new(),
+            metrics_storage_id,
+            publishers,
+            publisher_index: 0,
+            variant_index: 0,
+            field: 0,
+        }));
+    }
+
+    fn open_edit_metrics_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(routing) = self.selected_metrics_routing() else {
+            return;
+        };
+        let publishers = self.routing_publishers("metrics");
+        let publisher_index = publishers
+            .iter()
+            .position(|p| p.code == routing.publisher_code)
+            .unwrap_or(0);
+        let variant_index = publishers
+            .get(publisher_index)
+            .and_then(|p| p.variants.iter().position(|v| v.name == routing.variant))
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::MetricsRoutingForm(MetricsRoutingForm {
+            mode: MetricsRoutingFormMode::Edit,
+            publisher_code: routing.publisher_code.clone(),
+            variant: routing.variant.clone(),
+            resource_id: routing
+                .resource_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            metrics_storage_id: routing.metrics_storage_id.to_string(),
+            target: Some(routing),
+            publishers,
+            publisher_index,
+            variant_index,
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_metrics_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(routing) = self.selected_metrics_routing() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "メトリクス転送設定の削除".to_string(),
+            body: format!(
+                "{} / {} のメトリクス転送を削除します。",
+                routing.publisher_code, routing.variant
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteMetricsRouting {
+                zone: self.zone.clone(),
+                routing,
+            },
+        });
+    }
+
+    fn open_create_dashboard(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::DashboardForm(DashboardForm {
+            mode: DashboardFormMode::Create,
+            target: None,
+            name: String::new(),
+            description: String::new(),
+            field: 0,
+        }));
+    }
+    fn open_edit_dashboard(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_dashboard_project() else {
+            return;
+        };
+        self.overlay = Some(Overlay::DashboardForm(DashboardForm {
+            mode: DashboardFormMode::Edit,
+            name: project.name.clone(),
+            description: project.description.clone(),
+            target: Some(project),
+            field: 0,
+        }));
+    }
+    fn confirm_delete_dashboard(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_dashboard_project() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "ダッシュボードプロジェクトの削除".to_string(),
+            body: format!(
+                "ダッシュボードプロジェクト「{}」を削除します。",
+                project.name
+            ),
+            verify: Some(project.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteDashboardProject {
+                zone: self.zone.clone(),
+                project,
             },
         });
     }
@@ -2921,6 +3306,134 @@ impl App {
             let _ = tx.send(Message::LogRoutingAction {
                 zone,
                 label,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn submit_metrics_routing_form(&mut self, form: MetricsRoutingForm) {
+        let input = match form.input() {
+            Ok(input) => input,
+            Err(err) => {
+                self.set_status(err, StatusKind::Error);
+                self.overlay = Some(Overlay::MetricsRoutingForm(form));
+                return;
+            }
+        };
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let label = format!(
+            "メトリクス転送「{} / {}」",
+            input.publisher_code, input.variant
+        );
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            MetricsRoutingFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_metrics_routing(&zone, &input)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::MetricsRoutingAction {
+                    zone,
+                    label: format!("{label}を作成"),
+                    result,
+                });
+            }),
+            MetricsRoutingFormMode::Edit => {
+                let Some(target) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = client
+                        .update_metrics_routing(&zone, &target.uid, &input)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::MetricsRoutingAction {
+                        zone,
+                        label: format!("{label}を更新"),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_metrics_routing(&mut self, zone: String, routing: MetricsRouting) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        tokio::spawn(async move {
+            let result = client
+                .delete_metrics_routing(&zone, &routing.uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::MetricsRoutingAction {
+                zone,
+                label: "メトリクス転送を削除".to_string(),
+                result,
+            });
+        });
+    }
+
+    pub(super) fn submit_dashboard_form(&mut self, form: DashboardForm) {
+        let name = form.name.trim().to_string();
+        let description = form.description.trim().to_string();
+        if name.is_empty() {
+            self.set_status("名前を入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::DashboardForm(form));
+            return;
+        }
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        self.inflight += 1;
+        match form.mode {
+            DashboardFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_dashboard_project(&zone, &name, &description)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::DashboardAction {
+                    zone,
+                    label: format!("ダッシュボード「{name}」を作成"),
+                    result,
+                });
+            }),
+            DashboardFormMode::Edit => {
+                let Some(target) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = client
+                        .update_dashboard_project(&zone, target.resource_id, &name, &description)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::DashboardAction {
+                        zone,
+                        label: format!("ダッシュボード「{name}」を更新"),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_dashboard(&mut self, zone: String, project: DashboardProject) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        tokio::spawn(async move {
+            let result = client
+                .delete_dashboard_project(&zone, project.resource_id)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::DashboardAction {
+                zone,
+                label: format!("ダッシュボード「{}」を削除", project.name),
                 result,
             });
         });

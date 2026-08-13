@@ -9,13 +9,15 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use super::{DIM, accent};
 use crate::app::{
     AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, Availability,
-    Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LogMeasureRuleForm,
-    LogMeasureRuleFormMode, LogRoutingForm, LogRoutingFormMode, LoginForm, NotificationRoutingForm,
-    NotificationRoutingFormMode, NotificationTargetForm, NotificationTargetFormMode, Overlay,
-    ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode,
-    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, StorageAccessKeyForm,
-    StorageAccessKeyFormMode, StorageForm, StorageFormMode, StorageRetentionForm, SwitchForm,
-    SwitchFormMode, UserForm, UserFormMode, VaultForm, VaultFormMode,
+    Category, DashboardForm, DashboardFormMode, DnsRecordForm, DnsRecordFormMode, DnsZoneForm,
+    DnsZoneFormMode, LogMeasureRuleForm, LogMeasureRuleFormMode, LogRoutingForm,
+    LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
+    NotificationRoutingForm, NotificationRoutingFormMode, NotificationTargetForm,
+    NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage, RegistryForm,
+    RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode,
+    StatusKind, StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm, StorageFormMode,
+    StorageRetentionForm, SwitchForm, SwitchFormMode, UserForm, UserFormMode, VaultForm,
+    VaultFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -53,6 +55,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::AlertRuleForm(form) => draw_alert_rule_form(frame, form),
         Overlay::LogMeasureRuleForm(form) => draw_log_measure_rule_form(frame, form),
         Overlay::LogRoutingForm(form) => draw_log_routing_form(frame, form),
+        Overlay::MetricsRoutingForm(form) => draw_metrics_routing_form(frame, form),
+        Overlay::DashboardForm(form) => draw_dashboard_form(frame, form),
         Overlay::NotificationTargetForm(form) => draw_notification_target_form(frame, form),
         Overlay::NotificationRoutingForm(form) => draw_notification_routing_form(frame, form),
         Overlay::StorageForm(form) => draw_storage_form(frame, form),
@@ -680,8 +684,8 @@ fn draw_help(frame: &mut Frame) {
                 ("1 / 2 / 3", "概要 / ユーザー / イメージ"),
                 ("1〜4", "専有型: 概要 / アプリ / ASG / 証明書"),
                 (
-                    "1〜7",
-                    "監視: ルール / 履歴 / 保管先 / 通知先 / 通知経路 / ログ計測 / ログ転送",
+                    "1〜9",
+                    "監視: ルール / 履歴 / 保管先 / 通知先 / 通知経路 / ログ計測 / ログ転送 / メトリクス転送 / ダッシュボード",
                 ),
             ],
         ),
@@ -1385,14 +1389,17 @@ fn draw_log_routing_form(frame: &mut Frame, form: &LogRoutingForm) {
         LogRoutingFormMode::Create => "ログ転送設定の作成",
         LogRoutingFormMode::Edit => "ログ転送設定の編集",
     };
+    let publisher = form.publishers.get(form.publisher_index);
+    let publisher_label = publisher
+        .map(|p| format!("{} — {}", p.code, p.description))
+        .unwrap_or_else(|| form.publisher_code.clone());
+    let variant_label = publisher
+        .and_then(|p| p.variants.get(form.variant_index))
+        .map(|v| format!("{} — {}", v.name, v.label))
+        .unwrap_or_else(|| form.variant.clone());
     let lines = vec![
-        input_line(
-            "パブリッシャー",
-            &form.publisher_code,
-            form.field == 0,
-            false,
-        ),
-        input_line("バリアント", &form.variant, form.field == 1, false),
+        input_line("パブリッシャー", &publisher_label, form.field == 0, false),
+        input_line("バリアント", &variant_label, form.field == 1, false),
         input_line("リソースID", &form.resource_id, form.field == 2, false),
         input_line(
             "ログストレージID",
@@ -1409,6 +1416,68 @@ fn draw_log_routing_form(frame: &mut Frame, form: &LogRoutingForm) {
         form_footer(),
     ];
     let area = centered(frame, 82, dialog_height(&lines, 82));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
+fn draw_metrics_routing_form(frame: &mut Frame, form: &MetricsRoutingForm) {
+    let title = match form.mode {
+        MetricsRoutingFormMode::Create => "メトリクス転送設定の作成",
+        MetricsRoutingFormMode::Edit => "メトリクス転送設定の編集",
+    };
+    let publisher = form.publishers.get(form.publisher_index);
+    let publisher_label = publisher
+        .map(|p| format!("{} — {}", p.code, p.description))
+        .unwrap_or_else(|| form.publisher_code.clone());
+    let variant_label = publisher
+        .and_then(|p| p.variants.get(form.variant_index))
+        .map(|v| format!("{} — {}", v.name, v.label))
+        .unwrap_or_else(|| form.variant.clone());
+    let lines = vec![
+        input_line("パブリッシャー", &publisher_label, form.field == 0, false),
+        input_line("バリアント", &variant_label, form.field == 1, false),
+        input_line("リソースID", &form.resource_id, form.field == 2, false),
+        input_line(
+            "メトリクスストレージID",
+            &form.metrics_storage_id,
+            form.field == 3,
+            false,
+        ),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "← / → でAPIが公開する候補を選択します。リソースIDは任意です。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 86, dialog_height(&lines, 86));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
+fn draw_dashboard_form(frame: &mut Frame, form: &DashboardForm) {
+    let title = match form.mode {
+        DashboardFormMode::Create => "ダッシュボードプロジェクトの作成",
+        DashboardFormMode::Edit => "ダッシュボードプロジェクトの編集",
+    };
+    let lines = vec![
+        input_line("名前", &form.name, form.field == 0, false),
+        input_line("説明", &form.description, form.field == 1, false),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 76, dialog_height(&lines, 76));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
