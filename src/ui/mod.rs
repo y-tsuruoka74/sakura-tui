@@ -359,13 +359,22 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 hints.push("t トラフィック切替");
             }
         }
-        // 以下はすべて閲覧のみなので書き込み系のヒントは無い。
         Service::Dedicated => hints.push("Tab タブ"),
-        Service::Dns => hints.push(if app.dns.focus == crate::app::ListFocus::Left {
-            "Enter レコードへ"
-        } else {
-            "Esc DNSゾーンへ"
-        }),
+        Service::Dns => {
+            hints.push(if app.dns.focus == crate::app::ListFocus::Left {
+                "Enter レコードへ"
+            } else {
+                "Esc DNSゾーンへ"
+            });
+            if app.mode == Mode::Write {
+                if app.dns.focus == crate::app::ListFocus::Left {
+                    hints.extend(["n ゾーン作成", "E 編集", "D 削除"]);
+                } else {
+                    hints.push("a レコード追加");
+                    hints.extend(["e 編集", "d 削除"]);
+                }
+            }
+        }
         Service::SimpleMonitor | Service::Account => {}
         Service::Secrets => {
             hints.push("z ゾーン");

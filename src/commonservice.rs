@@ -1,11 +1,12 @@
-//! `commonserviceitem` を共用する DNS とシンプル監視（閲覧のみ）。
+//! `commonserviceitem` を共用する DNS とシンプル監視。
 //!
 //! コンテナレジストリと同じエンドポイントで、`Provider.Class` だけが違う。
 //! そのため `SacloudClient` をそのまま使える。
+//! DNSはレコードの更新に対応し、シンプル監視は閲覧のみ。
 
 use anyhow::{Context, Result};
 use reqwest::Method;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::sacloud::{ResourceId, SacloudClient, null_as_default};
@@ -26,15 +27,21 @@ pub struct DnsZone {
     /// 委任先のネームサーバー。
     pub name_servers: Vec<String>,
     pub records: Vec<DnsRecord>,
+    /// 更新競合を検出するため、次回PUTで送り返すハッシュ。
+    pub settings_hash: String,
     pub created_at: Option<String>,
 }
 
 /// DNS レコード 1 件。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DnsRecord {
+    #[serde(rename = "Name")]
     pub name: String,
+    #[serde(rename = "Type")]
     pub record_type: String,
+    #[serde(rename = "RData")]
     pub data: String,
+    #[serde(rename = "TTL")]
     pub ttl: u32,
 }
 
@@ -116,6 +123,8 @@ struct NakedDns {
     tags: Vec<String>,
     #[serde(rename = "CreatedAt")]
     created_at: Option<String>,
+    #[serde(rename = "SettingsHash", default, deserialize_with = "null_as_default")]
+    settings_hash: String,
     #[serde(rename = "Settings")]
     settings: Option<NakedDnsSettings>,
     #[serde(rename = "Status")]
@@ -273,6 +282,7 @@ impl From<NakedDns> for DnsZone {
                     ttl: r.ttl,
                 })
                 .collect(),
+            settings_hash: naked.settings_hash,
             created_at: naked.created_at,
         }
     }
@@ -376,6 +386,58 @@ impl SacloudClient {
             .collect()
     }
 
+    /// DNSゾーンを作成する。ゾーン名は作成後に変更できない。
+    pub async fn create_dns_zone(&self, name: &str, description: &str) -> Result<()> {
+        let body = json!({
+            "CommonServiceItem": {
+                "Name": name,
+                "Description": description,
+                "Status": { "Zone": name },
+                "Settings": { "DNS": { "ResourceRecordSets": [] } },
+                "Provider": { "Class": DNS_CLASS },
+                "Tags": [],
+                "Icon": {},
+            }
+        });
+        let _: serde_json::Value = self
+            .request_common(Method::POST, "commonserviceitem", Some(body))
+            .await?;
+        Ok(())
+    }
+
+    /// DNSゾーンの説明を更新する。レコード集合も同時に送り、設定を維持する。
+    pub async fn update_dns_zone(&self, zone: &DnsZone, description: &str) -> Result<()> {
+        let mut body = dns_update_body(&zone.records, &zone.settings_hash);
+        body["CommonServiceItem"]["Name"] = json!(zone.name);
+        body["CommonServiceItem"]["Description"] = json!(description);
+        let path = format!("commonserviceitem/{}", zone.id);
+        let _: serde_json::Value = self.request_common(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    /// DNSゾーンと、その全レコードを削除する。
+    pub async fn delete_dns_zone(&self, id: ResourceId) -> Result<()> {
+        let path = format!("commonserviceitem/{id}");
+        let _: serde_json::Value = self.request_common(Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
+    /// DNSゾーン内のレコード集合を更新する。
+    ///
+    /// APIはレコード単位の更新ではなく全件置換なので、呼び出し側で追加・編集・削除後の
+    /// 完全な一覧を渡す。`OriginalSettingsHash` により同時更新は409で拒否される。
+    pub async fn update_dns_records(
+        &self,
+        id: ResourceId,
+        records: &[DnsRecord],
+        original_settings_hash: &str,
+    ) -> Result<()> {
+        let body = dns_update_body(records, original_settings_hash);
+        let path = format!("commonserviceitem/{id}");
+        let _: serde_json::Value = self.request_common(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
     pub async fn list_simple_monitors(&self) -> Result<Vec<SimpleMonitor>> {
         let items = self
             .find_common_items(SIMPLE_MONITOR_CLASS, "SimpleMonitor")
@@ -391,6 +453,22 @@ impl SacloudClient {
     }
 }
 
+fn dns_update_body(records: &[DnsRecord], original_settings_hash: &str) -> serde_json::Value {
+    let mut body = json!({
+        "CommonServiceItem": {
+            "Settings": {
+                "DNS": {
+                    "ResourceRecordSets": records,
+                }
+            }
+        }
+    });
+    if !original_settings_hash.is_empty() {
+        body["OriginalSettingsHash"] = json!(original_settings_hash);
+    }
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +480,7 @@ mod tests {
             "Name": "example.jp",
             "Description": null,
             "Tags": [],
+            "SettingsHash": "hash-1",
             "Settings": {"DNS": {"ResourceRecordSets": [
                 {"Name": "app", "Type": "A", "RData": "203.0.113.10", "TTL": 300},
                 {"Name": "@", "Type": "MX", "RData": "10 mail.example.jp.", "TTL": 3600}
@@ -416,6 +495,7 @@ mod tests {
         // @ はゾーン頂点。
         assert_eq!(zone.records[1].fqdn("example.jp"), "example.jp");
         assert_eq!(zone.name_servers, vec!["ns1.gslb1.sakura.ne.jp"]);
+        assert_eq!(zone.settings_hash, "hash-1");
     }
 
     /// レコードが 1 件も無いゾーンでも落ちないこと。
@@ -486,5 +566,21 @@ mod tests {
 
         let explicit = serde_json::json!({"Provider": {"Class": "simplemon"}});
         assert!(has_class(&explicit, SIMPLE_MONITOR_CLASS, "SimpleMonitor"));
+    }
+
+    #[test]
+    fn builds_dns_update_with_settings_hash() {
+        let records = vec![DnsRecord {
+            name: "www".to_string(),
+            record_type: "A".to_string(),
+            data: "192.0.2.1".to_string(),
+            ttl: 300,
+        }];
+        let body = dns_update_body(&records, "hash-1");
+        assert_eq!(body["OriginalSettingsHash"], "hash-1");
+        assert_eq!(
+            body["CommonServiceItem"]["Settings"]["DNS"]["ResourceRecordSets"][0],
+            json!({"Name":"www", "Type":"A", "RData":"192.0.2.1", "TTL":300})
+        );
     }
 }

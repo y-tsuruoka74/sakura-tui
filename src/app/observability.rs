@@ -1,11 +1,14 @@
-//! DNS・シンプル監視・シークレットマネージャ・モニタリングスイートの状態（すべて閲覧のみ）。
+//! DNS・シンプル監視・シークレットマネージャ・モニタリングスイートの状態と操作。
 
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
-use super::{App, Loadable, Message, Overlay, Pane, StatusKind, fmt_error, matches};
+use super::{
+    App, ConfirmAction, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable,
+    Message, Overlay, Pane, StatusKind, fmt_error, matches,
+};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::monitoring::{AlertHistory, AlertProject, AlertRule, Storage};
 use crate::secretmanager::{Secret, Vault};
@@ -28,6 +31,8 @@ pub struct DnsView {
     pub zone_state: TableState,
     pub record_state: TableState,
     pub focus: ListFocus,
+    /// 更新後の再取得で同じゾーンを選び直すための名前。
+    pub reselect_zone: Option<String>,
 }
 
 /// シンプル監視画面。
@@ -119,6 +124,11 @@ impl App {
             .filter(|r| matches(filter, &[&r.name, &r.record_type, &r.data]))
             .cloned()
             .collect()
+    }
+
+    pub fn selected_dns_record(&self) -> Option<DnsRecord> {
+        let index = self.dns.record_state.selected()?;
+        self.visible_dns_records().get(index).cloned()
     }
 
     // --- シンプル監視 ---
@@ -470,8 +480,295 @@ impl App {
                 self.fill_selection(Pane::DnsRecords);
             }
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => self.dns.focus = ListFocus::Left,
+            KeyCode::Char('a') => self.open_add_dns_record(),
+            KeyCode::Char('e') => self.open_edit_dns_record(),
+            KeyCode::Char('d') => self.confirm_delete_dns_record(),
+            KeyCode::Char('n') => self.open_create_dns_zone(),
+            KeyCode::Char('E') => self.open_edit_dns_zone(),
+            KeyCode::Char('D') => self.confirm_delete_dns_zone(),
             _ => {}
         }
+    }
+
+    fn open_create_dns_zone(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::DnsZoneForm(DnsZoneForm {
+            mode: DnsZoneFormMode::Create,
+            target: None,
+            name: String::new(),
+            description: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_dns_zone(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        if self.dns.focus != ListFocus::Left {
+            self.set_status(
+                "DNSゾーン一覧へ戻って対象を選択してください",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(zone) = self.selected_dns_zone().cloned() else {
+            self.set_status("編集するDNSゾーンを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::DnsZoneForm(DnsZoneForm {
+            mode: DnsZoneFormMode::Edit,
+            name: zone.name.clone(),
+            description: zone.description.clone(),
+            target: Some(zone),
+            field: 1,
+        }));
+    }
+
+    pub(super) fn submit_dns_zone_form(&mut self, form: DnsZoneForm) {
+        let name = match validate_dns_zone_form(&form) {
+            Ok(name) => name,
+            Err(message) => {
+                self.set_status(message, StatusKind::Error);
+                self.overlay = Some(Overlay::DnsZoneForm(form));
+                return;
+            }
+        };
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            DnsZoneFormMode::Create => {
+                self.dns.reselect_zone = Some(name.clone());
+                let description = form.description.trim().to_string();
+                let label = format!("DNSゾーン「{name}」を作成");
+                tokio::spawn(async move {
+                    let result = client
+                        .create_dns_zone(&name, &description)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::DnsAction { label, result });
+                });
+            }
+            DnsZoneFormMode::Edit => {
+                let Some(zone) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    return;
+                };
+                self.dns.reselect_zone = Some(zone.name.clone());
+                let description = form.description.trim().to_string();
+                let label = format!("DNSゾーン「{}」を更新", zone.name);
+                tokio::spawn(async move {
+                    let result = client
+                        .update_dns_zone(&zone, &description)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::DnsAction { label, result });
+                });
+            }
+        }
+    }
+
+    fn confirm_delete_dns_zone(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        if self.dns.focus != ListFocus::Left {
+            self.set_status(
+                "DNSゾーン一覧へ戻って対象を選択してください",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(zone) = self.selected_dns_zone() else {
+            self.set_status("削除するDNSゾーンを選択してください", StatusKind::Info);
+            return;
+        };
+        let (id, name, record_count) = (zone.id, zone.name.clone(), zone.records.len());
+        self.overlay = Some(Overlay::Confirm {
+            title: "DNSゾーンの削除".to_string(),
+            body: format!(
+                "DNSゾーン「{name}」と登録されているレコード {record_count} 件を削除します。\n削除後は復元できません。\n\n実行するにはゾーン名を入力してください。"
+            ),
+            verify: Some(name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteDnsZone { id, name },
+        });
+    }
+
+    pub(super) fn run_delete_dns_zone(&mut self, id: crate::sacloud::ResourceId, name: String) {
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let label = format!("DNSゾーン「{name}」を削除");
+        self.dns.reselect_zone = None;
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client.delete_dns_zone(id).await.map_err(fmt_error);
+            let _ = tx.send(Message::DnsAction { label, result });
+        });
+    }
+
+    fn open_add_dns_record(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(zone) = self.selected_dns_zone().cloned() else {
+            self.set_status("DNSゾーンを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::DnsRecordForm(DnsRecordForm {
+            mode: DnsRecordFormMode::Add,
+            zone,
+            original: None,
+            name: "@".to_string(),
+            record_type: "A".to_string(),
+            data: String::new(),
+            ttl: "3600".to_string(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_dns_record(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        if self.dns.focus != ListFocus::Right {
+            self.set_status(
+                "レコード一覧へ移動して対象を選択してください",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(zone) = self.selected_dns_zone().cloned() else {
+            return;
+        };
+        let Some(record) = self.selected_dns_record() else {
+            self.set_status("編集するレコードを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::DnsRecordForm(DnsRecordForm {
+            mode: DnsRecordFormMode::Edit,
+            zone,
+            original: Some(record.clone()),
+            name: record.name,
+            record_type: record.record_type,
+            data: record.data,
+            ttl: record.ttl.to_string(),
+            field: 0,
+        }));
+    }
+
+    pub(super) fn submit_dns_record_form(&mut self, form: DnsRecordForm) {
+        let record = match dns_record_from_form(&form) {
+            Ok(record) => record,
+            Err(message) => {
+                self.set_status(message, StatusKind::Error);
+                self.overlay = Some(Overlay::DnsRecordForm(form));
+                return;
+            }
+        };
+        let mut records = form.zone.records.clone();
+        let label = match form.mode {
+            DnsRecordFormMode::Add => {
+                if records.contains(&record) {
+                    self.set_status("同じDNSレコードが既にあります", StatusKind::Error);
+                    self.overlay = Some(Overlay::DnsRecordForm(form));
+                    return;
+                }
+                records.push(record.clone());
+                format!(
+                    "DNSレコード「{} {}」を追加",
+                    record.name, record.record_type
+                )
+            }
+            DnsRecordFormMode::Edit => {
+                let Some(original) = &form.original else {
+                    return;
+                };
+                let Some(index) = records.iter().position(|item| item == original) else {
+                    self.set_status("編集元のDNSレコードが見つかりません", StatusKind::Error);
+                    return;
+                };
+                if records
+                    .iter()
+                    .enumerate()
+                    .any(|(i, item)| i != index && item == &record)
+                {
+                    self.set_status("同じDNSレコードが既にあります", StatusKind::Error);
+                    self.overlay = Some(Overlay::DnsRecordForm(form));
+                    return;
+                }
+                records[index] = record.clone();
+                format!(
+                    "DNSレコード「{} {}」を更新",
+                    record.name, record.record_type
+                )
+            }
+        };
+        self.run_dns_update(form.zone, records, label);
+    }
+
+    fn confirm_delete_dns_record(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        if self.dns.focus != ListFocus::Right {
+            self.set_status(
+                "レコード一覧へ移動して対象を選択してください",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(zone) = self.selected_dns_zone().cloned() else {
+            return;
+        };
+        let Some(record) = self.selected_dns_record() else {
+            self.set_status("削除するレコードを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "DNSレコードの削除".to_string(),
+            body: format!(
+                "ゾーン「{}」から次のレコードを削除します。\n\n{}  {}  {}  TTL {}\n\nこの操作は取り消せません。実行しますか？",
+                zone.name, record.name, record.record_type, record.data, record.ttl
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteDnsRecord { zone, record },
+        });
+    }
+
+    pub(super) fn run_delete_dns_record(&mut self, zone: DnsZone, record: DnsRecord) {
+        let Some(index) = zone.records.iter().position(|item| item == &record) else {
+            self.set_status("削除するDNSレコードが見つかりません", StatusKind::Error);
+            return;
+        };
+        let mut records = zone.records.clone();
+        records.remove(index);
+        let label = format!(
+            "DNSレコード「{} {}」を削除",
+            record.name, record.record_type
+        );
+        self.run_dns_update(zone, records, label);
+    }
+
+    fn run_dns_update(&mut self, zone: DnsZone, records: Vec<DnsRecord>, label: String) {
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        self.dns.reselect_zone = Some(zone.name.clone());
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .update_dns_records(zone.id, &records, &zone.settings_hash)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::DnsAction { label, result });
+        });
     }
 
     pub(super) fn on_key_secrets(&mut self, key: KeyEvent) {
@@ -574,6 +871,67 @@ impl App {
     }
 }
 
+fn dns_record_from_form(form: &DnsRecordForm) -> Result<DnsRecord, &'static str> {
+    let name = form.name.trim();
+    if name.chars().any(char::is_whitespace) {
+        return Err("名前に空白は使用できません");
+    }
+    let record_type = form.record_type.trim().to_ascii_uppercase();
+    if record_type.is_empty() {
+        return Err("レコード種別を入力してください");
+    }
+    if !record_type
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("レコード種別には英数字とハイフンだけを使用できます");
+    }
+    let data = form.data.trim();
+    if data.is_empty() {
+        return Err("値を入力してください");
+    }
+    let ttl = form
+        .ttl
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "TTLは0以上の整数で入力してください")?;
+    Ok(DnsRecord {
+        name: if name.is_empty() { "@" } else { name }.to_string(),
+        record_type,
+        data: data.to_string(),
+        ttl,
+    })
+}
+
+fn validate_dns_zone_form(form: &DnsZoneForm) -> Result<String, &'static str> {
+    let name = form.name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return Err("ゾーン名を入力してください");
+    }
+    if name.len() > 253 {
+        return Err("ゾーン名は253文字以内で入力してください");
+    }
+    if name.starts_with(['.', '-']) || name.ends_with(['.', '-']) {
+        return Err("ゾーン名の先頭と末尾にピリオドやハイフンは使用できません");
+    }
+    if name.contains("..") || name.contains(".-") || name.contains("-.") {
+        return Err("ゾーン名に連続したピリオドや不正な区切りは使用できません");
+    }
+    if name.split('.').any(|label| {
+        label.len() > 63
+            || label.is_empty()
+            || !label
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }) {
+        return Err("ゾーン名は英小文字・数字・ハイフンで構成されたラベルを指定してください");
+    }
+    if form.description.chars().count() > 512 {
+        return Err("説明は512文字以内で入力してください");
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +945,79 @@ mod tests {
         assert_eq!(DnsView::default().focus, ListFocus::Left);
         assert_eq!(SecretsView::default().focus, ListFocus::Left);
         assert_eq!(MonitoringView::default().focus, ListFocus::Left);
+    }
+
+    fn dns_form(name: &str, record_type: &str, data: &str, ttl: &str) -> DnsRecordForm {
+        DnsRecordForm {
+            mode: DnsRecordFormMode::Add,
+            zone: DnsZone {
+                id: crate::sacloud::ResourceId(1),
+                name: "example.jp".to_string(),
+                description: String::new(),
+                tags: Vec::new(),
+                name_servers: Vec::new(),
+                records: Vec::new(),
+                settings_hash: "hash".to_string(),
+                created_at: None,
+            },
+            original: None,
+            name: name.to_string(),
+            record_type: record_type.to_string(),
+            data: data.to_string(),
+            ttl: ttl.to_string(),
+            field: 0,
+        }
+    }
+
+    #[test]
+    fn normalizes_dns_record_form() {
+        let record =
+            dns_record_from_form(&dns_form("", " a ", " 192.0.2.1 ", "300")).expect("valid record");
+        assert_eq!(record.name, "@");
+        assert_eq!(record.record_type, "A");
+        assert_eq!(record.data, "192.0.2.1");
+        assert_eq!(record.ttl, 300);
+    }
+
+    #[test]
+    fn rejects_invalid_dns_record_form() {
+        assert_eq!(
+            dns_record_from_form(&dns_form("bad name", "A", "192.0.2.1", "300")),
+            Err("名前に空白は使用できません")
+        );
+        assert_eq!(
+            dns_record_from_form(&dns_form("www", "A", "", "300")),
+            Err("値を入力してください")
+        );
+        assert_eq!(
+            dns_record_from_form(&dns_form("www", "A", "192.0.2.1", "x")),
+            Err("TTLは0以上の整数で入力してください")
+        );
+    }
+
+    #[test]
+    fn validates_and_normalizes_dns_zone_form() {
+        let form = DnsZoneForm {
+            mode: DnsZoneFormMode::Create,
+            target: None,
+            name: " Example.JP ".to_string(),
+            description: String::new(),
+            field: 0,
+        };
+        assert_eq!(validate_dns_zone_form(&form), Ok("example.jp".to_string()));
+    }
+
+    #[test]
+    fn rejects_invalid_dns_zone_names() {
+        for name in ["", "-example.jp", "example..jp", "exa_mple.jp"] {
+            let form = DnsZoneForm {
+                mode: DnsZoneFormMode::Create,
+                target: None,
+                name: name.to_string(),
+                description: String::new(),
+                field: 0,
+            };
+            assert!(validate_dns_zone_form(&form).is_err(), "{name}");
+        }
     }
 }

@@ -8,8 +8,9 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, accent};
 use crate::app::{
-    App, Availability, Category, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm,
-    RegistryFormMode, StatusKind, SwitchForm, SwitchFormMode, UserForm, UserFormMode,
+    App, Availability, Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode,
+    LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode, StatusKind,
+    SwitchForm, SwitchFormMode, UserForm, UserFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -38,6 +39,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::UserForm(form) => draw_user_form(frame, form),
         Overlay::RegistryForm(form) => draw_registry_form(frame, form),
         Overlay::SwitchForm(form) => draw_switch_form(frame, form),
+        Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
+        Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
@@ -673,12 +676,12 @@ fn draw_help(frame: &mut Frame) {
             &[
                 ("r", "表示中のデータを再取得"),
                 ("R", "全キャッシュを破棄して再取得"),
-                ("a", "ユーザーを追加"),
-                ("e", "ユーザーを編集"),
+                ("a", "ユーザー / DNSレコードを追加"),
+                ("e", "ユーザー / DNSレコードを編集"),
                 ("d", "選択中の項目を削除"),
-                ("n", "レジストリ / スイッチを作成"),
-                ("E", "レジストリ / スイッチを編集"),
-                ("D", "レジストリ / スイッチを削除"),
+                ("n", "レジストリ / スイッチ / DNSゾーンを作成"),
+                ("E", "レジストリ / スイッチ / DNSゾーンを編集"),
+                ("D", "レジストリ / スイッチ / DNSゾーンを削除"),
                 ("L", "レジストリにログイン"),
                 ("O", "レジストリのログイン情報を破棄"),
                 ("/", "表示中のリストを絞り込み"),
@@ -966,6 +969,91 @@ fn draw_switch_form(frame: &mut Frame, form: &SwitchForm) {
     ]));
 
     let area = centered(frame, 70, dialog_height(&lines, 70));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_dns_record_form(frame: &mut Frame, form: &DnsRecordForm) {
+    let title = match form.mode {
+        DnsRecordFormMode::Add => format!("DNSレコードの追加 — {}", form.zone.name),
+        DnsRecordFormMode::Edit => format!("DNSレコードの編集 — {}", form.zone.name),
+    };
+    let mut lines: Vec<Line> = DnsRecordForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "ゾーン頂点は名前を @ にします。種別は A / AAAA / CNAME / MX / TXT などです。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "NS・MX・CNAME等のFQDNは末尾にドットが必要です。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_dns_zone_form(frame: &mut Frame, form: &DnsZoneForm) {
+    let title = match form.mode {
+        DnsZoneFormMode::Create => "DNSゾーンの作成".to_string(),
+        DnsZoneFormMode::Edit => format!("DNSゾーンの編集 — {}", form.name),
+    };
+    let mut lines: Vec<Line> = DnsZoneForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        match form.mode {
+            DnsZoneFormMode::Create => {
+                "ゾーン名は作成後に変更できません。国際化ドメインはPunycodeで入力してください。"
+            }
+            DnsZoneFormMode::Edit => "ゾーン名は作成後に変更できないため、説明だけを編集できます。",
+        },
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 78, dialog_height(&lines, 78));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)

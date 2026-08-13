@@ -33,7 +33,7 @@ use crate::account::AuthStatus;
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
-use crate::commonservice::{DnsZone, SimpleMonitor};
+use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
 use crate::monitoring::{AlertHistory, AlertProject, AlertRule, MonitoringClient, Storage};
@@ -115,6 +115,10 @@ pub enum Message {
         result: Result<Vec<ded::Certificate>, String>,
     },
     DnsZones(Result<Vec<DnsZone>, String>),
+    DnsAction {
+        label: String,
+        result: Result<(), String>,
+    },
     SimpleMonitors(Result<Vec<SimpleMonitor>, String>),
     Vaults {
         zone: String,
@@ -934,6 +938,85 @@ impl SwitchForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsRecordFormMode {
+    Add,
+    Edit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsZoneFormMode {
+    Create,
+    Edit,
+}
+
+/// DNSゾーンの作成・説明編集フォーム。
+#[derive(Debug, Clone)]
+pub struct DnsZoneForm {
+    pub mode: DnsZoneFormMode,
+    pub target: Option<DnsZone>,
+    pub name: String,
+    pub description: String,
+    pub field: usize,
+}
+
+impl DnsZoneForm {
+    pub const LABELS: [&'static str; 2] = ["ゾーン名", "説明"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match (self.mode, index) {
+            (DnsZoneFormMode::Create, 0) => Some(&mut self.name),
+            (_, 1) => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
+/// DNSレコードの追加・編集フォーム。
+#[derive(Debug, Clone)]
+pub struct DnsRecordForm {
+    pub mode: DnsRecordFormMode,
+    pub zone: DnsZone,
+    pub original: Option<DnsRecord>,
+    pub name: String,
+    pub record_type: String,
+    pub data: String,
+    pub ttl: String,
+    pub field: usize,
+}
+
+impl DnsRecordForm {
+    pub const LABELS: [&'static str; 4] = ["名前", "種別", "値", "TTL"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.record_type,
+            2 => &self.data,
+            3 => &self.ttl,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.record_type),
+            2 => Some(&mut self.data),
+            3 => Some(&mut self.ttl),
+            _ => None,
+        }
+    }
+}
+
 /// 確認ダイアログで実行する操作。
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -950,6 +1033,14 @@ pub enum ConfirmAction {
     },
     DeleteSwitch {
         zone: String,
+        id: ResourceId,
+        name: String,
+    },
+    DeleteDnsRecord {
+        zone: DnsZone,
+        record: DnsRecord,
+    },
+    DeleteDnsZone {
         id: ResourceId,
         name: String,
     },
@@ -1002,6 +1093,8 @@ pub enum Overlay {
     UserForm(UserForm),
     RegistryForm(RegistryForm),
     SwitchForm(SwitchForm),
+    DnsRecordForm(DnsRecordForm),
+    DnsZoneForm(DnsZoneForm),
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
@@ -1768,11 +1861,53 @@ impl App {
                 self.dedicated.worker_nodes.insert((cluster, asg), loadable);
             }
             Message::DnsZones(result) => {
-                self.dns.zones = self.store_result(result);
-                self.dns.zone_state.select(None);
+                let reselect = self.dns.reselect_zone.take();
+                self.dns.zones = match result {
+                    Ok(zones) => {
+                        let index = reselect
+                            .as_deref()
+                            .and_then(|name| zones.iter().position(|zone| zone.name == name));
+                        self.dns.zone_state.select(index);
+                        Loadable::Ready(zones)
+                    }
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        self.dns.zone_state.select(None);
+                        Loadable::Failed(err)
+                    }
+                };
                 self.dns.record_state.select(None);
                 self.ensure_loaded();
             }
+            Message::DnsAction { label, result } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.dns.zones = Loadable::Idle;
+                    self.dns_ensure_loaded();
+                }
+                Err(err) => {
+                    let conflict = err.contains("409");
+                    let body = if conflict {
+                        format!(
+                            "{err}\n\n別の画面やツールでDNSゾーンが更新された可能性があります。\n再取得後に内容を確認して、もう一度操作してください。"
+                        )
+                    } else {
+                        self.dns.reselect_zone = None;
+                        err.clone()
+                    };
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body,
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                    if conflict {
+                        self.dns.zones = Loadable::Idle;
+                        self.dns_ensure_loaded();
+                    }
+                }
+            },
             Message::SimpleMonitors(result) => {
                 self.simple_monitor.monitors = self.store_result(result);
                 self.simple_monitor.monitor_state.select(None);
@@ -2182,6 +2317,18 @@ impl App {
                 }
             }
             Some(Overlay::SwitchForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::DnsRecordForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::DnsZoneForm(form)) => {
                 let field = form.field;
                 if let Some(value) = form.value_mut(field) {
                     value.push_str(text);
@@ -3475,6 +3622,10 @@ impl App {
             ConfirmAction::DeleteSwitch { zone, id, name } => {
                 self.run_delete_switch(zone, id, name)
             }
+            ConfirmAction::DeleteDnsRecord { zone, record } => {
+                self.run_delete_dns_record(zone, record)
+            }
+            ConfirmAction::DeleteDnsZone { id, name } => self.run_delete_dns_zone(id, name),
             ConfirmAction::DeleteTag {
                 host,
                 repository,
@@ -3944,6 +4095,22 @@ impl App {
                     self.overlay = Some(Overlay::SwitchForm(form));
                 }
             },
+            Overlay::DnsRecordForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_dns_record_form(form),
+                _ => {
+                    edit_dns_record_form(&mut form, key);
+                    self.overlay = Some(Overlay::DnsRecordForm(form));
+                }
+            },
+            Overlay::DnsZoneForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_dns_zone_form(form),
+                _ => {
+                    edit_dns_zone_form(&mut form, key);
+                    self.overlay = Some(Overlay::DnsZoneForm(form));
+                }
+            },
             Overlay::ServicePicker { mut index, initial } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') if initial => self.should_quit = true,
                 KeyCode::Esc | KeyCode::Char('q') => {}
@@ -4077,6 +4244,46 @@ fn edit_registry_form(form: &mut RegistryForm, key: KeyEvent) {
 
 fn edit_switch_form(form: &mut SwitchForm, key: KeyEvent) {
     let fields = SwitchForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_dns_record_form(form: &mut DnsRecordForm, key: KeyEvent) {
+    let fields = DnsRecordForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_dns_zone_form(form: &mut DnsZoneForm, key: KeyEvent) {
+    let fields = DnsZoneForm::LABELS.len();
     match key.code {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
         KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
