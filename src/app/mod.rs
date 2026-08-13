@@ -36,7 +36,9 @@ use crate::billing::{Bill, BillDetail, BillingIdentity};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
-use crate::monitoring::{AlertHistory, AlertProject, AlertRule, MonitoringClient, Storage};
+use crate::monitoring::{
+    AlertHistory, AlertProject, AlertRule, AlertRuleInput, MonitoringClient, Storage, StorageKind,
+};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 use crate::secretmanager::{Secret, Vault};
@@ -159,6 +161,17 @@ pub enum Message {
         zone: String,
         label: String,
         reselect_project: Option<i64>,
+        result: Result<(), String>,
+    },
+    AlertRuleAction {
+        zone: String,
+        project: i64,
+        label: String,
+        result: Result<(), String>,
+    },
+    StorageAction {
+        zone: String,
+        label: String,
         result: Result<(), String>,
     },
     /// プロファイル作成時の検証結果。検証が通ってから書き出す。
@@ -1151,6 +1164,127 @@ impl AlertProjectForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertRuleFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertRuleForm {
+    pub mode: AlertRuleFormMode,
+    pub project: AlertProject,
+    pub target: Option<AlertRule>,
+    pub metrics_storage_id: String,
+    pub name: String,
+    pub query: String,
+    pub warning_enabled: bool,
+    pub threshold_warning: String,
+    pub duration_warning: String,
+    pub critical_enabled: bool,
+    pub threshold_critical: String,
+    pub duration_critical: String,
+    pub field: usize,
+}
+
+impl AlertRuleForm {
+    pub const FIELDS: usize = 9;
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.metrics_storage_id),
+            1 => Some(&mut self.name),
+            2 => Some(&mut self.query),
+            4 => Some(&mut self.threshold_warning),
+            5 => Some(&mut self.duration_warning),
+            7 => Some(&mut self.threshold_critical),
+            8 => Some(&mut self.duration_critical),
+            _ => None,
+        }
+    }
+
+    fn input(&self) -> Result<AlertRuleInput, String> {
+        let metrics_storage_id = self
+            .metrics_storage_id
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "メトリクスストレージIDは数値で入力してください".to_string())?;
+        let duration_warning = self
+            .duration_warning
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "警告の継続時間は秒数で入力してください".to_string())?;
+        let duration_critical = self
+            .duration_critical
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "重大の継続時間は秒数で入力してください".to_string())?;
+        if metrics_storage_id <= 0 {
+            return Err("メトリクスストレージIDを入力してください".to_string());
+        }
+        if duration_warning < 0 || duration_critical < 0 {
+            return Err("継続時間は0秒以上で入力してください".to_string());
+        }
+        if self.name.trim().is_empty() || self.query.trim().is_empty() {
+            return Err("名前とクエリを入力してください".to_string());
+        }
+        if self.warning_enabled && self.threshold_warning.trim().is_empty() {
+            return Err("警告を有効にする場合はしきい値が必要です".to_string());
+        }
+        if self.critical_enabled && self.threshold_critical.trim().is_empty() {
+            return Err("重大を有効にする場合はしきい値が必要です".to_string());
+        }
+        Ok(AlertRuleInput {
+            metrics_storage_id,
+            name: self.name.trim().to_string(),
+            query: self.query.trim().to_string(),
+            warning_enabled: self.warning_enabled,
+            critical_enabled: self.critical_enabled,
+            threshold_warning: self.threshold_warning.trim().to_string(),
+            threshold_critical: self.threshold_critical.trim().to_string(),
+            duration_warning,
+            duration_critical,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageForm {
+    pub mode: StorageFormMode,
+    pub target: Option<Storage>,
+    pub kind: StorageKind,
+    pub is_system: bool,
+    pub classification: usize,
+    pub name: String,
+    pub description: String,
+    pub field: usize,
+}
+
+impl StorageForm {
+    pub const KINDS: [StorageKind; 3] =
+        [StorageKind::Logs, StorageKind::Metrics, StorageKind::Traces];
+    pub const CLASSIFICATIONS: [&'static str; 2] = ["shared", "dedicated"];
+    pub const FIELDS: usize = 5;
+
+    pub fn classification(&self) -> &'static str {
+        Self::CLASSIFICATIONS[self.classification]
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            3 => Some(&mut self.name),
+            4 => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Debug for SecretForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretForm")
@@ -1271,6 +1405,16 @@ pub enum ConfirmAction {
         resource_id: i64,
         name: String,
     },
+    DeleteAlertRule {
+        zone: String,
+        project: i64,
+        uid: String,
+        name: String,
+    },
+    DeleteStorage {
+        zone: String,
+        storage: Storage,
+    },
     PowerAction {
         id: ResourceId,
         zone: String,
@@ -1307,6 +1451,8 @@ pub enum Overlay {
     VaultForm(VaultForm),
     SecretForm(SecretForm),
     AlertProjectForm(AlertProjectForm),
+    AlertRuleForm(AlertRuleForm),
+    StorageForm(StorageForm),
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
@@ -2287,6 +2433,49 @@ impl App {
                     self.set_status(err, StatusKind::Error);
                 }
             },
+            Message::AlertRuleAction {
+                zone,
+                project,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.rules.remove(&(zone, project));
+                    self.monitoring.rule_state.select(None);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::StorageAction {
+                zone,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.storages.remove(&zone);
+                    self.monitoring.storage_state.select(None);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::ProfileVerified { form, result } => match result {
                 Ok(zones) => {
                     // 環境ごとにゾーン名が違うので、取れた一覧に差し替える。
@@ -2662,6 +2851,18 @@ impl App {
                 }
             }
             Some(Overlay::AlertProjectForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::AlertRuleForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::StorageForm(form)) => {
                 let field = form.field;
                 if let Some(value) = form.value_mut(field) {
                     value.push_str(text);
@@ -4014,6 +4215,15 @@ impl App {
                 resource_id,
                 name,
             } => self.run_delete_alert_project(zone, resource_id, name),
+            ConfirmAction::DeleteAlertRule {
+                zone,
+                project,
+                uid,
+                name,
+            } => self.run_delete_alert_rule(zone, project, uid, name),
+            ConfirmAction::DeleteStorage { zone, storage } => {
+                self.run_delete_storage(zone, storage)
+            }
             ConfirmAction::PowerAction {
                 id,
                 zone,
@@ -4485,6 +4695,22 @@ impl App {
                     self.overlay = Some(Overlay::AlertProjectForm(form));
                 }
             },
+            Overlay::AlertRuleForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_alert_rule_form(form),
+                _ => {
+                    edit_alert_rule_form(&mut form, key);
+                    self.overlay = Some(Overlay::AlertRuleForm(form));
+                }
+            },
+            Overlay::StorageForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_storage_form(form),
+                _ => {
+                    edit_storage_form(&mut form, key);
+                    self.overlay = Some(Overlay::StorageForm(form));
+                }
+            },
             Overlay::ServicePicker { mut index, initial } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') if initial => self.should_quit = true,
                 KeyCode::Esc | KeyCode::Char('q') => {}
@@ -4734,6 +4960,98 @@ fn edit_alert_project_form(form: &mut AlertProjectForm, key: KeyEvent) {
     match key.code {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
         KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_alert_rule_form(form: &mut AlertRuleForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % AlertRuleForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + AlertRuleForm::FIELDS - 1) % AlertRuleForm::FIELDS
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 3 => {
+            form.warning_enabled = !form.warning_enabled
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 6 => {
+            form.critical_enabled = !form.critical_enabled
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_storage_form(form: &mut StorageForm, key: KeyEvent) {
+    let fields = if form.mode == StorageFormMode::Create {
+        StorageForm::FIELDS
+    } else {
+        2
+    };
+    match key.code {
+        KeyCode::Tab | KeyCode::Down if form.mode == StorageFormMode::Create => {
+            form.field = (form.field + 1) % fields
+        }
+        KeyCode::BackTab | KeyCode::Up if form.mode == StorageFormMode::Create => {
+            form.field = (form.field + fields - 1) % fields
+        }
+        KeyCode::Tab | KeyCode::Down => form.field = if form.field == 3 { 4 } else { 3 },
+        KeyCode::BackTab | KeyCode::Up => form.field = if form.field == 3 { 4 } else { 3 },
+        KeyCode::Left if form.mode == StorageFormMode::Create && form.field == 0 => {
+            let index = StorageForm::KINDS
+                .iter()
+                .position(|kind| *kind == form.kind)
+                .unwrap_or(0);
+            form.kind = StorageForm::KINDS
+                [(index + StorageForm::KINDS.len() - 1) % StorageForm::KINDS.len()];
+            if form.kind == StorageKind::Traces {
+                form.is_system = false;
+            }
+        }
+        KeyCode::Right | KeyCode::Char(' ')
+            if form.mode == StorageFormMode::Create && form.field == 0 =>
+        {
+            let index = StorageForm::KINDS
+                .iter()
+                .position(|kind| *kind == form.kind)
+                .unwrap_or(0);
+            form.kind = StorageForm::KINDS[(index + 1) % StorageForm::KINDS.len()];
+            if form.kind == StorageKind::Traces {
+                form.is_system = false;
+            }
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.mode == StorageFormMode::Create
+                && form.field == 1
+                && form.kind != StorageKind::Traces =>
+        {
+            form.is_system = !form.is_system
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.mode == StorageFormMode::Create
+                && form.field == 2
+                && form.kind != StorageKind::Metrics =>
+        {
+            form.classification = (form.classification + 1) % StorageForm::CLASSIFICATIONS.len()
+        }
         KeyCode::Backspace => {
             if let Some(value) = form.value_mut(form.field) {
                 value.pop();

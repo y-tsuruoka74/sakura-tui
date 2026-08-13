@@ -33,6 +33,8 @@ pub struct AlertProject {
 /// アラートルール 1 件。
 #[derive(Debug, Clone)]
 pub struct AlertRule {
+    pub uid: String,
+    pub metrics_storage_id: i64,
     pub name: String,
     pub query: String,
     /// 発報中かどうか。
@@ -41,6 +43,8 @@ pub struct AlertRule {
     pub critical_enabled: bool,
     pub threshold_warning: String,
     pub threshold_critical: String,
+    pub duration_warning: i64,
+    pub duration_critical: i64,
 }
 
 /// アラートの発報履歴 1 件。
@@ -61,12 +65,14 @@ pub struct AlertHistory {
 pub struct Storage {
     pub kind: StorageKind,
     pub id: i64,
+    pub resource_id: i64,
     pub name: String,
     pub description: String,
     /// 共用 / 専有。
     pub classification: String,
     /// 保持日数（メトリクスには無い）。
     pub retention_days: Option<i64>,
+    pub is_system: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +135,10 @@ struct RawProject {
 #[derive(Debug, Deserialize)]
 struct RawRule {
     #[serde(default, deserialize_with = "null_as_default")]
+    uid: String,
+    #[serde(default, deserialize_with = "flexible_number")]
+    metrics_storage_id: i64,
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
     #[serde(default, deserialize_with = "null_as_default")]
     query: String,
@@ -142,6 +152,10 @@ struct RawRule {
     threshold_warning: String,
     #[serde(default, deserialize_with = "null_as_default")]
     threshold_critical: String,
+    #[serde(default, deserialize_with = "flexible_number")]
+    threshold_duration_warning: i64,
+    #[serde(default, deserialize_with = "flexible_number")]
+    threshold_duration_critical: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +180,8 @@ struct RawHistory {
 struct RawStorage {
     #[serde(default, deserialize_with = "flexible_number")]
     id: i64,
+    #[serde(default, deserialize_with = "flexible_number")]
+    resource_id: i64,
     #[serde(default, deserialize_with = "null_as_default")]
     name: String,
     #[serde(default, deserialize_with = "null_as_default")]
@@ -177,6 +193,8 @@ struct RawStorage {
     expire_day: i64,
     #[serde(default, deserialize_with = "flexible_number")]
     retention_period_days: i64,
+    #[serde(default)]
+    is_system: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -382,6 +400,8 @@ impl MonitoringClient {
                     res.items()
                         .into_iter()
                         .map(|r| AlertRule {
+                            uid: r.uid,
+                            metrics_storage_id: r.metrics_storage_id,
                             name: r.name,
                             query: r.query,
                             open: r.open,
@@ -389,6 +409,8 @@ impl MonitoringClient {
                             critical_enabled: r.enabled_critical,
                             threshold_warning: r.threshold_warning,
                             threshold_critical: r.threshold_critical,
+                            duration_warning: r.threshold_duration_warning,
+                            duration_critical: r.threshold_duration_critical,
                         })
                         .collect(),
                     total,
@@ -396,6 +418,39 @@ impl MonitoringClient {
             }
         })
         .await
+    }
+
+    pub async fn create_rule(
+        &self,
+        zone: &str,
+        project: i64,
+        input: &AlertRuleInput,
+    ) -> Result<()> {
+        let path = format!("alerts/projects/{project}/rules/");
+        let _: serde_json::Value = self
+            .send(zone, Method::POST, &path, Some(input.payload()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_rule(
+        &self,
+        zone: &str,
+        project: i64,
+        uid: &str,
+        input: &AlertRuleInput,
+    ) -> Result<()> {
+        let path = format!("alerts/projects/{project}/rules/{uid}/");
+        let _: serde_json::Value = self
+            .send(zone, Method::PATCH, &path, Some(input.payload()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_rule(&self, zone: &str, project: i64, uid: &str) -> Result<()> {
+        let path = format!("alerts/projects/{project}/rules/{uid}/");
+        let _: serde_json::Value = self.send(zone, Method::DELETE, &path, None).await?;
+        Ok(())
     }
 
     pub async fn list_histories(&self, zone: &str, project: i64) -> Result<Vec<AlertHistory>> {
@@ -438,6 +493,11 @@ impl MonitoringClient {
                 Storage {
                     kind,
                     id: s.id,
+                    resource_id: if s.resource_id > 0 {
+                        s.resource_id
+                    } else {
+                        s.id
+                    },
                     name: s.name,
                     description: s.description,
                     classification: s.classification,
@@ -445,10 +505,83 @@ impl MonitoringClient {
                     retention_days: [s.expire_day, s.retention_period_days]
                         .into_iter()
                         .find(|d| *d > 0),
+                    is_system: s.is_system,
                 }
             }));
         }
         Ok(out)
+    }
+
+    pub async fn create_storage(
+        &self,
+        zone: &str,
+        kind: StorageKind,
+        name: &str,
+        description: &str,
+        classification: &str,
+        is_system: bool,
+    ) -> Result<()> {
+        let mut payload = json!({ "name": name, "description": description });
+        match kind {
+            StorageKind::Logs => {
+                payload["is_system"] = json!(is_system);
+                payload["classification"] = json!(classification);
+            }
+            StorageKind::Metrics => payload["is_system"] = json!(is_system),
+            StorageKind::Traces => payload["classification"] = json!(classification),
+        }
+        let _: serde_json::Value = self
+            .send(zone, Method::POST, kind.path(), Some(payload))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_storage(
+        &self,
+        zone: &str,
+        storage: &Storage,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        let path = format!("{}{}/", storage.kind.path(), storage.resource_id);
+        let payload = json!({ "name": name, "description": description });
+        let _: serde_json::Value = self.send(zone, Method::PATCH, &path, Some(payload)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_storage(&self, zone: &str, storage: &Storage) -> Result<()> {
+        let path = format!("{}{}/", storage.kind.path(), storage.resource_id);
+        let _: serde_json::Value = self.send(zone, Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertRuleInput {
+    pub metrics_storage_id: i64,
+    pub name: String,
+    pub query: String,
+    pub warning_enabled: bool,
+    pub critical_enabled: bool,
+    pub threshold_warning: String,
+    pub threshold_critical: String,
+    pub duration_warning: i64,
+    pub duration_critical: i64,
+}
+
+impl AlertRuleInput {
+    fn payload(&self) -> serde_json::Value {
+        json!({
+            "metrics_storage_id": self.metrics_storage_id,
+            "name": self.name,
+            "query": self.query,
+            "enabled_warning": self.warning_enabled,
+            "enabled_critical": self.critical_enabled,
+            "threshold_warning": self.warning_enabled.then_some(&self.threshold_warning),
+            "threshold_critical": self.critical_enabled.then_some(&self.threshold_critical),
+            "threshold_duration_warning": self.duration_warning,
+            "threshold_duration_critical": self.duration_critical,
+        })
     }
 }
 
@@ -512,16 +645,21 @@ mod tests {
     #[test]
     fn parses_rules() {
         let body = r#"{"total": 1, "results": [
-            {"uid": "r-1", "name": "CPU高負荷", "query": "avg(cpu)", "open": true,
+            {"uid": "d9428888-122b-11e1-b85c-61cd3cbb3210", "metrics_storage_id": "113700000001",
+             "name": "CPU高負荷", "query": "avg(cpu)", "open": true,
              "enabled_warning": true, "enabled_critical": false,
-             "threshold_warning": "80", "threshold_critical": null}
+             "threshold_warning": "80", "threshold_critical": null,
+             "threshold_duration_warning": 120, "threshold_duration_critical": 60}
         ]}"#;
         let res: Paginated<RawRule> = serde_json::from_str(body).unwrap();
         let rule = res.items().into_iter().next().unwrap();
+        assert_eq!(rule.metrics_storage_id, 113_700_000_001);
+        assert!(!rule.uid.is_empty());
         assert!(rule.open);
         assert!(rule.enabled_warning);
         assert!(!rule.enabled_critical);
         assert_eq!(rule.threshold_critical, "");
+        assert_eq!(rule.threshold_duration_warning, 120);
     }
 
     #[test]
@@ -568,6 +706,25 @@ mod tests {
     }
 
     #[test]
+    fn rule_payload_omits_disabled_threshold_with_null() {
+        let input = AlertRuleInput {
+            metrics_storage_id: 113_700_000_001,
+            name: "CPU".to_string(),
+            query: "avg(cpu)".to_string(),
+            warning_enabled: true,
+            critical_enabled: false,
+            threshold_warning: "80".to_string(),
+            threshold_critical: String::new(),
+            duration_warning: 60,
+            duration_critical: 60,
+        };
+        let payload = input.payload();
+        assert_eq!(payload["metrics_storage_id"], 113_700_000_001_i64);
+        assert_eq!(payload["threshold_warning"], "80");
+        assert!(payload["threshold_critical"].is_null());
+    }
+
+    #[test]
     fn formats_error_from_detail() {
         let message = format_api_error(StatusCode::NOT_FOUND, r#"{"detail": "見つかりません"}"#);
         assert!(message.contains("見つかりません"), "{message}");
@@ -591,8 +748,10 @@ mod regression_tests {
         assert_eq!(res.total, 2);
         let raw = res.items().into_iter().next().unwrap();
         assert_eq!(raw.id, 113_701_924_793);
+        assert_eq!(raw.resource_id, 113_701_924_793);
         assert_eq!(raw.name, "システムログ");
         assert_eq!(raw.expire_day, 30);
+        assert!(raw.is_system);
     }
 
     #[test]

@@ -639,7 +639,15 @@ fn draw_storages(frame: &mut Frame, area: Rect, app: &mut App) {
                     Row::new(vec![
                         Cell::from(Span::styled(s.kind.label(), kind_style)),
                         Cell::from(s.name.clone()),
-                        dim(s.classification.clone()),
+                        dim(format!(
+                            "{}/{}",
+                            if s.is_system { "system" } else { "user" },
+                            if s.classification.is_empty() {
+                                "-"
+                            } else {
+                                &s.classification
+                            }
+                        )),
                         dim(s
                             .retention_days
                             .map(|d| format!("{d} 日"))
@@ -661,9 +669,9 @@ fn draw_storages(frame: &mut Frame, area: Rect, app: &mut App) {
             title: "保管先",
             idle: "読み込み中…",
             empty: "保管先がありません",
-            header: vec!["種別", "名前", "区分", "保持期間", "説明"],
+            header: vec!["種別", "名前", "領域/プラン", "保持期間", "説明"],
             widths: vec![
-                Constraint::Length(11),
+                Constraint::Length(18),
                 Constraint::Min(14),
                 Constraint::Length(11),
                 Constraint::Length(9),

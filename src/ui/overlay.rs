@@ -8,11 +8,11 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, accent};
 use crate::app::{
-    AlertProjectForm, AlertProjectFormMode, App, Availability, Category, DnsRecordForm,
-    DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LoginForm, Overlay, ProfileForm,
-    ProfileStorage, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm,
-    SimpleMonitorFormMode, StatusKind, SwitchForm, SwitchFormMode, UserForm, UserFormMode,
-    VaultForm, VaultFormMode,
+    AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, Availability,
+    Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LoginForm, Overlay,
+    ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode,
+    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, StorageForm, StorageFormMode, SwitchForm,
+    SwitchFormMode, UserForm, UserFormMode, VaultForm, VaultFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -47,6 +47,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::VaultForm(form) => draw_vault_form(frame, form),
         Overlay::SecretForm(form) => draw_secret_form(frame, form),
         Overlay::AlertProjectForm(form) => draw_alert_project_form(frame, form),
+        Overlay::AlertRuleForm(form) => draw_alert_rule_form(frame, form),
+        Overlay::StorageForm(form) => draw_storage_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
@@ -1246,6 +1248,154 @@ fn draw_alert_project_form(frame: &mut Frame, form: &AlertProjectForm) {
     lines.push(Line::raw(""));
     lines.push(form_footer());
     let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_alert_rule_form(frame: &mut Frame, form: &AlertRuleForm) {
+    let title = match form.mode {
+        AlertRuleFormMode::Create => format!("アラートルールの作成 — {}", form.project.name),
+        AlertRuleFormMode::Edit => format!("アラートルールの編集 — {}", form.name),
+    };
+    let mut lines = vec![
+        input_line(
+            "メトリクスID",
+            &form.metrics_storage_id,
+            form.field == 0,
+            false,
+        ),
+        input_line("名前", &form.name, form.field == 1, false),
+        input_line("クエリ", &form.query, form.field == 2, false),
+        choice_line(
+            "警告",
+            &[true, false],
+            form.warning_enabled,
+            form.field == 3,
+            |enabled| if enabled { "有効" } else { "無効" }.to_string(),
+        ),
+        input_line(
+            "警告しきい値",
+            &form.threshold_warning,
+            form.field == 4,
+            false,
+        ),
+        input_line("警告継続秒", &form.duration_warning, form.field == 5, false),
+        choice_line(
+            "重大",
+            &[true, false],
+            form.critical_enabled,
+            form.field == 6,
+            |enabled| if enabled { "有効" } else { "無効" }.to_string(),
+        ),
+        input_line(
+            "重大しきい値",
+            &form.threshold_critical,
+            form.field == 7,
+            false,
+        ),
+        input_line(
+            "重大継続秒",
+            &form.duration_critical,
+            form.field == 8,
+            false,
+        ),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "メトリクスストレージIDは保管先タブで確認できます。編集時もformat/templateは維持されます。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 86, dialog_height(&lines, 86));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(std::mem::take(&mut lines))
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_storage_form(frame: &mut Frame, form: &StorageForm) {
+    let title = match form.mode {
+        StorageFormMode::Create => "ストレージの作成".to_string(),
+        StorageFormMode::Edit => format!("{}ストレージの編集 — {}", form.kind.label(), form.name),
+    };
+    let mut lines = Vec::new();
+    if form.mode == StorageFormMode::Create {
+        lines.push(choice_line(
+            "種別",
+            &StorageForm::KINDS,
+            form.kind,
+            form.field == 0,
+            |kind| kind.label().to_string(),
+        ));
+        lines.push(choice_line(
+            "保存領域",
+            &[true, false],
+            form.is_system,
+            form.field == 1,
+            |system| if system { "システム" } else { "ユーザ" }.to_string(),
+        ));
+        lines.push(choice_line(
+            "プラン",
+            &StorageForm::CLASSIFICATIONS,
+            form.classification(),
+            form.field == 2,
+            |value| value.to_string(),
+        ));
+    } else {
+        let current_classification = form
+            .target
+            .as_ref()
+            .map(|storage| storage.classification.as_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("-");
+        lines.push(Line::from(Span::styled(
+            format!("種別          {}", form.kind.label()),
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "保存領域      {}",
+                if form.is_system {
+                    "システム"
+                } else {
+                    "ユーザ"
+                }
+            ),
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("プラン        {current_classification}"),
+            Style::default().fg(DIM),
+        )));
+    }
+    lines.push(input_line("名前", &form.name, form.field == 3, false));
+    lines.push(input_line(
+        "説明",
+        &form.description,
+        form.field == 4,
+        false,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        if form.mode == StorageFormMode::Create {
+            "作成後は課金対象です。ログ／メトリクスの最初の保管先はシステム領域を選んでください。\nトレースはユーザ領域固定、メトリクスはプラン指定を使いません。"
+        } else {
+            "種別・区分・保持期間はこのフォームでは変更しません。"
+        },
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(form_footer());
+    let area = centered(frame, 82, dialog_height(&lines, 82));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)

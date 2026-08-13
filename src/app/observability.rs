@@ -6,13 +6,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    AlertProjectForm, AlertProjectFormMode, App, ConfirmAction, DnsRecordForm, DnsRecordFormMode,
-    DnsZoneForm, DnsZoneFormMode, Loadable, Message, Overlay, Pane, SecretForm, SecretFormMode,
-    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, VaultForm, VaultFormMode, fmt_error,
-    matches,
+    AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, ConfirmAction,
+    DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable, Message, Overlay,
+    Pane, SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode, StatusKind,
+    StorageForm, StorageFormMode, VaultForm, VaultFormMode, fmt_error, matches,
 };
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor, SimpleMonitorInput};
-use crate::monitoring::{AlertHistory, AlertProject, AlertRule, Storage};
+use crate::monitoring::{AlertHistory, AlertProject, AlertRule, Storage, StorageKind};
 use crate::secretmanager::{Secret, Vault};
 
 /// 左右に並んだ一覧の、どちらを操作しているか。
@@ -440,6 +440,11 @@ impl App {
         )
     }
 
+    pub fn selected_rule(&self) -> Option<AlertRule> {
+        let index = self.monitoring.rule_state.selected()?;
+        self.visible_rules().ready()?.get(index).cloned()
+    }
+
     pub fn visible_storages(&self) -> Loadable<Vec<Storage>> {
         let loadable = self
             .monitoring
@@ -454,13 +459,19 @@ impl App {
             items
                 .into_iter()
                 .filter(|s| {
+                    let area = if s.is_system { "system" } else { "user" };
                     matches(
                         self.filters.get(Pane::Storages),
-                        &[&s.name, s.kind.label(), &s.classification],
+                        &[&s.name, s.kind.label(), area, &s.classification],
                     )
                 })
                 .collect(),
         )
+    }
+
+    pub fn selected_storage(&self) -> Option<Storage> {
+        let index = self.monitoring.storage_state.selected()?;
+        self.visible_storages().ready()?.get(index).cloned()
     }
 
     // --- 読み込み ---
@@ -1281,8 +1292,194 @@ impl App {
             {
                 self.confirm_delete_alert_project()
             }
+            KeyCode::Char('a')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::Rules =>
+            {
+                self.open_create_alert_rule()
+            }
+            KeyCode::Char('e')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::Rules =>
+            {
+                self.open_edit_alert_rule()
+            }
+            KeyCode::Char('d')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::Rules =>
+            {
+                self.confirm_delete_alert_rule()
+            }
+            KeyCode::Char('n') if self.monitoring.tab == MonitoringTab::Storages => {
+                self.open_create_storage()
+            }
+            KeyCode::Char('E') if self.monitoring.tab == MonitoringTab::Storages => {
+                self.open_edit_storage()
+            }
+            KeyCode::Char('D') if self.monitoring.tab == MonitoringTab::Storages => {
+                self.confirm_delete_storage()
+            }
             _ => {}
         }
+    }
+
+    fn open_create_alert_rule(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_project() else {
+            self.set_status("プロジェクトを選択してください", StatusKind::Info);
+            return;
+        };
+        let metrics_storage_id = self
+            .monitoring
+            .storages
+            .get(&self.zone)
+            .and_then(Loadable::ready)
+            .and_then(|items| items.iter().find(|s| s.kind == StorageKind::Metrics))
+            .map(|s| s.resource_id.to_string())
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::AlertRuleForm(AlertRuleForm {
+            mode: AlertRuleFormMode::Create,
+            project,
+            target: None,
+            metrics_storage_id,
+            name: String::new(),
+            query: String::new(),
+            warning_enabled: true,
+            threshold_warning: String::new(),
+            duration_warning: "60".to_string(),
+            critical_enabled: false,
+            threshold_critical: String::new(),
+            duration_critical: "60".to_string(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_alert_rule(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(rule)) = (self.selected_project(), self.selected_rule()) else {
+            self.set_status("アラートルールを選択してください", StatusKind::Info);
+            return;
+        };
+        if rule.uid.is_empty() {
+            self.set_status(
+                "ルールUIDを取得できないため編集できません",
+                StatusKind::Error,
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::AlertRuleForm(AlertRuleForm {
+            mode: AlertRuleFormMode::Edit,
+            project,
+            target: Some(rule.clone()),
+            metrics_storage_id: rule.metrics_storage_id.to_string(),
+            name: rule.name,
+            query: rule.query,
+            warning_enabled: rule.warning_enabled,
+            threshold_warning: rule.threshold_warning,
+            duration_warning: rule.duration_warning.to_string(),
+            critical_enabled: rule.critical_enabled,
+            threshold_critical: rule.threshold_critical,
+            duration_critical: rule.duration_critical.to_string(),
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_alert_rule(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(rule)) = (self.selected_project(), self.selected_rule()) else {
+            return;
+        };
+        if rule.uid.is_empty() {
+            self.set_status(
+                "ルールUIDを取得できないため削除できません",
+                StatusKind::Error,
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::Confirm {
+            title: "アラートルールの削除".to_string(),
+            body: format!(
+                "アラートルール「{}」を削除します。\n\nこの操作は取り消せません。",
+                rule.name
+            ),
+            verify: Some(rule.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteAlertRule {
+                zone: self.zone.clone(),
+                project: project.resource_id,
+                uid: rule.uid,
+                name: rule.name,
+            },
+        });
+    }
+
+    fn open_create_storage(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::StorageForm(StorageForm {
+            mode: StorageFormMode::Create,
+            target: None,
+            kind: StorageKind::Logs,
+            is_system: false,
+            classification: 0,
+            name: String::new(),
+            description: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_storage(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(storage) = self.selected_storage() else {
+            self.set_status("ストレージを選択してください", StatusKind::Info);
+            return;
+        };
+        let classification = StorageForm::CLASSIFICATIONS
+            .iter()
+            .position(|value| *value == storage.classification)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::StorageForm(StorageForm {
+            mode: StorageFormMode::Edit,
+            target: Some(storage.clone()),
+            kind: storage.kind,
+            is_system: storage.is_system,
+            classification,
+            name: storage.name,
+            description: storage.description,
+            field: 3,
+        }));
+    }
+
+    fn confirm_delete_storage(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(storage) = self.selected_storage() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: format!("{}ストレージの削除", storage.kind.label()),
+            body: format!(
+                "{}ストレージ「{}」を削除します。保存済みデータへアクセスできなくなり、課金が停止します。\n\nこの操作は取り消せません。",
+                storage.kind.label(),
+                storage.name
+            ),
+            verify: Some(storage.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteStorage {
+                zone: self.zone.clone(),
+                storage,
+            },
+        });
     }
 
     fn open_create_alert_project(&mut self) {
@@ -1409,6 +1606,160 @@ impl App {
                 zone,
                 label,
                 reselect_project: None,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn submit_alert_rule_form(&mut self, form: AlertRuleForm) {
+        let input = match form.input() {
+            Ok(input) => input,
+            Err(err) => {
+                self.set_status(err, StatusKind::Error);
+                self.overlay = Some(Overlay::AlertRuleForm(form));
+                return;
+            }
+        };
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let project = form.project.resource_id;
+        let name = input.name.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            AlertRuleFormMode::Create => tokio::spawn(async move {
+                let label = format!("アラートルール「{name}」を作成");
+                let result = client
+                    .create_rule(&zone, project, &input)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::AlertRuleAction {
+                    zone,
+                    project,
+                    label,
+                    result,
+                });
+            }),
+            AlertRuleFormMode::Edit => {
+                let Some(rule) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let label = format!("アラートルール「{name}」を更新");
+                    let result = client
+                        .update_rule(&zone, project, &rule.uid, &input)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::AlertRuleAction {
+                        zone,
+                        project,
+                        label,
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_alert_rule(
+        &mut self,
+        zone: String,
+        project: i64,
+        uid: String,
+        name: String,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let label = format!("アラートルール「{name}」を削除");
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_rule(&zone, project, &uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::AlertRuleAction {
+                zone,
+                project,
+                label,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn submit_storage_form(&mut self, mut form: StorageForm) {
+        form.name = form.name.trim().to_string();
+        if form.name.is_empty() {
+            self.set_status("ストレージ名を入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::StorageForm(form));
+            return;
+        }
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let kind = form.kind;
+        let is_system = form.is_system && kind != StorageKind::Traces;
+        let classification = form.classification().to_string();
+        let name = form.name;
+        let description = form.description;
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            StorageFormMode::Create => tokio::spawn(async move {
+                let label = format!("{}ストレージ「{name}」を作成", kind.label());
+                let result = client
+                    .create_storage(&zone, kind, &name, &description, &classification, is_system)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::StorageAction {
+                    zone,
+                    label,
+                    result,
+                });
+            }),
+            StorageFormMode::Edit => {
+                let Some(storage) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let label = format!("{}ストレージ「{name}」を更新", kind.label());
+                    let result = client
+                        .update_storage(&zone, &storage, &name, &description)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::StorageAction {
+                        zone,
+                        label,
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_storage(&mut self, zone: String, storage: Storage) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let label = format!(
+            "{}ストレージ「{}」を削除",
+            storage.kind.label(),
+            storage.name
+        );
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_storage(&zone, &storage)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::StorageAction {
+                zone,
+                label,
                 result,
             });
         });

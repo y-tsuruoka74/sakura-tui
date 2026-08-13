@@ -409,6 +409,14 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 && app.monitoring.tab != crate::app::MonitoringTab::Storages
             {
                 hints.extend(["n プロジェクト作成", "E 編集", "D 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::Rules
+            {
+                hints.extend(["a ルール作成", "e 編集", "d 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::Storages
+            {
+                hints.extend(["n ストレージ作成", "E 編集", "D 削除"]);
             }
         }
         Service::Billing => {
