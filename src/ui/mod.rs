@@ -375,7 +375,12 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
         }
-        Service::SimpleMonitor | Service::Account => {}
+        Service::SimpleMonitor => {
+            if app.mode == Mode::Write {
+                hints.extend(["n 作成", "E 編集", "t 有効/停止", "D 削除"]);
+            }
+        }
+        Service::Account => {}
         Service::Secrets => {
             hints.push("z ゾーン");
             hints.push(if app.secrets.focus == crate::app::ListFocus::Left {

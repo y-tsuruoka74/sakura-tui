@@ -119,6 +119,10 @@ pub enum Message {
         label: String,
         result: Result<(), String>,
     },
+    SimpleMonitorAction {
+        label: String,
+        result: Result<(), String>,
+    },
     SimpleMonitors(Result<Vec<SimpleMonitor>, String>),
     Vaults {
         zone: String,
@@ -980,6 +984,51 @@ impl DnsZoneForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimpleMonitorFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct SimpleMonitorForm {
+    pub mode: SimpleMonitorFormMode,
+    pub target_monitor: Option<SimpleMonitor>,
+    pub target: String,
+    pub description: String,
+    pub protocol: usize,
+    pub port: String,
+    pub path: String,
+    pub expected_status: String,
+    pub delay_loop: String,
+    pub timeout: String,
+    pub enabled: bool,
+    pub notify_email: bool,
+    pub field: usize,
+}
+
+impl SimpleMonitorForm {
+    pub const PROTOCOLS: [&'static str; 4] = ["ping", "tcp", "http", "https"];
+    pub const FIELDS: usize = 10;
+
+    pub fn protocol(&self) -> &'static str {
+        Self::PROTOCOLS[self.protocol]
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match (self.mode, index) {
+            (SimpleMonitorFormMode::Create, 0) => Some(&mut self.target),
+            (_, 1) => Some(&mut self.description),
+            (_, 3) => Some(&mut self.port),
+            (_, 4) => Some(&mut self.path),
+            (_, 5) => Some(&mut self.expected_status),
+            (_, 6) => Some(&mut self.delay_loop),
+            (_, 7) => Some(&mut self.timeout),
+            _ => None,
+        }
+    }
+}
+
 /// DNSレコードの追加・編集フォーム。
 #[derive(Debug, Clone)]
 pub struct DnsRecordForm {
@@ -1044,6 +1093,10 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    DeleteSimpleMonitor {
+        id: ResourceId,
+        target: String,
+    },
     DeleteCredential {
         name: String,
     },
@@ -1095,6 +1148,7 @@ pub enum Overlay {
     SwitchForm(SwitchForm),
     DnsRecordForm(DnsRecordForm),
     DnsZoneForm(DnsZoneForm),
+    SimpleMonitorForm(SimpleMonitorForm),
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
@@ -1913,6 +1967,34 @@ impl App {
                 self.simple_monitor.monitor_state.select(None);
                 self.ensure_loaded();
             }
+            Message::SimpleMonitorAction { label, result } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.simple_monitor.monitors = Loadable::Idle;
+                    self.monitor_ensure_loaded();
+                }
+                Err(err) => {
+                    let conflict = err.contains("409");
+                    let body = if conflict {
+                        format!(
+                            "{err}\n\n別の画面やツールで監視設定が更新された可能性があります。\n再取得後に内容を確認して、もう一度操作してください。"
+                        )
+                    } else {
+                        err.clone()
+                    };
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body,
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                    if conflict {
+                        self.simple_monitor.monitors = Loadable::Idle;
+                        self.monitor_ensure_loaded();
+                    }
+                }
+            },
             Message::Vaults { zone, result } => {
                 let loadable = self.store_result(result);
                 self.secrets.vaults.insert(zone, loadable);
@@ -2334,6 +2416,12 @@ impl App {
                     value.push_str(text);
                 }
             }
+            Some(Overlay::SimpleMonitorForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
             Some(Overlay::Confirm { verify, typed, .. }) if verify.is_some() => {
                 typed.push_str(text)
             }
@@ -2383,8 +2471,7 @@ impl App {
             Service::Account => {}
             Service::Billing => self.on_key_billing(key),
             Service::Dns => self.on_key_dns(key),
-            // シンプル監視は一覧が 1 つなので共通キーだけで足りる。
-            Service::SimpleMonitor => {}
+            Service::SimpleMonitor => self.on_key_simple_monitor(key),
         }
     }
 
@@ -3626,6 +3713,9 @@ impl App {
                 self.run_delete_dns_record(zone, record)
             }
             ConfirmAction::DeleteDnsZone { id, name } => self.run_delete_dns_zone(id, name),
+            ConfirmAction::DeleteSimpleMonitor { id, target } => {
+                self.run_delete_simple_monitor(id, target)
+            }
             ConfirmAction::DeleteTag {
                 host,
                 repository,
@@ -4111,6 +4201,14 @@ impl App {
                     self.overlay = Some(Overlay::DnsZoneForm(form));
                 }
             },
+            Overlay::SimpleMonitorForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_simple_monitor_form(form),
+                _ => {
+                    edit_simple_monitor_form(&mut form, key);
+                    self.overlay = Some(Overlay::SimpleMonitorForm(form));
+                }
+            },
             Overlay::ServicePicker { mut index, initial } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') if initial => self.should_quit = true,
                 KeyCode::Esc | KeyCode::Char('q') => {}
@@ -4287,6 +4385,40 @@ fn edit_dns_zone_form(form: &mut DnsZoneForm, key: KeyEvent) {
     match key.code {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
         KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_simple_monitor_form(form: &mut SimpleMonitorForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % SimpleMonitorForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + SimpleMonitorForm::FIELDS - 1) % SimpleMonitorForm::FIELDS
+        }
+        KeyCode::Left if form.field == 2 => {
+            form.protocol = (form.protocol + SimpleMonitorForm::PROTOCOLS.len() - 1)
+                % SimpleMonitorForm::PROTOCOLS.len()
+        }
+        KeyCode::Right | KeyCode::Char(' ') if form.field == 2 => {
+            form.protocol = (form.protocol + 1) % SimpleMonitorForm::PROTOCOLS.len()
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 8 => {
+            form.enabled = !form.enabled
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 9 => {
+            form.notify_email = !form.notify_email
+        }
         KeyCode::Backspace => {
             if let Some(value) = form.value_mut(form.field) {
                 value.pop();

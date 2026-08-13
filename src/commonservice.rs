@@ -2,7 +2,7 @@
 //!
 //! コンテナレジストリと同じエンドポイントで、`Provider.Class` だけが違う。
 //! そのため `SacloudClient` をそのまま使える。
-//! DNSはレコードの更新に対応し、シンプル監視は閲覧のみ。
+//! DNSとシンプル監視の作成・更新・削除に対応する。
 
 use anyhow::{Context, Result};
 use reqwest::Method;
@@ -75,6 +75,10 @@ pub struct SimpleMonitor {
     pub timeout: u32,
     pub notify_email: bool,
     pub notify_slack: bool,
+    pub notify_slack_url: String,
+    /// 更新時に未知の設定を維持するための `Settings.SimpleMonitor` 全体。
+    pub raw_settings: serde_json::Value,
+    pub settings_hash: String,
     pub created_at: Option<String>,
 }
 
@@ -95,6 +99,21 @@ impl SimpleMonitor {
         }
         out
     }
+}
+
+/// シンプル監視の作成・更新で変更する基本設定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimpleMonitorInput {
+    pub target: String,
+    pub description: String,
+    pub protocol: String,
+    pub port: Option<u16>,
+    pub path: String,
+    pub expected_status: Option<u16>,
+    pub delay_loop: u32,
+    pub timeout: u32,
+    pub enabled: bool,
+    pub notify_email: bool,
 }
 
 // --- API のレスポンス形状 ---
@@ -179,15 +198,11 @@ struct NakedSimpleMonitor {
     #[serde(rename = "CreatedAt")]
     created_at: Option<String>,
     #[serde(rename = "Settings")]
-    settings: Option<NakedMonitorSettings>,
+    settings: Option<serde_json::Value>,
     #[serde(rename = "Status")]
     status: Option<NakedMonitorStatus>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NakedMonitorSettings {
-    #[serde(rename = "SimpleMonitor")]
-    simple_monitor: Option<NakedMonitorSetting>,
+    #[serde(rename = "SettingsHash", default, deserialize_with = "null_as_default")]
+    settings_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +226,12 @@ struct NakedMonitorSetting {
 struct NakedNotify {
     #[serde(rename = "Enabled", default, deserialize_with = "null_as_default")]
     enabled: StringFlag,
+    #[serde(
+        rename = "IncomingWebhooksURL",
+        default,
+        deserialize_with = "null_as_default"
+    )]
+    incoming_webhooks_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,7 +311,14 @@ impl From<NakedDns> for DnsZone {
 
 impl From<NakedSimpleMonitor> for SimpleMonitor {
     fn from(naked: NakedSimpleMonitor) -> Self {
-        let setting = naked.settings.and_then(|s| s.simple_monitor);
+        let raw_settings = naked
+            .settings
+            .as_ref()
+            .and_then(|s| s.get("SimpleMonitor"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let setting: Option<NakedMonitorSetting> =
+            serde_json::from_value(raw_settings.clone()).ok();
         let health = setting.as_ref().and_then(|s| s.health_check.as_ref());
         // Status.Target が空なら Name（監視対象が入っている）で代用する。
         let target = naked
@@ -320,6 +348,13 @@ impl From<NakedSimpleMonitor> for SimpleMonitor {
                 .as_ref()
                 .and_then(|s| s.notify_slack.as_ref())
                 .is_some_and(|n| n.enabled.0),
+            notify_slack_url: setting
+                .as_ref()
+                .and_then(|s| s.notify_slack.as_ref())
+                .map(|n| n.incoming_webhooks_url.clone())
+                .unwrap_or_default(),
+            raw_settings,
+            settings_hash: naked.settings_hash,
             created_at: naked.created_at,
         }
     }
@@ -451,6 +486,123 @@ impl SacloudClient {
             })
             .collect()
     }
+
+    pub async fn create_simple_monitor(&self, input: &SimpleMonitorInput) -> Result<()> {
+        let settings = simple_monitor_settings(input, None);
+        let body = json!({
+            "CommonServiceItem": {
+                "Name": input.target,
+                "Description": input.description,
+                "Status": { "Target": input.target },
+                "Settings": { "SimpleMonitor": settings },
+                "Provider": { "Class": SIMPLE_MONITOR_CLASS },
+                "Tags": [],
+                "Icon": {},
+            }
+        });
+        let _: serde_json::Value = self
+            .request_common(Method::POST, "commonserviceitem", Some(body))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_simple_monitor(
+        &self,
+        monitor: &SimpleMonitor,
+        input: &SimpleMonitorInput,
+    ) -> Result<()> {
+        let settings = simple_monitor_settings(input, Some(monitor.raw_settings.clone()));
+        let mut body = json!({
+            "CommonServiceItem": {
+                "Name": monitor.target,
+                "Description": input.description,
+                "Settings": { "SimpleMonitor": settings },
+            }
+        });
+        if !monitor.settings_hash.is_empty() {
+            body["OriginalSettingsHash"] = json!(monitor.settings_hash);
+        }
+        let path = format!("commonserviceitem/{}", monitor.id);
+        let _: serde_json::Value = self.request_common(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    /// 有効状態だけを変更し、その他の既知・未知設定をそのまま維持する。
+    pub async fn set_simple_monitor_enabled(
+        &self,
+        monitor: &SimpleMonitor,
+        enabled: bool,
+    ) -> Result<()> {
+        let mut settings = monitor.raw_settings.clone();
+        if !settings.is_object() {
+            settings = json!({});
+        }
+        settings["Enabled"] = json!(if enabled { "True" } else { "False" });
+        let mut body = json!({
+            "CommonServiceItem": {
+                "Settings": { "SimpleMonitor": settings },
+            }
+        });
+        if !monitor.settings_hash.is_empty() {
+            body["OriginalSettingsHash"] = json!(monitor.settings_hash);
+        }
+        let path = format!("commonserviceitem/{}", monitor.id);
+        let _: serde_json::Value = self.request_common(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_simple_monitor(&self, id: ResourceId) -> Result<()> {
+        let path = format!("commonserviceitem/{id}");
+        let _: serde_json::Value = self.request_common(Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+}
+
+fn simple_monitor_settings(
+    input: &SimpleMonitorInput,
+    base: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut settings = base
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    settings["DelayLoop"] = json!(input.delay_loop);
+    settings["Timeout"] = json!(input.timeout);
+    settings["Enabled"] = json!(if input.enabled { "True" } else { "False" });
+    settings["NotifyEmail"]["Enabled"] = json!(if input.notify_email { "True" } else { "False" });
+
+    let existing_health = settings
+        .get("HealthCheck")
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    // 同じ方式の編集なら未知の方式固有設定も維持する。方式を変えた場合は、旧方式の
+    // パラメータ（SNIなど）が新方式で不正になりうるため引き継がない。
+    let mut health = if existing_health
+        .get("Protocol")
+        .and_then(serde_json::Value::as_str)
+        == Some(input.protocol.as_str())
+    {
+        existing_health
+    } else {
+        json!({})
+    };
+    health["Protocol"] = json!(input.protocol);
+    for key in ["Port", "Path", "Status"] {
+        if let Some(object) = health.as_object_mut() {
+            object.remove(key);
+        }
+    }
+    if let Some(port) = input.port {
+        health["Port"] = json!(port.to_string());
+    }
+    if matches!(input.protocol.as_str(), "http" | "https") {
+        health["Path"] = json!(input.path);
+        if let Some(status) = input.expected_status {
+            health["Status"] = json!(status.to_string());
+        }
+    }
+    settings["HealthCheck"] = health;
+    settings
 }
 
 fn dns_update_body(records: &[DnsRecord], original_settings_hash: &str) -> serde_json::Value {
@@ -582,5 +734,38 @@ mod tests {
             body["CommonServiceItem"]["Settings"]["DNS"]["ResourceRecordSets"][0],
             json!({"Name":"www", "Type":"A", "RData":"192.0.2.1", "TTL":300})
         );
+    }
+
+    #[test]
+    fn simple_monitor_update_preserves_unknown_settings() {
+        let input = SimpleMonitorInput {
+            target: "example.jp".to_string(),
+            description: String::new(),
+            protocol: "https".to_string(),
+            port: Some(443),
+            path: "/health".to_string(),
+            expected_status: Some(204),
+            delay_loop: 120,
+            timeout: 10,
+            enabled: true,
+            notify_email: false,
+        };
+        let base = json!({
+            "RetryCount": 3,
+            "NotifySlack": {"Enabled":"True", "IncomingWebhooksURL":"https://example.invalid"},
+            "HealthCheck": {"Protocol":"https", "Port":"80", "SNI": true}
+        });
+        let settings = simple_monitor_settings(&input, Some(base));
+        assert_eq!(settings["RetryCount"], 3);
+        assert_eq!(
+            settings["NotifySlack"]["IncomingWebhooksURL"],
+            "https://example.invalid"
+        );
+        assert_eq!(settings["HealthCheck"]["SNI"], true);
+        assert_eq!(settings["HealthCheck"]["Protocol"], "https");
+        assert_eq!(settings["HealthCheck"]["Port"], "443");
+        assert_eq!(settings["HealthCheck"]["Path"], "/health");
+        assert_eq!(settings["HealthCheck"]["Status"], "204");
+        assert_eq!(settings["NotifyEmail"]["Enabled"], "False");
     }
 }

@@ -9,8 +9,9 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use super::{DIM, accent};
 use crate::app::{
     App, Availability, Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode,
-    LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode, StatusKind,
-    SwitchForm, SwitchFormMode, UserForm, UserFormMode,
+    LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
+    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, SwitchForm, SwitchFormMode, UserForm,
+    UserFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -41,6 +42,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::SwitchForm(form) => draw_switch_form(frame, form),
         Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
         Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),
+        Overlay::SimpleMonitorForm(form) => draw_simple_monitor_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
@@ -679,9 +681,9 @@ fn draw_help(frame: &mut Frame) {
                 ("a", "ユーザー / DNSレコードを追加"),
                 ("e", "ユーザー / DNSレコードを編集"),
                 ("d", "選択中の項目を削除"),
-                ("n", "レジストリ / スイッチ / DNSゾーンを作成"),
-                ("E", "レジストリ / スイッチ / DNSゾーンを編集"),
-                ("D", "レジストリ / スイッチ / DNSゾーンを削除"),
+                ("n", "レジストリ / スイッチ / DNS / 監視を作成"),
+                ("E", "レジストリ / スイッチ / DNS / 監視を編集"),
+                ("D", "レジストリ / スイッチ / DNS / 監視を削除"),
                 ("L", "レジストリにログイン"),
                 ("O", "レジストリのログイン情報を破棄"),
                 ("/", "表示中のリストを絞り込み"),
@@ -691,7 +693,7 @@ fn draw_help(frame: &mut Frame) {
                 ("", "  サービス選択内: PgUp/PgDn 5件移動 / g/G 先頭・末尾"),
                 ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("z", "ゾーンを切り替え（サーバー / スイッチほか）"),
-                ("t", "トラフィックを切替（AppRun共用型）"),
+                ("t", "トラフィック切替 / シンプル監視の有効・停止"),
                 (
                     "Enter / Esc",
                     "左の一覧と右の一覧を行き来（DNS・シークレット・監視）",
@@ -1054,6 +1056,92 @@ fn draw_dns_zone_form(frame: &mut Frame, form: &DnsZoneForm) {
     ]));
 
     let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_simple_monitor_form(frame: &mut Frame, form: &SimpleMonitorForm) {
+    let title = match form.mode {
+        SimpleMonitorFormMode::Create => "シンプル監視の作成".to_string(),
+        SimpleMonitorFormMode::Edit => format!("シンプル監視の編集 — {}", form.target),
+    };
+    let protocol = form.protocol();
+    let mut lines = vec![
+        input_line("監視対象", &form.target, form.field == 0, false),
+        input_line("説明", &form.description, form.field == 1, false),
+        choice_line(
+            "監視方式",
+            &SimpleMonitorForm::PROTOCOLS,
+            protocol,
+            form.field == 2,
+            |value| value.to_string(),
+        ),
+        input_line("ポート", &form.port, form.field == 3, false),
+        input_line("パス", &form.path, form.field == 4, false),
+        input_line(
+            "期待ステータス",
+            &form.expected_status,
+            form.field == 5,
+            false,
+        ),
+        input_line("監視間隔(秒)", &form.delay_loop, form.field == 6, false),
+        input_line("タイムアウト", &form.timeout, form.field == 7, false),
+        choice_line(
+            "有効/停止",
+            &[true, false],
+            form.enabled,
+            form.field == 8,
+            |enabled| if enabled { "有効" } else { "停止" }.to_string(),
+        ),
+        choice_line(
+            "メール通知",
+            &[true, false],
+            form.notify_email,
+            form.field == 9,
+            |enabled| if enabled { "有効" } else { "無効" }.to_string(),
+        ),
+        Line::raw(""),
+    ];
+    if form.mode == SimpleMonitorFormMode::Edit {
+        lines.push(Line::from(Span::styled(
+            "監視対象は作成後に変更できません。Webhookなど画面にない設定は維持されます。",
+            Style::default().fg(DIM),
+        )));
+    }
+    let protocol_note = match protocol {
+        "ping" => "pingではポート・パス・期待ステータスを使用しません。",
+        "tcp" => "TCP監視ではポートが必須です。",
+        _ => "HTTP(S)ではパスと期待ステータスを指定できます。ポートは省略可能です。",
+    };
+    lines.push(Line::from(Span::styled(
+        protocol_note,
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "監視間隔は60秒単位です。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled("← →", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 選択   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 82, dialog_height(&lines, 82));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)

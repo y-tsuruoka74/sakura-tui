@@ -7,9 +7,10 @@ use ratatui::widgets::TableState;
 
 use super::{
     App, ConfirmAction, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable,
-    Message, Overlay, Pane, StatusKind, fmt_error, matches,
+    Message, Overlay, Pane, SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, fmt_error,
+    matches,
 };
-use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
+use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor, SimpleMonitorInput};
 use crate::monitoring::{AlertHistory, AlertProject, AlertRule, Storage};
 use crate::secretmanager::{Secret, Vault};
 
@@ -150,6 +151,173 @@ impl App {
     pub fn selected_monitor(&self) -> Option<&SimpleMonitor> {
         let index = self.simple_monitor.monitor_state.selected()?;
         self.visible_monitors().into_iter().nth(index)
+    }
+
+    pub(super) fn on_key_simple_monitor(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('n') => self.open_create_simple_monitor(),
+            KeyCode::Char('E') => self.open_edit_simple_monitor(),
+            KeyCode::Char('D') => self.confirm_delete_simple_monitor(),
+            KeyCode::Char('t') => self.toggle_simple_monitor(),
+            _ => {}
+        }
+    }
+
+    fn open_create_simple_monitor(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::SimpleMonitorForm(SimpleMonitorForm {
+            mode: SimpleMonitorFormMode::Create,
+            target_monitor: None,
+            target: String::new(),
+            description: String::new(),
+            protocol: 0,
+            port: String::new(),
+            path: "/".to_string(),
+            expected_status: "200".to_string(),
+            delay_loop: "60".to_string(),
+            timeout: "10".to_string(),
+            enabled: true,
+            notify_email: true,
+            field: 0,
+        }));
+    }
+
+    fn open_edit_simple_monitor(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(monitor) = self.selected_monitor().cloned() else {
+            self.set_status("編集する監視を選択してください", StatusKind::Info);
+            return;
+        };
+        let Some(protocol) = SimpleMonitorForm::PROTOCOLS
+            .iter()
+            .position(|protocol| *protocol == monitor.protocol)
+        else {
+            self.set_status(
+                format!(
+                    "監視方式 {} の編集にはまだ対応していません",
+                    monitor.protocol
+                ),
+                StatusKind::Info,
+            );
+            return;
+        };
+        self.overlay = Some(Overlay::SimpleMonitorForm(SimpleMonitorForm {
+            mode: SimpleMonitorFormMode::Edit,
+            target_monitor: Some(monitor.clone()),
+            target: monitor.target,
+            description: monitor.description,
+            protocol,
+            port: monitor.port,
+            path: monitor.path,
+            expected_status: monitor.expected_status,
+            delay_loop: monitor.delay_loop.to_string(),
+            timeout: monitor.timeout.to_string(),
+            enabled: monitor.enabled,
+            notify_email: monitor.notify_email,
+            field: 1,
+        }));
+    }
+
+    pub(super) fn submit_simple_monitor_form(&mut self, form: SimpleMonitorForm) {
+        let input = match simple_monitor_input(&form) {
+            Ok(input) => input,
+            Err(message) => {
+                self.set_status(message, StatusKind::Error);
+                self.overlay = Some(Overlay::SimpleMonitorForm(form));
+                return;
+            }
+        };
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let (label, target) = match form.mode {
+            SimpleMonitorFormMode::Create => {
+                let label = format!("シンプル監視「{}」を作成", input.target);
+                (label, None)
+            }
+            SimpleMonitorFormMode::Edit => {
+                let Some(target) = form.target_monitor else {
+                    return;
+                };
+                let label = format!("シンプル監視「{}」を更新", target.target);
+                (label, Some(target))
+            }
+        };
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = match target {
+                Some(monitor) => client.update_simple_monitor(&monitor, &input).await,
+                None => client.create_simple_monitor(&input).await,
+            }
+            .map_err(fmt_error);
+            let _ = tx.send(Message::SimpleMonitorAction { label, result });
+        });
+    }
+
+    fn toggle_simple_monitor(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(monitor) = self.selected_monitor().cloned() else {
+            return;
+        };
+        let enabled = !monitor.enabled;
+        let state = if enabled { "有効化" } else { "停止" };
+        let label = format!("シンプル監視「{}」を{state}", monitor.target);
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .set_simple_monitor_enabled(&monitor, enabled)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::SimpleMonitorAction { label, result });
+        });
+    }
+
+    fn confirm_delete_simple_monitor(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(monitor) = self.selected_monitor() else {
+            self.set_status("削除する監視を選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "シンプル監視の削除".to_string(),
+            body: format!(
+                "監視対象「{}」のシンプル監視を削除します。\nこの操作は取り消せません。実行しますか？",
+                monitor.target
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteSimpleMonitor {
+                id: monitor.id,
+                target: monitor.target.clone(),
+            },
+        });
+    }
+
+    pub(super) fn run_delete_simple_monitor(
+        &mut self,
+        id: crate::sacloud::ResourceId,
+        target: String,
+    ) {
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let label = format!("シンプル監視「{target}」を削除");
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client.delete_simple_monitor(id).await.map_err(fmt_error);
+            let _ = tx.send(Message::SimpleMonitorAction { label, result });
+        });
     }
 
     // --- シークレットマネージャ ---
@@ -932,6 +1100,85 @@ fn validate_dns_zone_form(form: &DnsZoneForm) -> Result<String, &'static str> {
     Ok(name)
 }
 
+fn simple_monitor_input(form: &SimpleMonitorForm) -> Result<SimpleMonitorInput, &'static str> {
+    let target = form.target.trim();
+    if target.is_empty() {
+        return Err("監視対象を入力してください");
+    }
+    if target.chars().any(char::is_whitespace) {
+        return Err("監視対象に空白は使用できません");
+    }
+    if form.description.chars().count() > 512 {
+        return Err("説明は512文字以内で入力してください");
+    }
+    let delay_loop = form
+        .delay_loop
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "監視間隔は60秒単位の整数で入力してください")?;
+    if delay_loop == 0 || delay_loop % 60 != 0 {
+        return Err("監視間隔は60秒単位の整数で入力してください");
+    }
+    let timeout = form
+        .timeout
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "タイムアウトは1以上の整数で入力してください")?;
+    if timeout == 0 {
+        return Err("タイムアウトは1以上の整数で入力してください");
+    }
+    let protocol = form.protocol();
+    let port = if form.port.trim().is_empty() {
+        None
+    } else {
+        let port = form
+            .port
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| "ポートは1〜65535の整数で入力してください")?;
+        if port == 0 {
+            return Err("ポートは1〜65535の整数で入力してください");
+        }
+        Some(port)
+    };
+    if protocol == "tcp" && port.is_none() {
+        return Err("TCP監視ではポートを入力してください");
+    }
+    let expected_status = if form.expected_status.trim().is_empty() {
+        None
+    } else {
+        let status = form
+            .expected_status
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| "期待ステータスは100〜599で入力してください")?;
+        if !(100..=599).contains(&status) {
+            return Err("期待ステータスは100〜599で入力してください");
+        }
+        Some(status)
+    };
+    Ok(SimpleMonitorInput {
+        target: target.to_string(),
+        description: form.description.trim().to_string(),
+        protocol: protocol.to_string(),
+        port: if protocol == "ping" { None } else { port },
+        path: if form.path.trim().is_empty() {
+            "/".to_string()
+        } else {
+            form.path.trim().to_string()
+        },
+        expected_status: if matches!(protocol, "http" | "https") {
+            expected_status
+        } else {
+            None
+        },
+        delay_loop,
+        timeout,
+        enabled: form.enabled,
+        notify_email: form.notify_email,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,5 +1266,48 @@ mod tests {
             };
             assert!(validate_dns_zone_form(&form).is_err(), "{name}");
         }
+    }
+
+    fn monitor_form(protocol: usize) -> SimpleMonitorForm {
+        SimpleMonitorForm {
+            mode: SimpleMonitorFormMode::Create,
+            target_monitor: None,
+            target: "example.jp".to_string(),
+            description: String::new(),
+            protocol,
+            port: String::new(),
+            path: "/".to_string(),
+            expected_status: "200".to_string(),
+            delay_loop: "60".to_string(),
+            timeout: "10".to_string(),
+            enabled: true,
+            notify_email: true,
+            field: 0,
+        }
+    }
+
+    #[test]
+    fn validates_simple_monitor_protocol_fields() {
+        let ping = simple_monitor_input(&monitor_form(0)).expect("valid ping");
+        assert_eq!(ping.protocol, "ping");
+        assert_eq!(ping.port, None);
+
+        let mut tcp = monitor_form(1);
+        assert_eq!(
+            simple_monitor_input(&tcp),
+            Err("TCP監視ではポートを入力してください")
+        );
+        tcp.port = "443".to_string();
+        assert_eq!(simple_monitor_input(&tcp).unwrap().port, Some(443));
+    }
+
+    #[test]
+    fn requires_sixty_second_monitor_interval() {
+        let mut form = monitor_form(2);
+        form.delay_loop = "90".to_string();
+        assert_eq!(
+            simple_monitor_input(&form),
+            Err("監視間隔は60秒単位の整数で入力してください")
+        );
     }
 }
