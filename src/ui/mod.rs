@@ -6,6 +6,7 @@ mod billing;
 mod cloud_resources;
 mod dedicated;
 mod detail;
+mod managed_resources;
 mod observability;
 mod overlay;
 mod registries;
@@ -249,6 +250,9 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         | Service::VpcRouter
         | Service::Database
         | Service::Nfs => cloud_resources::draw(frame, area, app),
+        Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+            managed_resources::draw(frame, area, app)
+        }
         Service::Dns => observability::draw_dns(frame, area, app),
         Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
         Service::Secrets => observability::draw_secrets(frame, area, app),
@@ -504,6 +508,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         | Service::VpcRouter
         | Service::Database
         | Service::Nfs => hints.push("z ゾーン"),
+        Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {}
     }
     hints.extend(["/ 絞込", "y コピー", "p 認証切替"]);
     hints.push(match app.mode {

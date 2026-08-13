@@ -37,6 +37,7 @@ use crate::cloud_resources::{CloudResource, CloudResourceKind};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
+use crate::managed_resources::{ManagedResource, ManagedResourceKind};
 use crate::monitoring::{
     AlertHistory, AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule,
     LogMeasureRuleInput, LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput,
@@ -54,6 +55,10 @@ pub enum Message {
         zone: String,
         kind: CloudResourceKind,
         result: Result<Vec<CloudResource>, String>,
+    },
+    ManagedResources {
+        kind: ManagedResourceKind,
+        result: Result<Vec<ManagedResource>, String>,
     },
     Registries(Result<Vec<ContainerRegistry>, String>),
     Users {
@@ -371,6 +376,7 @@ pub enum Pane {
     // スイッチ
     Switches,
     CloudResources,
+    ManagedResources,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -550,6 +556,7 @@ fn availability_reason(error: &str) -> &'static str {
 pub enum Category {
     Compute,
     Container,
+    Integration,
     Network,
     Storage,
     Security,
@@ -559,9 +566,10 @@ pub enum Category {
 
 impl Category {
     /// 表示順。サービス一覧の並びもこの順に揃える。
-    pub const ALL: [Category; 7] = [
+    pub const ALL: [Category; 8] = [
         Category::Compute,
         Category::Container,
+        Category::Integration,
         Category::Network,
         Category::Storage,
         Category::Security,
@@ -573,6 +581,7 @@ impl Category {
         match self {
             Category::Compute => "コンピュート",
             Category::Container => "コンテナ・アプリ実行",
+            Category::Integration => "アプリケーション連携",
             Category::Network => "ネットワーク",
             Category::Storage => "ストレージ・データ",
             Category::Security => "セキュリティ",
@@ -596,6 +605,9 @@ pub enum Service {
     Registry,
     AppRun,
     Dedicated,
+    SimpleMq,
+    EventBus,
+    Workflows,
     Server,
     Switch,
     Disk,
@@ -604,6 +616,7 @@ pub enum Service {
     VpcRouter,
     Database,
     Nfs,
+    ObjectStorage,
     Dns,
     SimpleMonitor,
     Secrets,
@@ -625,13 +638,17 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 17] = [
+    pub const ALL: [Service; 21] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
         Service::Registry,
         Service::AppRun,
         Service::Dedicated,
+        // アプリケーション連携
+        Service::SimpleMq,
+        Service::EventBus,
+        Service::Workflows,
         // ネットワーク
         Service::Switch,
         Service::Internet,
@@ -642,6 +659,7 @@ impl Service {
         Service::Disk,
         Service::Database,
         Service::Nfs,
+        Service::ObjectStorage,
         // セキュリティ
         Service::Secrets,
         // 運用・監視
@@ -685,6 +703,30 @@ impl Service {
                 arg_name: "dedicated",
                 countable_label: None,
                 count_label: Some("クラスタ"),
+                zoned: false,
+            },
+            Service::SimpleMq => ServiceMeta {
+                category: Category::Integration,
+                title: "シンプルMQ",
+                arg_name: "simplemq",
+                countable_label: None,
+                count_label: Some("キュー"),
+                zoned: false,
+            },
+            Service::EventBus => ServiceMeta {
+                category: Category::Integration,
+                title: "イベントバス",
+                arg_name: "eventbus",
+                countable_label: None,
+                count_label: Some("リソース"),
+                zoned: false,
+            },
+            Service::Workflows => ServiceMeta {
+                category: Category::Integration,
+                title: "ワークフロー",
+                arg_name: "workflows",
+                countable_label: None,
+                count_label: Some("件"),
                 zoned: false,
             },
             Service::Switch => ServiceMeta {
@@ -742,6 +784,14 @@ impl Service {
                 countable_label: Some("NFS"),
                 count_label: Some("台"),
                 zoned: true,
+            },
+            Service::ObjectStorage => ServiceMeta {
+                category: Category::Storage,
+                title: "オブジェクトストレージ",
+                arg_name: "object-storage",
+                countable_label: None,
+                count_label: Some("バケット"),
+                zoned: false,
             },
             Service::Dns => ServiceMeta {
                 category: Category::Network,
@@ -2077,6 +2127,12 @@ pub struct CloudResourcesView {
     pub state: TableState,
 }
 
+#[derive(Debug, Default)]
+pub struct ManagedResourcesView {
+    pub items: HashMap<ManagedResourceKind, Loadable<Vec<ManagedResource>>>,
+    pub state: TableState,
+}
+
 pub struct App {
     sacloud: Arc<SacloudClient>,
     apprun_client: Arc<AppRunClient>,
@@ -2123,6 +2179,7 @@ pub struct App {
     /// スイッチ画面の状態。
     pub switch: SwitchView,
     pub cloud_resources: CloudResourcesView,
+    pub managed_resources: ManagedResourcesView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2181,6 +2238,7 @@ impl App {
             server: ServerView::default(),
             switch: SwitchView::default(),
             cloud_resources: CloudResourcesView::default(),
+            managed_resources: ManagedResourcesView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -2235,6 +2293,50 @@ impl App {
         self.visible_cloud_resources()
             .ready()?
             .get(self.cloud_resources.state.selected()?)
+            .cloned()
+    }
+
+    pub fn managed_resource_kind(&self) -> Option<ManagedResourceKind> {
+        match self.service {
+            Service::ObjectStorage => Some(ManagedResourceKind::ObjectStorage),
+            Service::SimpleMq => Some(ManagedResourceKind::SimpleMq),
+            Service::EventBus => Some(ManagedResourceKind::EventBus),
+            Service::Workflows => Some(ManagedResourceKind::Workflows),
+            _ => None,
+        }
+    }
+
+    pub fn visible_managed_resources(&self) -> Loadable<Vec<ManagedResource>> {
+        let Some(kind) = self.managed_resource_kind() else {
+            return Loadable::Idle;
+        };
+        let loadable = self
+            .managed_resources
+            .items
+            .get(&kind)
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        let filter = self
+            .filters
+            .get(Pane::ManagedResources)
+            .to_ascii_lowercase();
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|item| {
+                    filter.is_empty() || item.searchable().to_ascii_lowercase().contains(&filter)
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_managed_resource(&self) -> Option<ManagedResource> {
+        self.visible_managed_resources()
+            .ready()?
+            .get(self.managed_resources.state.selected()?)
             .cloned()
     }
     //
@@ -2370,6 +2472,9 @@ impl App {
             | Service::VpcRouter
             | Service::Database
             | Service::Nfs => Pane::CloudResources,
+            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+                Pane::ManagedResources
+            }
             Service::Dns => match self.dns.focus {
                 ListFocus::Left => Pane::DnsZones,
                 ListFocus::Right => Pane::DnsRecords,
@@ -2512,6 +2617,9 @@ impl App {
             | Service::VpcRouter
             | Service::Database
             | Service::Nfs => self.cloud_resources_ensure_loaded(),
+            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+                self.managed_resources_ensure_loaded()
+            }
             Service::Dns => self.dns_ensure_loaded(),
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
@@ -2636,6 +2744,11 @@ impl App {
                 let loadable = self.store_result(result);
                 self.cloud_resources.items.insert((zone, kind), loadable);
                 self.fill_selection(Pane::CloudResources);
+            }
+            Message::ManagedResources { kind, result } => {
+                let loadable = self.store_result(result);
+                self.managed_resources.items.insert(kind, loadable);
+                self.fill_selection(Pane::ManagedResources);
             }
             Message::Registries(Ok(items)) => {
                 let previous = self.selected_registry().map(|r| r.id);
@@ -3830,6 +3943,8 @@ impl App {
             | Service::VpcRouter
             | Service::Database
             | Service::Nfs => {}
+            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+            }
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
             // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
@@ -4125,6 +4240,22 @@ impl App {
                     Service::SimpleMonitor => sacloud.list_simple_monitors().await.map(|v| v.len()),
                     Service::AppRun => apprun.list_applications().await.map(|v| v.len()),
                     Service::Dedicated => dedicated.list_clusters().await.map(|v| v.len()),
+                    Service::ObjectStorage => sacloud
+                        .list_managed_resources(ManagedResourceKind::ObjectStorage)
+                        .await
+                        .map(|v| v.len()),
+                    Service::SimpleMq => sacloud
+                        .list_managed_resources(ManagedResourceKind::SimpleMq)
+                        .await
+                        .map(|v| v.len()),
+                    Service::EventBus => sacloud
+                        .list_managed_resources(ManagedResourceKind::EventBus)
+                        .await
+                        .map(|v| v.len()),
+                    Service::Workflows => sacloud
+                        .list_managed_resources(ManagedResourceKind::Workflows)
+                        .await
+                        .map(|v| v.len()),
                     // 請求はアカウントIDを引いてから年を指定して数える。
                     Service::Billing => match sacloud.billing_identity().await {
                         Ok(identity) => sacloud
@@ -4188,6 +4319,16 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+                let kind = match service {
+                    Service::ObjectStorage => ManagedResourceKind::ObjectStorage,
+                    Service::SimpleMq => ManagedResourceKind::SimpleMq,
+                    Service::EventBus => ManagedResourceKind::EventBus,
+                    Service::Workflows => ManagedResourceKind::Workflows,
+                    _ => unreachable!(),
+                };
+                self.managed_resources.items.get(&kind)?.ready()?.len()
+            }
             // 請求画面で別の年に移っていることがあるので、
             // 今年を見ているときだけ流用する。
             Service::Billing if self.billing.year == billing::current_year() => {
@@ -4320,6 +4461,7 @@ impl App {
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
             Pane::CloudResources => self.visible_cloud_resources().ready().map_or(0, Vec::len),
+            Pane::ManagedResources => self.visible_managed_resources().ready().map_or(0, Vec::len),
             Pane::Clusters => self.visible_clusters().len(),
             Pane::DedicatedApplications => self
                 .visible_dedicated_applications()
@@ -4374,6 +4516,7 @@ impl App {
             Pane::Servers => Some(&mut self.server.server_state),
             Pane::Switches => Some(&mut self.switch.switch_state),
             Pane::CloudResources => Some(&mut self.cloud_resources.state),
+            Pane::ManagedResources => Some(&mut self.managed_resources.state),
             Pane::Clusters => Some(&mut self.dedicated.cluster_state),
             Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
             Pane::ScalingGroups => Some(&mut self.dedicated.scaling_group_state),
@@ -4496,6 +4639,7 @@ impl App {
             Pane::CloudResources => self
                 .selected_cloud_resource()
                 .map(|resource| resource.id.to_string()),
+            Pane::ManagedResources => self.selected_managed_resource().map(|resource| resource.id),
         }
     }
 
@@ -4862,6 +5006,12 @@ impl App {
                 }
                 self.cloud_resources_ensure_loaded();
             }
+            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+                if let Some(kind) = self.managed_resource_kind() {
+                    self.managed_resources.items.remove(&kind);
+                }
+                self.managed_resources_ensure_loaded();
+            }
             // 複数ペインのサービスは、該当キャッシュを捨てて読み直す。
             Service::Dns => {
                 self.dns.zones = Loadable::Idle;
@@ -4950,6 +5100,29 @@ impl App {
         });
     }
 
+    fn managed_resources_ensure_loaded(&mut self) {
+        let Some(kind) = self.managed_resource_kind() else {
+            return;
+        };
+        if self
+            .managed_resources
+            .items
+            .get(&kind)
+            .is_some_and(|items| !items.is_idle())
+        {
+            self.fill_selection(Pane::ManagedResources);
+            return;
+        }
+        self.managed_resources.items.insert(kind, Loadable::Loading);
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.list_managed_resources(kind).await.map_err(fmt_error);
+            let _ = tx.send(Message::ManagedResources { kind, result });
+        });
+    }
+
     fn invalidate_all(&mut self) {
         self.service_counts.clear();
         self.registry.users.clear();
@@ -4967,6 +5140,8 @@ impl App {
         self.switch_invalidate();
         self.cloud_resources.items.clear();
         self.cloud_resources.state.select(None);
+        self.managed_resources.items.clear();
+        self.managed_resources.state.select(None);
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();

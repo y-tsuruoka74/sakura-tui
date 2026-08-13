@@ -13,6 +13,7 @@ mod config;
 mod http;
 mod iaas;
 mod keychain;
+mod managed_resources;
 mod monitoring;
 mod registry;
 mod sacloud;
