@@ -222,24 +222,14 @@ fn service_picker_lines(
     app: &App,
     index: usize,
     current: Option<Service>,
-    spacious: bool,
+    _spacious: bool,
 ) -> (Vec<Line<'static>>, usize) {
     let mut lines = Vec::new();
     let mut selected_line = 0;
-    // 分類ごとに見出しを挟む。`Service::ALL` が分類順なので、
-    // 分類が変わった行の前に見出しを入れれば並びと一致する。
-    let mut previous: Option<Category> = None;
+    let selected_category = Service::ALL[index].category();
     for (i, service) in Service::ALL.iter().enumerate() {
-        let category = service.category();
-        if previous != Some(category) {
-            if previous.is_some() && spacious {
-                lines.push(Line::raw(""));
-            }
-            lines.push(Line::from(Span::styled(
-                format!("  {}", category.title()),
-                Style::default().fg(DIM).add_modifier(Modifier::BOLD),
-            )));
-            previous = Some(category);
+        if service.category() != selected_category {
+            continue;
         }
         let selected = i == index;
         if selected {
@@ -320,92 +310,124 @@ fn service_count_span(app: &App, service: Service, label: &str) -> Span<'static>
 }
 
 fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, initial: bool) {
-    const WIDTH: u16 = 62;
-    const MAX_HEIGHT: u16 = 28;
     let current = (!initial).then_some(app.service);
-    let max_height = frame.area().height.saturating_sub(2).clamp(1, MAX_HEIGHT);
-    // 枠2行、説明・空行・位置表示・キーヒントの4行を除いた高さを一覧に使う。
-    let list_height = max_height.saturating_sub(6).max(1) as usize;
-    let (spacious, spacious_selected) = service_picker_lines(app, index, current, true);
-    let (items, selected_line) = if spacious.len() <= list_height {
-        (spacious, spacious_selected)
-    } else {
-        service_picker_lines(app, index, current, false)
-    };
-    let item_count = items.len();
-    let (start, end) = viewport_bounds(item_count, selected_line, list_height);
-    let mut visible = Vec::new();
-    if start > 0 && list_height >= 3 {
-        visible.push(continuation_line("↑", "上に続きます"));
-    }
-    visible.extend(items.into_iter().skip(start).take(end - start));
-    if end < item_count && list_height >= 3 {
-        visible.push(continuation_line("↓", "下に続きます"));
-    }
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "  @ の付いた件数は現在のゾーンのものです",
-            Style::default().fg(DIM),
-        )),
-        Line::raw(""),
-    ];
-    lines.append(&mut visible);
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("  {}/{}", index + 1, Service::ALL.len()),
-            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", Service::ALL[index].category().title()),
-            Style::default().fg(DIM),
-        ),
-    ]));
-    lines.push(service_picker_hint(if initial {
-        "開く"
-    } else {
-        "切り替え"
-    }));
-
-    let area = centered(frame, WIDTH, dialog_height(&lines, WIDTH));
+    let selected_category = Service::ALL[index].category();
+    let (services, _) = service_picker_lines(app, index, current, false);
+    let area = frame.area();
     frame.render_widget(Clear, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .split(area);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(dialog(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " sakura-tui ",
+                Style::default()
+                    .fg(accent())
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ),
+            Span::styled(
                 if initial {
-                    "表示するサービスを選択"
+                    "  サービスを選択"
                 } else {
-                    "サービスの切り替え"
+                    "  サービスを切り替え"
                 },
-                accent(),
-            )),
-        area,
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  │  {}", app.credential_source.label()),
+                Style::default().fg(DIM),
+            ),
+        ])),
+        rows[0],
     );
-}
-
-/// 選択行が必ず見えるように、一覧から切り出す範囲を返す。
-fn viewport_bounds(total: usize, selected: usize, height: usize) -> (usize, usize) {
-    if total <= height {
-        return (0, total);
+    let padded = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(rows[1]);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("←→/hl", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(" カテゴリ   ", Style::default().fg(DIM)),
+            Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " サービス   @ は現在のゾーンの件数",
+                Style::default().fg(DIM),
+            ),
+        ])),
+        padded[1],
+    );
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(rows[2]);
+    let wide = body[1].width >= 64;
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(if wide {
+            [Constraint::Length(26), Constraint::Min(30)]
+        } else {
+            [Constraint::Length(0), Constraint::Min(1)]
+        })
+        .split(body[1]);
+    let category_lines: Vec<Line> = Category::ALL
+        .iter()
+        .map(|category| {
+            let selected = *category == selected_category;
+            let count = category.services().count();
+            Line::from(vec![
+                Span::styled(
+                    if selected { "▌ " } else { "  " },
+                    Style::default().fg(accent()),
+                ),
+                Span::styled(
+                    super::pad(category.title(), 18),
+                    if selected {
+                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM)
+                    },
+                ),
+                Span::styled(count.to_string(), Style::default().fg(DIM)),
+            ])
+        })
+        .collect();
+    if wide {
+        frame.render_widget(
+            Paragraph::new(category_lines).block(
+                Block::bordered()
+                    .title(" カテゴリ ")
+                    .border_style(Style::default().fg(accent())),
+            ),
+            columns[0],
+        );
     }
-    if height < 3 {
-        let start = selected.min(total.saturating_sub(1));
-        return (start, (start + 1).min(total));
-    }
-    // 上下の継続表示に1行ずつ確保し、選択行を中央寄りに置く。
-    let content_height = height - 2;
-    let start = selected
-        .saturating_sub(content_height / 2)
-        .min(total - content_height);
-    (start, start + content_height)
-}
-
-fn continuation_line(arrow: &'static str, label: &'static str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  {arrow} {label}"),
-        Style::default().fg(DIM),
-    ))
+    frame.render_widget(
+        Paragraph::new(services).block(
+            Block::bordered()
+                .title(format!(" {} ", selected_category.title()))
+                .border_style(Style::default().fg(accent())),
+        ),
+        columns[1],
+    );
+    frame.render_widget(
+        service_picker_hint(if initial { "開く" } else { "切り替え" }),
+        rows[3],
+    );
 }
 
 fn service_picker_hint(action: &str) -> Line<'static> {
@@ -1845,23 +1867,4 @@ fn permission_line(selected: usize, focused: bool) -> Line<'static> {
         spans.push(Span::styled(format!(" {} ", permission.as_str()), style));
     }
     Line::from(spans)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::viewport_bounds;
-
-    #[test]
-    fn service_picker_viewport_keeps_selection_visible() {
-        for selected in 0..40 {
-            let (start, end) = viewport_bounds(40, selected, 10);
-            assert!(start <= selected && selected < end, "{start}..{end}");
-            assert!(end - start <= 8); // 上下の継続表示に2行を残す。
-        }
-    }
-
-    #[test]
-    fn service_picker_viewport_uses_full_list_when_it_fits() {
-        assert_eq!(viewport_bounds(6, 3, 10), (0, 6));
-    }
 }

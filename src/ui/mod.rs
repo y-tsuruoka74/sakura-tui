@@ -3,6 +3,7 @@
 mod account;
 mod apprun;
 mod billing;
+mod cloud_resources;
 mod dedicated;
 mod detail;
 mod observability;
@@ -242,6 +243,12 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
+        Service::Disk
+        | Service::Internet
+        | Service::LoadBalancer
+        | Service::VpcRouter
+        | Service::Database
+        | Service::Nfs => cloud_resources::draw(frame, area, app),
         Service::Dns => observability::draw_dns(frame, area, app),
         Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
         Service::Secrets => observability::draw_secrets(frame, area, app),
@@ -491,6 +498,12 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 hints.extend(["n 作成", "E 編集", "D 削除"]);
             }
         }
+        Service::Disk
+        | Service::Internet
+        | Service::LoadBalancer
+        | Service::VpcRouter
+        | Service::Database
+        | Service::Nfs => hints.push("z ゾーン"),
     }
     hints.extend(["/ 絞込", "y コピー", "p 認証切替"]);
     hints.push(match app.mode {

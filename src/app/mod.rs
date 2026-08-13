@@ -33,6 +33,7 @@ use crate::account::AuthStatus;
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
+use crate::cloud_resources::{CloudResource, CloudResourceKind};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
@@ -49,6 +50,11 @@ use crate::switch::Switch;
 
 /// 非同期処理の結果。
 pub enum Message {
+    CloudResources {
+        zone: String,
+        kind: CloudResourceKind,
+        result: Result<Vec<CloudResource>, String>,
+    },
     Registries(Result<Vec<ContainerRegistry>, String>),
     Users {
         id: ResourceId,
@@ -364,6 +370,7 @@ pub enum Pane {
     Servers,
     // スイッチ
     Switches,
+    CloudResources,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -416,6 +423,40 @@ fn matches(filter: &str, fields: &[&str]) -> bool {
     fields
         .iter()
         .any(|field| field.to_lowercase().contains(&needle))
+}
+
+fn category_service_indices(category: Category) -> Vec<usize> {
+    Service::ALL
+        .iter()
+        .enumerate()
+        .filter_map(|(index, service)| (service.category() == category).then_some(index))
+        .collect()
+}
+
+fn move_service_within_category(index: usize, delta: i32) -> usize {
+    let indices = category_service_indices(Service::ALL[index].category());
+    let position = indices
+        .iter()
+        .position(|candidate| *candidate == index)
+        .unwrap_or(0) as i32;
+    indices[(position + delta).rem_euclid(indices.len() as i32) as usize]
+}
+
+fn move_service_category(index: usize, delta: i32) -> usize {
+    let category = Service::ALL[index].category();
+    let category_index = Category::ALL
+        .iter()
+        .position(|candidate| *candidate == category)
+        .unwrap_or(0) as i32;
+    let current_indices = category_service_indices(category);
+    let row = current_indices
+        .iter()
+        .position(|candidate| *candidate == index)
+        .unwrap_or(0);
+    let next =
+        Category::ALL[(category_index + delta).rem_euclid(Category::ALL.len() as i32) as usize];
+    let next_indices = category_service_indices(next);
+    next_indices[row.min(next_indices.len() - 1)]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -510,6 +551,7 @@ pub enum Category {
     Compute,
     Container,
     Network,
+    Storage,
     Security,
     Ops,
     Account,
@@ -517,10 +559,11 @@ pub enum Category {
 
 impl Category {
     /// 表示順。サービス一覧の並びもこの順に揃える。
-    pub const ALL: [Category; 6] = [
+    pub const ALL: [Category; 7] = [
         Category::Compute,
         Category::Container,
         Category::Network,
+        Category::Storage,
         Category::Security,
         Category::Ops,
         Category::Account,
@@ -531,6 +574,7 @@ impl Category {
             Category::Compute => "コンピュート",
             Category::Container => "コンテナ・アプリ実行",
             Category::Network => "ネットワーク",
+            Category::Storage => "ストレージ・データ",
             Category::Security => "セキュリティ",
             Category::Ops => "運用・監視",
             Category::Account => "アカウント",
@@ -554,6 +598,12 @@ pub enum Service {
     Dedicated,
     Server,
     Switch,
+    Disk,
+    Internet,
+    LoadBalancer,
+    VpcRouter,
+    Database,
+    Nfs,
     Dns,
     SimpleMonitor,
     Secrets,
@@ -575,7 +625,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 11] = [
+    pub const ALL: [Service; 17] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -584,7 +634,14 @@ impl Service {
         Service::Dedicated,
         // ネットワーク
         Service::Switch,
+        Service::Internet,
+        Service::LoadBalancer,
+        Service::VpcRouter,
         Service::Dns,
+        // ストレージ・データ
+        Service::Disk,
+        Service::Database,
+        Service::Nfs,
         // セキュリティ
         Service::Secrets,
         // 運用・監視
@@ -635,6 +692,54 @@ impl Service {
                 title: "スイッチ",
                 arg_name: "switch",
                 countable_label: Some("スイッチ"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Disk => ServiceMeta {
+                category: Category::Storage,
+                title: "ディスク",
+                arg_name: "disk",
+                countable_label: Some("ディスク"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Internet => ServiceMeta {
+                category: Category::Network,
+                title: "ルータ＋スイッチ",
+                arg_name: "internet",
+                countable_label: Some("ルータ＋スイッチ"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::LoadBalancer => ServiceMeta {
+                category: Category::Network,
+                title: "ロードバランサ",
+                arg_name: "loadbalancer",
+                countable_label: Some("ロードバランサ"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::VpcRouter => ServiceMeta {
+                category: Category::Network,
+                title: "VPCルータ",
+                arg_name: "vpcrouter",
+                countable_label: Some("VPCルータ"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Database => ServiceMeta {
+                category: Category::Storage,
+                title: "データベース",
+                arg_name: "database",
+                countable_label: Some("データベース"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Nfs => ServiceMeta {
+                category: Category::Storage,
+                title: "NFS",
+                arg_name: "nfs",
+                countable_label: Some("NFS"),
                 count_label: Some("台"),
                 zoned: true,
             },
@@ -1966,6 +2071,12 @@ pub struct RegistryView {
     pub auto_login_tried: HashSet<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct CloudResourcesView {
+    pub items: HashMap<(String, CloudResourceKind), Loadable<Vec<CloudResource>>>,
+    pub state: TableState,
+}
+
 pub struct App {
     sacloud: Arc<SacloudClient>,
     apprun_client: Arc<AppRunClient>,
@@ -2011,6 +2122,7 @@ pub struct App {
     pub server: ServerView,
     /// スイッチ画面の状態。
     pub switch: SwitchView,
+    pub cloud_resources: CloudResourcesView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2068,6 +2180,7 @@ impl App {
             dedicated: DedicatedView::default(),
             server: ServerView::default(),
             switch: SwitchView::default(),
+            cloud_resources: CloudResourcesView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -2082,6 +2195,48 @@ impl App {
     }
 
     // --- 表示中の要素（絞り込み適用後） ---
+    pub fn cloud_resource_kind(&self) -> Option<CloudResourceKind> {
+        match self.service {
+            Service::Disk => Some(CloudResourceKind::Disk),
+            Service::Internet => Some(CloudResourceKind::Internet),
+            Service::LoadBalancer => Some(CloudResourceKind::LoadBalancer),
+            Service::VpcRouter => Some(CloudResourceKind::VpcRouter),
+            Service::Database => Some(CloudResourceKind::Database),
+            Service::Nfs => Some(CloudResourceKind::Nfs),
+            _ => None,
+        }
+    }
+
+    pub fn visible_cloud_resources(&self) -> Loadable<Vec<CloudResource>> {
+        let Some(kind) = self.cloud_resource_kind() else {
+            return Loadable::Idle;
+        };
+        let loadable = self
+            .cloud_resources
+            .items
+            .get(&(self.zone.clone(), kind))
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        let filter = self.filters.get(Pane::CloudResources).to_ascii_lowercase();
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|item| {
+                    filter.is_empty() || item.searchable().to_ascii_lowercase().contains(&filter)
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_cloud_resource(&self) -> Option<CloudResource> {
+        self.visible_cloud_resources()
+            .ready()?
+            .get(self.cloud_resources.state.selected()?)
+            .cloned()
+    }
     //
     // 選択位置は常に「絞り込み後のリスト」に対する添字として扱う。
 
@@ -2209,6 +2364,12 @@ impl App {
             Service::Dedicated => self.dedicated_active_pane(),
             Service::Server => Pane::Servers,
             Service::Switch => Pane::Switches,
+            Service::Disk
+            | Service::Internet
+            | Service::LoadBalancer
+            | Service::VpcRouter
+            | Service::Database
+            | Service::Nfs => Pane::CloudResources,
             Service::Dns => match self.dns.focus {
                 ListFocus::Left => Pane::DnsZones,
                 ListFocus::Right => Pane::DnsRecords,
@@ -2345,6 +2506,12 @@ impl App {
             Service::Dedicated => self.dedicated_ensure_loaded(),
             Service::Server => self.server_ensure_loaded(),
             Service::Switch => self.switch_ensure_loaded(),
+            Service::Disk
+            | Service::Internet
+            | Service::LoadBalancer
+            | Service::VpcRouter
+            | Service::Database
+            | Service::Nfs => self.cloud_resources_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
@@ -2465,6 +2632,11 @@ impl App {
             return;
         }
         match message {
+            Message::CloudResources { zone, kind, result } => {
+                let loadable = self.store_result(result);
+                self.cloud_resources.items.insert((zone, kind), loadable);
+                self.fill_selection(Pane::CloudResources);
+            }
             Message::Registries(Ok(items)) => {
                 let previous = self.selected_registry().map(|r| r.id);
                 let count = items.len();
@@ -3652,6 +3824,12 @@ impl App {
             Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
             Service::Switch => self.on_key_switch(key),
+            Service::Disk
+            | Service::Internet
+            | Service::LoadBalancer
+            | Service::VpcRouter
+            | Service::Database
+            | Service::Nfs => {}
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
             // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
@@ -3833,6 +4011,36 @@ impl App {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&name).await,
                     Service::Switch => sacloud.count_switches(&name).await,
+                    Service::Disk => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Disk)
+                            .await
+                    }
+                    Service::Internet => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Internet)
+                            .await
+                    }
+                    Service::LoadBalancer => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::LoadBalancer)
+                            .await
+                    }
+                    Service::VpcRouter => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::VpcRouter)
+                            .await
+                    }
+                    Service::Database => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Database)
+                            .await
+                    }
+                    Service::Nfs => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Nfs)
+                            .await
+                    }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&name).await,
                     _ => Ok(0),
@@ -3879,6 +4087,36 @@ impl App {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&zone).await,
                     Service::Switch => sacloud.count_switches(&zone).await,
+                    Service::Disk => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Disk)
+                            .await
+                    }
+                    Service::Internet => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Internet)
+                            .await
+                    }
+                    Service::LoadBalancer => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::LoadBalancer)
+                            .await
+                    }
+                    Service::VpcRouter => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::VpcRouter)
+                            .await
+                    }
+                    Service::Database => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Database)
+                            .await
+                    }
+                    Service::Nfs => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Nfs)
+                            .await
+                    }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
                     // 件数専用の API が無いものは一覧を引いて数える。
@@ -3927,6 +4165,27 @@ impl App {
             Service::SimpleMonitor => self.simple_monitor.monitors.ready()?.len(),
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
+            Service::Disk
+            | Service::Internet
+            | Service::LoadBalancer
+            | Service::VpcRouter
+            | Service::Database
+            | Service::Nfs => {
+                let kind = match service {
+                    Service::Disk => CloudResourceKind::Disk,
+                    Service::Internet => CloudResourceKind::Internet,
+                    Service::LoadBalancer => CloudResourceKind::LoadBalancer,
+                    Service::VpcRouter => CloudResourceKind::VpcRouter,
+                    Service::Database => CloudResourceKind::Database,
+                    Service::Nfs => CloudResourceKind::Nfs,
+                    _ => unreachable!(),
+                };
+                self.cloud_resources
+                    .items
+                    .get(&(self.zone.clone(), kind))?
+                    .ready()?
+                    .len()
+            }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
             // 請求画面で別の年に移っていることがあるので、
@@ -4060,6 +4319,7 @@ impl App {
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
+            Pane::CloudResources => self.visible_cloud_resources().ready().map_or(0, Vec::len),
             Pane::Clusters => self.visible_clusters().len(),
             Pane::DedicatedApplications => self
                 .visible_dedicated_applications()
@@ -4113,6 +4373,7 @@ impl App {
             Pane::Versions => Some(&mut self.apprun.version_state),
             Pane::Servers => Some(&mut self.server.server_state),
             Pane::Switches => Some(&mut self.switch.switch_state),
+            Pane::CloudResources => Some(&mut self.cloud_resources.state),
             Pane::Clusters => Some(&mut self.dedicated.cluster_state),
             Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
             Pane::ScalingGroups => Some(&mut self.dedicated.scaling_group_state),
@@ -4232,6 +4493,9 @@ impl App {
                     .unwrap_or(server.name.clone())
             }),
             Pane::Switches => self.selected_switch().map(|switch| switch.id.to_string()),
+            Pane::CloudResources => self
+                .selected_cloud_resource()
+                .map(|resource| resource.id.to_string()),
         }
     }
 
@@ -4585,6 +4849,19 @@ impl App {
             Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
             Service::Switch => self.switch_refresh(),
+            Service::Disk
+            | Service::Internet
+            | Service::LoadBalancer
+            | Service::VpcRouter
+            | Service::Database
+            | Service::Nfs => {
+                if let Some(kind) = self.cloud_resource_kind() {
+                    self.cloud_resources
+                        .items
+                        .remove(&(self.zone.clone(), kind));
+                }
+                self.cloud_resources_ensure_loaded();
+            }
             // 複数ペインのサービスは、該当キャッシュを捨てて読み直す。
             Service::Dns => {
                 self.dns.zones = Loadable::Idle;
@@ -4645,6 +4922,34 @@ impl App {
         }
     }
 
+    fn cloud_resources_ensure_loaded(&mut self) {
+        let Some(kind) = self.cloud_resource_kind() else {
+            return;
+        };
+        let key = (self.zone.clone(), kind);
+        if self
+            .cloud_resources
+            .items
+            .get(&key)
+            .is_some_and(|items| !items.is_idle())
+        {
+            self.fill_selection(Pane::CloudResources);
+            return;
+        }
+        self.cloud_resources.items.insert(key, Loadable::Loading);
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        tokio::spawn(async move {
+            let result = client
+                .list_cloud_resources(&zone, kind)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::CloudResources { zone, kind, result });
+        });
+    }
+
     fn invalidate_all(&mut self) {
         self.service_counts.clear();
         self.registry.users.clear();
@@ -4660,6 +4965,8 @@ impl App {
         self.dedicated_invalidate();
         self.server_invalidate();
         self.switch_invalidate();
+        self.cloud_resources.items.clear();
+        self.cloud_resources.state.select(None);
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -5619,29 +5926,30 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') => {}
                 KeyCode::Enter => self.switch_service(Service::ALL[index]),
                 KeyCode::Down | KeyCode::Char('j') => {
-                    index = (index + 1) % Service::ALL.len();
+                    index = move_service_within_category(index, 1);
                     self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    index = (index + Service::ALL.len() - 1) % Service::ALL.len();
+                    index = move_service_within_category(index, -1);
                     self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
-                KeyCode::PageDown => {
-                    index = (index + 5).min(Service::ALL.len() - 1);
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::PageDown => {
+                    index = move_service_category(index, 1);
                     self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
-                KeyCode::PageUp => {
-                    index = index.saturating_sub(5);
+                KeyCode::Left | KeyCode::Char('h') | KeyCode::PageUp => {
+                    index = move_service_category(index, -1);
                     self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
                 KeyCode::Home | KeyCode::Char('g') => {
-                    self.overlay = Some(Overlay::ServicePicker { index: 0, initial });
+                    index = category_service_indices(Service::ALL[index].category())[0];
+                    self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
                 KeyCode::End | KeyCode::Char('G') => {
-                    self.overlay = Some(Overlay::ServicePicker {
-                        index: Service::ALL.len() - 1,
-                        initial,
-                    });
+                    index = *category_service_indices(Service::ALL[index].category())
+                        .last()
+                        .unwrap_or(&index);
+                    self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
                 _ => self.overlay = Some(Overlay::ServicePicker { index, initial }),
             },
@@ -6416,6 +6724,39 @@ mod tests {
         let debug = format!("{form:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn service_picker_moves_within_category() {
+        let switch = Service::ALL
+            .iter()
+            .position(|service| *service == Service::Switch)
+            .unwrap();
+        let internet = Service::ALL
+            .iter()
+            .position(|service| *service == Service::Internet)
+            .unwrap();
+        assert_eq!(move_service_within_category(switch, 1), internet);
+        assert_eq!(
+            Service::ALL[move_service_within_category(switch, -1)],
+            Service::Dns
+        );
+    }
+
+    #[test]
+    fn service_picker_moves_between_categories_preserving_row() {
+        let server = Service::ALL
+            .iter()
+            .position(|service| *service == Service::Server)
+            .unwrap();
+        assert_eq!(
+            Service::ALL[move_service_category(server, 1)],
+            Service::Registry
+        );
+        assert_eq!(
+            Service::ALL[move_service_category(server, -1)],
+            Service::Account
+        );
     }
 }
 

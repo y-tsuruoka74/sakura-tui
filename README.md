@@ -42,6 +42,13 @@
 - 起動・シャットダウン・強制停止・強制リセット
 - `z` でゾーンを切り替え
 
+### IaaSリソース（閲覧のみ）
+- ディスク（容量、プラン、接続方式、接続サーバー、暗号化）
+- ルータ＋スイッチ（帯域、スイッチ、ネットワーク、マスク長、ゲートウェイ）
+- ロードバランサ、VPCルータ、データベース、NFSアプライアンス
+- 一覧には名前、状態、プラン、接続先、IDを表示し、右ペインでサービス固有情報を確認
+- すべてゾーン切り替え、絞り込み、リソースIDのコピーに対応
+
 ### スイッチ
 - ゾーンごとのスイッチ一覧
 - 名前、説明、ID、タグ、作成日時
@@ -86,6 +93,7 @@
 - アクセスキーはユーザ領域ストレージだけが対象（システム領域ではAPIを呼びません）
 
 ### 共通
+- サービス切り替えは独立した全画面ページで、カテゴリ／サービスの2ペイン表示。`←` / `→` でカテゴリ、`↑` / `↓` でサービスを選択
 - リストの絞り込み（`/`）、選択項目のクリップボードへのコピー（`y`）
 - usacloud プロファイルの切り替え（`p`）
 
@@ -105,8 +113,9 @@ cargo build --release
   -p, --profile <名前>   使う usacloud プロファイル
   -z, --zone <ゾーン>     ゾーン依存のサービスで使うゾーン (例: is1a)
   -s, --service <名前>    起動時に開くサービス
-                         server / registry / apprun / dedicated /
-                         switch / dns / secrets / monitor /
+                         server / disk / registry / apprun / dedicated /
+                         switch / internet / loadbalancer / vpcrouter /
+                         database / nfs / dns / secrets / monitor /
                          monitoring / account / billing
       --trace            APIリクエストを標準エラーに記録する
   -h, --help             ヘルプ
