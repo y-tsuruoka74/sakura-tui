@@ -17,6 +17,7 @@ mod billing;
 mod dedicated;
 mod observability;
 mod server;
+mod switch;
 
 pub use account::AccountView;
 pub use apprun::{AppRunPane, AppRunView};
@@ -26,6 +27,7 @@ pub use observability::{
     DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
 };
 pub use server::ServerView;
+pub use switch::SwitchView;
 
 use crate::account::AuthStatus;
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
@@ -38,6 +40,7 @@ use crate::monitoring::{AlertHistory, AlertProject, AlertRule, MonitoringClient,
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 use crate::secretmanager::{Secret, Vault};
+use crate::switch::Switch;
 
 /// 非同期処理の結果。
 #[derive(Debug)]
@@ -182,6 +185,15 @@ pub enum Message {
         zone: String,
         result: Result<Vec<Server>, String>,
     },
+    Switches {
+        zone: String,
+        result: Result<Vec<Switch>, String>,
+    },
+    SwitchAction {
+        zone: String,
+        label: String,
+        result: Result<(), String>,
+    },
     ServerAction {
         zone: String,
         label: String,
@@ -245,6 +257,8 @@ pub enum Pane {
     Certificates,
     // サーバー
     Servers,
+    // スイッチ
+    Switches,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -427,6 +441,7 @@ pub enum Service {
     AppRun,
     Dedicated,
     Server,
+    Switch,
     Dns,
     SimpleMonitor,
     Secrets,
@@ -435,10 +450,20 @@ pub enum Service {
     Billing,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ServiceMeta {
+    category: Category,
+    title: &'static str,
+    arg_name: &'static str,
+    countable_label: Option<&'static str>,
+    count_label: Option<&'static str>,
+    zoned: bool,
+}
+
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 10] = [
+    pub const ALL: [Service; 11] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -446,6 +471,7 @@ impl Service {
         Service::AppRun,
         Service::Dedicated,
         // ネットワーク
+        Service::Switch,
         Service::Dns,
         // セキュリティ
         Service::Secrets,
@@ -457,6 +483,100 @@ impl Service {
         Service::Billing,
     ];
 
+    /// サービス追加時に更新するメタデータを一か所へ集約する。
+    fn meta(self) -> ServiceMeta {
+        match self {
+            Service::Server => ServiceMeta {
+                category: Category::Compute,
+                title: "サーバー",
+                arg_name: "server",
+                countable_label: Some("サーバー"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Registry => ServiceMeta {
+                category: Category::Container,
+                title: "コンテナレジストリ",
+                arg_name: "registry",
+                countable_label: None,
+                count_label: Some("件"),
+                zoned: false,
+            },
+            Service::AppRun => ServiceMeta {
+                category: Category::Container,
+                title: "AppRun",
+                arg_name: "apprun",
+                countable_label: None,
+                count_label: Some("アプリ"),
+                zoned: false,
+            },
+            Service::Dedicated => ServiceMeta {
+                category: Category::Container,
+                title: "AppRun専有型",
+                arg_name: "dedicated",
+                countable_label: None,
+                count_label: Some("クラスタ"),
+                zoned: false,
+            },
+            Service::Switch => ServiceMeta {
+                category: Category::Network,
+                title: "スイッチ",
+                arg_name: "switch",
+                countable_label: Some("スイッチ"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Dns => ServiceMeta {
+                category: Category::Network,
+                title: "DNS",
+                arg_name: "dns",
+                countable_label: None,
+                count_label: Some("DNSゾーン"),
+                zoned: false,
+            },
+            Service::Secrets => ServiceMeta {
+                category: Category::Security,
+                title: "シークレットマネージャ",
+                arg_name: "secrets",
+                countable_label: Some("Vault"),
+                count_label: Some("Vault"),
+                zoned: true,
+            },
+            Service::SimpleMonitor => ServiceMeta {
+                category: Category::Ops,
+                title: "シンプル監視",
+                arg_name: "monitor",
+                countable_label: None,
+                count_label: Some("件"),
+                zoned: false,
+            },
+            Service::Monitoring => ServiceMeta {
+                category: Category::Ops,
+                title: "モニタリングスイート",
+                arg_name: "monitoring",
+                countable_label: Some("プロジェクト"),
+                count_label: Some("プロジェクト"),
+                zoned: true,
+            },
+            Service::Account => ServiceMeta {
+                category: Category::Account,
+                title: "権限",
+                arg_name: "account",
+                countable_label: None,
+                count_label: None,
+                zoned: false,
+            },
+            Service::Billing => ServiceMeta {
+                category: Category::Account,
+                title: "請求",
+                arg_name: "billing",
+                countable_label: None,
+                count_label: Some("件"),
+                zoned: false,
+            },
+        }
+    }
+
     /// このサービスが属する大分類。
     ///
     /// 分類は「利用者が何のために使うか」で決める。API の置き場所では決めない
@@ -464,45 +584,16 @@ impl Service {
     /// 分類は別々、AppRun 共用型と専有型はエンドポイントが違うが同じ分類）。
     /// ゾーン依存かどうかは分類とは別の軸なので [`Service::is_zoned`] を使う。
     pub fn category(self) -> Category {
-        match self {
-            Service::Server => Category::Compute,
-            Service::Registry | Service::AppRun | Service::Dedicated => Category::Container,
-            Service::Dns => Category::Network,
-            Service::Secrets => Category::Security,
-            Service::SimpleMonitor | Service::Monitoring => Category::Ops,
-            Service::Account | Service::Billing => Category::Account,
-        }
+        self.meta().category
     }
 
     pub fn title(self) -> &'static str {
-        match self {
-            Service::Registry => "コンテナレジストリ",
-            Service::AppRun => "AppRun",
-            Service::Dedicated => "AppRun専有型",
-            Service::Server => "サーバー",
-            Service::Dns => "DNS",
-            Service::SimpleMonitor => "シンプル監視",
-            Service::Secrets => "シークレットマネージャ",
-            Service::Monitoring => "モニタリングスイート",
-            Service::Account => "権限",
-            Service::Billing => "請求",
-        }
+        self.meta().title
     }
 
     /// `--service` に渡せる短い名前。
     pub fn arg_name(self) -> &'static str {
-        match self {
-            Service::Registry => "registry",
-            Service::AppRun => "apprun",
-            Service::Dedicated => "dedicated",
-            Service::Server => "server",
-            Service::Dns => "dns",
-            Service::SimpleMonitor => "monitor",
-            Service::Secrets => "secrets",
-            Service::Monitoring => "monitoring",
-            Service::Account => "account",
-            Service::Billing => "billing",
-        }
+        self.meta().arg_name
     }
 
     pub fn from_arg(name: &str) -> Option<Self> {
@@ -515,41 +606,19 @@ impl Service {
     ///
     /// ゾーンに依存しないサービスは数えない。
     pub fn countable_label(self) -> Option<&'static str> {
-        match self {
-            Service::Server => Some("サーバー"),
-            Service::Secrets => Some("Vault"),
-            Service::Monitoring => Some("プロジェクト"),
-            _ => None,
-        }
+        self.meta().countable_label
     }
 
     /// サービス一覧に出す件数の呼び名。数えられないサービスは `None`。
     ///
     /// ゾーン依存のサービスは現在のゾーンだけを数える。
     pub fn count_label(self) -> Option<&'static str> {
-        match self {
-            Service::Server => Some("台"),
-            Service::Registry => Some("件"),
-            Service::AppRun => Some("アプリ"),
-            Service::Dedicated => Some("クラスタ"),
-            // 「ゾーン」だけだとクラウドのゾーン（リージョン）と紛らわしい。
-            Service::Dns => Some("DNSゾーン"),
-            Service::Secrets => Some("Vault"),
-            Service::SimpleMonitor => Some("件"),
-            Service::Monitoring => Some("プロジェクト"),
-            // 今年の請求の件数。実際に引くので、権限が無ければそこで分かる。
-            Service::Billing => Some("件"),
-            // 権限画面はリソースの数を持たない。
-            Service::Account => None,
-        }
+        self.meta().count_label
     }
 
     /// ゾーンを選ぶ意味があるサービスか。
     pub fn is_zoned(self) -> bool {
-        matches!(
-            self,
-            Service::Server | Service::Secrets | Service::Monitoring
-        )
+        self.meta().zoned
     }
 }
 
@@ -828,6 +897,43 @@ impl RegistryForm {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchFormMode {
+    Create,
+    Edit,
+}
+
+/// スイッチの作成・編集フォーム。
+#[derive(Debug, Clone)]
+pub struct SwitchForm {
+    pub mode: SwitchFormMode,
+    /// 編集時の対象。作成時は `None`。
+    pub target: Option<Switch>,
+    pub name: String,
+    pub description: String,
+    pub field: usize,
+}
+
+impl SwitchForm {
+    pub const LABELS: [&'static str; 2] = ["名前", "説明"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
 /// 確認ダイアログで実行する操作。
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
@@ -839,6 +945,11 @@ pub enum ConfirmAction {
         host: String,
     },
     DeleteRegistry {
+        id: ResourceId,
+        name: String,
+    },
+    DeleteSwitch {
+        zone: String,
         id: ResourceId,
         name: String,
     },
@@ -890,6 +1001,7 @@ pub enum Overlay {
     },
     UserForm(UserForm),
     RegistryForm(RegistryForm),
+    SwitchForm(SwitchForm),
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
@@ -974,6 +1086,8 @@ pub struct App {
     pub dedicated: DedicatedView,
     /// サーバー画面の状態。
     pub server: ServerView,
+    /// スイッチ画面の状態。
+    pub switch: SwitchView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -1028,6 +1142,7 @@ impl App {
             apprun: AppRunView::default(),
             dedicated: DedicatedView::default(),
             server: ServerView::default(),
+            switch: SwitchView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -1170,6 +1285,7 @@ impl App {
             Service::AppRun => self.apprun_active_pane(),
             Service::Dedicated => self.dedicated_active_pane(),
             Service::Server => Pane::Servers,
+            Service::Switch => Pane::Switches,
             Service::Dns => match self.dns.focus {
                 ListFocus::Left => Pane::DnsZones,
                 ListFocus::Right => Pane::DnsRecords,
@@ -1292,6 +1408,7 @@ impl App {
             Service::AppRun => self.apprun_ensure_loaded(),
             Service::Dedicated => self.dedicated_ensure_loaded(),
             Service::Server => self.server_ensure_loaded(),
+            Service::Switch => self.switch_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
@@ -1870,6 +1987,47 @@ impl App {
                     }
                 };
             }
+            Message::Switches { zone, result } => {
+                match result {
+                    Ok(switches) => {
+                        let count = switches.len();
+                        self.switch.switch_state.select(None);
+                        self.switch
+                            .switches
+                            .insert(zone.clone(), Loadable::Ready(switches));
+                        if zone == self.zone {
+                            self.set_status(
+                                format!("{zone} のスイッチ {count} 件"),
+                                StatusKind::Info,
+                            );
+                        }
+                        self.ensure_loaded();
+                    }
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        self.switch.switches.insert(zone, Loadable::Failed(err));
+                    }
+                };
+            }
+            Message::SwitchAction {
+                zone,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.load_switches(zone);
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::ServerAction {
                 zone,
                 label,
@@ -2014,6 +2172,12 @@ impl App {
                     value.push_str(text);
                 }
             }
+            Some(Overlay::SwitchForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
             Some(Overlay::Confirm { verify, typed, .. }) if verify.is_some() => {
                 typed.push_str(text)
             }
@@ -2056,6 +2220,7 @@ impl App {
             Service::AppRun => self.on_key_apprun(key),
             Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
+            Service::Switch => self.on_key_switch(key),
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
             // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
@@ -2228,6 +2393,7 @@ impl App {
             tokio::spawn(async move {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&name).await,
+                    Service::Switch => sacloud.count_switches(&name).await,
                     Service::Secrets => sacloud.count_vaults(&name).await,
                     Service::Monitoring => monitoring.count_projects(&name).await,
                     _ => Ok(0),
@@ -2273,6 +2439,7 @@ impl App {
             tokio::spawn(async move {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&zone).await,
+                    Service::Switch => sacloud.count_switches(&zone).await,
                     Service::Secrets => sacloud.count_vaults(&zone).await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
                     // 件数専用の API が無いものは一覧を引いて数える。
@@ -2320,6 +2487,7 @@ impl App {
             Service::Dns => self.dns.zones.ready()?.len(),
             Service::SimpleMonitor => self.simple_monitor.monitors.ready()?.len(),
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
+            Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
             Service::Secrets => self.secrets.vaults.get(&self.zone)?.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
             // 請求画面で別の年に移っていることがあるので、
@@ -2341,6 +2509,7 @@ impl App {
         // ゾーン依存の件数は数え直す（ゾーンに依存しないものはそのまま使える）。
         self.service_counts.retain(|service, _| !service.is_zoned());
         self.server.server_state.select(None);
+        self.switch.switch_state.select(None);
         self.set_status(
             format!("ゾーンを {} に切り替えました", self.zone),
             StatusKind::Info,
@@ -2451,6 +2620,7 @@ impl App {
             Pane::Applications => self.visible_applications().len(),
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
+            Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
             Pane::Clusters => self.visible_clusters().len(),
             Pane::DedicatedApplications => self
                 .visible_dedicated_applications()
@@ -2484,6 +2654,7 @@ impl App {
             Pane::Applications => Some(&mut self.apprun.application_state),
             Pane::Versions => Some(&mut self.apprun.version_state),
             Pane::Servers => Some(&mut self.server.server_state),
+            Pane::Switches => Some(&mut self.switch.switch_state),
             Pane::Clusters => Some(&mut self.dedicated.cluster_state),
             Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
             Pane::ScalingGroups => Some(&mut self.dedicated.scaling_group_state),
@@ -2585,6 +2756,7 @@ impl App {
                     .cloned()
                     .unwrap_or(server.name.clone())
             }),
+            Pane::Switches => self.selected_switch().map(|switch| switch.id.to_string()),
         }
     }
 
@@ -2908,6 +3080,7 @@ impl App {
             Service::AppRun => self.apprun_refresh(),
             Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
+            Service::Switch => self.switch_refresh(),
             // 閲覧のみのサービスは、該当キャッシュを捨てて読み直すだけ。
             Service::Dns => {
                 self.dns.zones = Loadable::Idle;
@@ -2972,6 +3145,7 @@ impl App {
         self.apprun_invalidate();
         self.dedicated_invalidate();
         self.server_invalidate();
+        self.switch_invalidate();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -3250,6 +3424,9 @@ impl App {
                     let _ = tx.send(Message::RegistryAction { label, result });
                 });
                 self.set_status("送信中…", StatusKind::Info);
+            }
+            ConfirmAction::DeleteSwitch { zone, id, name } => {
+                self.run_delete_switch(zone, id, name)
             }
             ConfirmAction::DeleteTag {
                 host,
@@ -3711,6 +3888,14 @@ impl App {
                     self.overlay = Some(Overlay::RegistryForm(form));
                 }
             },
+            Overlay::SwitchForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_switch_form(form),
+                _ => {
+                    edit_switch_form(&mut form, key);
+                    self.overlay = Some(Overlay::SwitchForm(form));
+                }
+            },
             Overlay::ServicePicker { mut index } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {}
                 KeyCode::Enter => self.switch_service(Service::ALL[index]),
@@ -3806,6 +3991,26 @@ fn edit_user_form(form: &mut UserForm, key: KeyEvent) {
 
 fn edit_registry_form(form: &mut RegistryForm, key: KeyEvent) {
     let fields = form.labels().len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_switch_form(form: &mut SwitchForm, key: KeyEvent) {
+    let fields = SwitchForm::LABELS.len();
     match key.code {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
         KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
@@ -4033,6 +4238,9 @@ mod tests {
     fn zone_scope_is_independent_from_category() {
         assert_eq!(Service::Server.category(), Category::Compute);
         assert!(Service::Server.is_zoned());
+        assert_eq!(Service::Switch.category(), Category::Network);
+        assert!(Service::Switch.is_zoned());
+        assert_eq!(Service::Switch.arg_name(), "switch");
         assert_eq!(Service::Secrets.category(), Category::Security);
         assert!(Service::Secrets.is_zoned());
         // 分類が同じでもゾーン依存ではないもの。

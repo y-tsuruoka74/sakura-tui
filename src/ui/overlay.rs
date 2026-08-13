@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use super::{DIM, accent};
 use crate::app::{
     App, Availability, Category, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm,
-    RegistryFormMode, StatusKind, UserForm, UserFormMode,
+    RegistryFormMode, StatusKind, SwitchForm, SwitchFormMode, UserForm, UserFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -37,6 +37,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         } => draw_confirm(frame, title, body, verify.as_deref(), typed),
         Overlay::UserForm(form) => draw_user_form(frame, form),
         Overlay::RegistryForm(form) => draw_registry_form(frame, form),
+        Overlay::SwitchForm(form) => draw_switch_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
@@ -569,9 +570,9 @@ fn draw_help(frame: &mut Frame) {
                 ("a", "ユーザーを追加"),
                 ("e", "ユーザーを編集"),
                 ("d", "選択中の項目を削除"),
-                ("n", "レジストリを作成"),
-                ("E", "レジストリを編集"),
-                ("D", "レジストリを削除"),
+                ("n", "レジストリ / スイッチを作成"),
+                ("E", "レジストリ / スイッチを編集"),
+                ("D", "レジストリ / スイッチを削除"),
                 ("L", "レジストリにログイン"),
                 ("O", "レジストリのログイン情報を破棄"),
                 ("/", "表示中のリストを絞り込み"),
@@ -579,7 +580,7 @@ fn draw_help(frame: &mut Frame) {
                 ("p", "認証情報（プロファイル）を切替"),
                 ("s / S", "サービスを切り替え（分類ごとに一覧）"),
                 ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
-                ("z", "ゾーンを切り替え（サーバー）"),
+                ("z", "ゾーンを切り替え（サーバー / スイッチほか）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),
                 (
                     "Enter / Esc",
@@ -806,6 +807,44 @@ fn draw_registry_form(frame: &mut Frame, form: &RegistryForm) {
             )));
         }
     }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 70, dialog_height(&lines, 70));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_switch_form(frame: &mut Frame, form: &SwitchForm) {
+    let title = match form.mode {
+        SwitchFormMode::Create => "スイッチの作成".to_string(),
+        SwitchFormMode::Edit => format!("スイッチの編集 — {}", form.name),
+    };
+    let mut lines: Vec<Line> = SwitchForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "名前は64文字、説明は512文字まで入力できます。",
+        Style::default().fg(DIM),
+    )));
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),

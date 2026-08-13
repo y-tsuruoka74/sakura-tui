@@ -1,6 +1,6 @@
 //! さくらインターネットのサービスをターミナルから操作する TUI。
 //!
-//! 現時点ではさくらのクラウドのコンテナレジストリに対応している。
+//! コンピュート、ネットワーク、コンテナ、監視など複数サービスを扱う。
 
 mod account;
 mod app;
@@ -16,6 +16,7 @@ mod monitoring;
 mod registry;
 mod sacloud;
 mod secretmanager;
+mod switch;
 mod ui;
 
 use std::sync::Arc;

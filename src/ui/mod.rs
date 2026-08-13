@@ -9,6 +9,7 @@ mod observability;
 mod overlay;
 mod registries;
 mod server;
+mod switch;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -220,6 +221,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::AppRun => apprun::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
+        Service::Switch => switch::draw(frame, area, app),
         Service::Dns => observability::draw_dns(frame, area, app),
         Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
         Service::Secrets => observability::draw_secrets(frame, area, app),
@@ -377,6 +379,12 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             hints.push("z ゾーン");
             if app.mode == Mode::Write {
                 hints.extend(["b 起動", "x 停止", "X 強制停止", "B 強制リセット"]);
+            }
+        }
+        Service::Switch => {
+            hints.push("z ゾーン");
+            if app.mode == Mode::Write {
+                hints.extend(["n 作成", "E 編集", "D 削除"]);
             }
         }
     }
