@@ -131,6 +131,35 @@ pub fn delete_api_credentials(name: &str) -> Result<()> {
     delete_password(&legacy_key(name, "secret"))
 }
 
+/// クラウドAPIの認証元ごとにAI Engine専用トークンを分離する。
+fn ai_engine_key(profile_key: &str) -> String {
+    format!("@ai-engine:{profile_key}")
+}
+
+fn named_ai_engine_key(profile_key: &str, name: &str) -> String {
+    format!("@ai-engine:{profile_key}:{name}")
+}
+
+pub fn get_ai_engine_token(profile_key: &str) -> Result<Option<String>> {
+    get_password(&ai_engine_key(profile_key))
+}
+
+pub fn delete_ai_engine_token(profile_key: &str) -> Result<()> {
+    delete_password(&ai_engine_key(profile_key))
+}
+
+pub fn set_named_ai_engine_token(profile_key: &str, name: &str, token: &str) -> Result<()> {
+    set_password(&named_ai_engine_key(profile_key, name), token)
+}
+
+pub fn get_named_ai_engine_token(profile_key: &str, name: &str) -> Result<Option<String>> {
+    get_password(&named_ai_engine_key(profile_key, name))
+}
+
+pub fn delete_named_ai_engine_token(profile_key: &str, name: &str) -> Result<()> {
+    delete_password(&named_ai_engine_key(profile_key, name))
+}
+
 /// 平文で保存されていたパスワードをキーチェーンへ移す。
 ///
 /// 以前のバージョンは設定ファイルにパスワードを書いていたため、
@@ -216,6 +245,12 @@ mod tests {
     fn credential_keys_are_namespaced() {
         assert_eq!(credential_key("prod"), "@credential:prod");
         assert_ne!(credential_key("prod"), "prod");
+        assert_eq!(ai_engine_key("prod"), "@ai-engine:prod");
+        assert_eq!(
+            named_ai_engine_key("prod", "batch"),
+            "@ai-engine:prod:batch"
+        );
+        assert_ne!(ai_engine_key("prod"), credential_key("prod"));
     }
 
     /// 1 項目にまとめて往復できること（確認ダイアログを 1 回で済ませるため）。

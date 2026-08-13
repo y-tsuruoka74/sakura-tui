@@ -154,6 +154,177 @@ pub fn load_credentials_from(source: &CredentialSource) -> Result<ApiCredentials
     }
 }
 
+/// 現在のクラウド認証元に紐づくAI Engineアカウントトークンを読む。
+///
+/// 環境変数は一時利用やCI向けとして最優先し、アプリから登録した値はOSの
+/// キーチェーンへ保存する。
+pub const AI_ENGINE_ENV_TOKEN_NAME: &str = "環境変数";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiEngineTokenEntry {
+    pub name: String,
+    pub active: bool,
+    pub from_env: bool,
+}
+
+/// 現在選択中のAI Engineトークンを読む。
+pub fn load_ai_engine_token(source: &CredentialSource) -> Result<Option<String>> {
+    let mut config = Config::load()?;
+    migrate_legacy_ai_engine_token(&mut config, source)?;
+    let profile_key = source.config_key();
+    if let Some(profile) = config.ai_engine_tokens.get(&profile_key)
+        && let Some(active) = &profile.active
+    {
+        if active == AI_ENGINE_ENV_TOKEN_NAME {
+            return Ok(env_multi(&["SAKURA_AI_ENGINE_TOKEN"]));
+        }
+        return crate::keychain::get_named_ai_engine_token(&profile_key, active);
+    }
+    if let Some(token) = env_multi(&["SAKURA_AI_ENGINE_TOKEN"]) {
+        return Ok(Some(token));
+    }
+    Ok(None)
+}
+
+pub fn list_ai_engine_tokens(source: &CredentialSource) -> Result<Vec<AiEngineTokenEntry>> {
+    let mut config = Config::load()?;
+    migrate_legacy_ai_engine_token(&mut config, source)?;
+    let profile_key = source.config_key();
+    let profile = config.ai_engine_tokens.get(&profile_key);
+    let active = profile.and_then(|profile| profile.active.as_deref());
+    let mut entries = Vec::new();
+    if env_multi(&["SAKURA_AI_ENGINE_TOKEN"]).is_some() {
+        entries.push(AiEngineTokenEntry {
+            name: AI_ENGINE_ENV_TOKEN_NAME.to_string(),
+            active: active == Some(AI_ENGINE_ENV_TOKEN_NAME)
+                || (active.is_none() && profile.is_none()),
+            from_env: true,
+        });
+    }
+    if let Some(profile) = profile {
+        entries.extend(profile.names.iter().map(|name| AiEngineTokenEntry {
+            name: name.clone(),
+            active: active == Some(name.as_str()),
+            from_env: false,
+        }));
+    }
+    Ok(entries)
+}
+
+pub fn save_ai_engine_token(source: &CredentialSource, name: &str, token: &str) -> Result<()> {
+    let name = validate_ai_engine_token_name(name)?;
+    let profile_key = source.config_key();
+    crate::keychain::set_named_ai_engine_token(&profile_key, name, token)?;
+    let mut config = Config::load()?;
+    let profile = config.ai_engine_tokens.entry(profile_key).or_default();
+    if !profile.names.iter().any(|current| current == name) {
+        profile.names.push(name.to_string());
+        profile.names.sort();
+    }
+    profile.active = Some(name.to_string());
+    config.save()?;
+    Ok(())
+}
+
+pub fn select_ai_engine_token(source: &CredentialSource, name: &str) -> Result<Option<String>> {
+    let profile_key = source.config_key();
+    let token = if name == AI_ENGINE_ENV_TOKEN_NAME {
+        env_multi(&["SAKURA_AI_ENGINE_TOKEN"])
+            .context("環境変数 SAKURA_AI_ENGINE_TOKEN が設定されていません")?
+    } else {
+        crate::keychain::get_named_ai_engine_token(&profile_key, name)?
+            .with_context(|| format!("キーチェーンにAI Engineトークン「{name}」がありません"))?
+    };
+    let mut config = Config::load()?;
+    config
+        .ai_engine_tokens
+        .entry(profile_key)
+        .or_default()
+        .active = Some(name.to_string());
+    config.save()?;
+    Ok(Some(token))
+}
+
+pub fn load_named_ai_engine_token(source: &CredentialSource, name: &str) -> Result<Option<String>> {
+    if name == AI_ENGINE_ENV_TOKEN_NAME {
+        return Ok(env_multi(&["SAKURA_AI_ENGINE_TOKEN"]));
+    }
+    crate::keychain::get_named_ai_engine_token(&source.config_key(), name)
+}
+
+pub fn delete_ai_engine_token(source: &CredentialSource, name: &str) -> Result<()> {
+    if name == AI_ENGINE_ENV_TOKEN_NAME {
+        bail!("環境変数のトークンはアプリから削除できません");
+    }
+    let profile_key = source.config_key();
+    crate::keychain::delete_named_ai_engine_token(&profile_key, name)?;
+    let mut config = Config::load()?;
+    if let Some(profile) = config.ai_engine_tokens.get_mut(&profile_key) {
+        profile.names.retain(|current| current != name);
+        if profile.active.as_deref() == Some(name) {
+            profile.active = profile.names.first().cloned().or_else(|| {
+                env_multi(&["SAKURA_AI_ENGINE_TOKEN"]).map(|_| AI_ENGINE_ENV_TOKEN_NAME.to_string())
+            });
+        }
+        if profile.names.is_empty() && profile.active.is_none() {
+            config.ai_engine_tokens.remove(&profile_key);
+        }
+    }
+    config.save()?;
+    Ok(())
+}
+
+fn delete_all_ai_engine_tokens(source: &CredentialSource) -> Result<()> {
+    let profile_key = source.config_key();
+    let mut config = Config::load()?;
+    if let Some(profile) = config.ai_engine_tokens.remove(&profile_key) {
+        for name in profile.names {
+            crate::keychain::delete_named_ai_engine_token(&profile_key, &name)?;
+        }
+    }
+    // 複数保存形式へ移行する前の項目も削除する。
+    crate::keychain::delete_ai_engine_token(&profile_key)?;
+    config.save()?;
+    Ok(())
+}
+
+pub fn validate_ai_engine_token_name(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("トークン名を入力してください");
+    }
+    if name == AI_ENGINE_ENV_TOKEN_NAME
+        || name
+            .chars()
+            .any(|c| c == ':' || c == '/' || c == '\\' || c.is_control())
+    {
+        bail!("トークン名として使えない文字が含まれています");
+    }
+    Ok(name)
+}
+
+fn migrate_legacy_ai_engine_token(config: &mut Config, source: &CredentialSource) -> Result<()> {
+    let profile_key = source.config_key();
+    if config.ai_engine_tokens.contains_key(&profile_key) {
+        return Ok(());
+    }
+    let Some(token) = crate::keychain::get_ai_engine_token(&profile_key)? else {
+        return Ok(());
+    };
+    let name = "default";
+    crate::keychain::set_named_ai_engine_token(&profile_key, name, &token)?;
+    crate::keychain::delete_ai_engine_token(&profile_key)?;
+    config.ai_engine_tokens.insert(
+        profile_key,
+        AiEngineTokenProfile {
+            active: Some(name.to_string()),
+            names: vec![name.to_string()],
+        },
+    );
+    config.save()?;
+    Ok(())
+}
+
 /// キーチェーンに預けた資格情報を読む。
 fn load_keychain_credentials(name: &str) -> Result<ApiCredentials> {
     let config = Config::load()?;
@@ -455,6 +626,7 @@ pub fn delete_keychain_credential(name: &str) -> Result<()> {
         bail!("設定に資格情報 {name} がありません");
     }
     crate::keychain::delete_api_credentials(name)?;
+    delete_all_ai_engine_tokens(&CredentialSource::Keychain(name.to_string()))?;
     config.save()?;
     Ok(())
 }
@@ -544,6 +716,16 @@ pub struct KeychainCredential {
     pub api_root: Option<String>,
 }
 
+/// クラウドAPIプロファイルごとのAI Engineトークン一覧。
+/// トークン本体はキーチェーンにあり、名前と選択状態だけを保存する。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AiEngineTokenProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
+}
+
 /// `~/.config/sakura-tui/config.toml` の内容。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -556,6 +738,9 @@ pub struct Config {
     /// キーチェーンに預けた資格情報（名前と既定ゾーンだけ）。
     #[serde(default)]
     pub credentials: BTreeMap<String, KeychainCredential>,
+    /// AI Engineトークンの名前と選択状態。秘密値は含まない。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ai_engine_tokens: BTreeMap<String, AiEngineTokenProfile>,
 }
 
 impl Config {
@@ -737,6 +922,36 @@ mod tests {
         assert!(text.contains("alice"), "{text}");
         assert!(!text.contains("s3cret"), "平文が書き出されている: {text}");
         assert!(!text.contains("password"), "{text}");
+    }
+
+    #[test]
+    fn ai_engine_config_stores_names_but_not_tokens() {
+        let mut config = Config::default();
+        config.ai_engine_tokens.insert(
+            "prod".to_string(),
+            AiEngineTokenProfile {
+                active: Some("batch".to_string()),
+                names: vec!["batch".to_string(), "interactive".to_string()],
+            },
+        );
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("batch"));
+        assert!(text.contains("interactive"));
+        assert!(!text.contains("uuid:secret"));
+    }
+
+    #[test]
+    fn ai_engine_token_names_are_safe_for_keychain_keys() {
+        assert_eq!(
+            validate_ai_engine_token_name("batch-prod").unwrap(),
+            "batch-prod"
+        );
+        for invalid in ["", "環境変数", "a:b", "a/b", "a\\b", "a\nb"] {
+            assert!(
+                validate_ai_engine_token_name(invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 
     /// 旧形式（平文パスワード入り）の設定ファイルも読めること。

@@ -30,6 +30,7 @@ pub use server::ServerView;
 pub use switch::SwitchView;
 
 use crate::account::AuthStatus;
+use crate::ai_engine::AiEngineClient;
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
@@ -58,6 +59,11 @@ pub enum Message {
     },
     ManagedResources {
         kind: ManagedResourceKind,
+        result: Result<Vec<ManagedResource>, String>,
+    },
+    AiEngineTokenVerified {
+        name: String,
+        token: String,
         result: Result<Vec<ManagedResource>, String>,
     },
     Registries(Result<Vec<ContainerRegistry>, String>),
@@ -556,6 +562,7 @@ fn availability_reason(error: &str) -> &'static str {
 pub enum Category {
     Compute,
     Container,
+    Ai,
     Integration,
     Network,
     Storage,
@@ -566,9 +573,10 @@ pub enum Category {
 
 impl Category {
     /// 表示順。サービス一覧の並びもこの順に揃える。
-    pub const ALL: [Category; 8] = [
+    pub const ALL: [Category; 9] = [
         Category::Compute,
         Category::Container,
+        Category::Ai,
         Category::Integration,
         Category::Network,
         Category::Storage,
@@ -581,6 +589,7 @@ impl Category {
         match self {
             Category::Compute => "コンピュート",
             Category::Container => "コンテナ・アプリ実行",
+            Category::Ai => "AI",
             Category::Integration => "アプリケーション連携",
             Category::Network => "ネットワーク",
             Category::Storage => "ストレージ・データ",
@@ -605,6 +614,7 @@ pub enum Service {
     Registry,
     AppRun,
     Dedicated,
+    AiEngine,
     SimpleMq,
     EventBus,
     Workflows,
@@ -641,13 +651,15 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 24] = [
+    pub const ALL: [Service; 25] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
         Service::Registry,
         Service::AppRun,
         Service::Dedicated,
+        // AI
+        Service::AiEngine,
         // アプリケーション連携
         Service::SimpleMq,
         Service::EventBus,
@@ -709,6 +721,15 @@ impl Service {
                 arg_name: "dedicated",
                 countable_label: None,
                 count_label: Some("クラスタ"),
+                zoned: false,
+            },
+            Service::AiEngine => ServiceMeta {
+                category: Category::Ai,
+                title: "AI Engine",
+                arg_name: "ai-engine",
+                countable_label: None,
+                // 専用トークンをキーチェーンから読むのはサービスを開いたときだけ。
+                count_label: None,
                 zoned: false,
             },
             Service::SimpleMq => ServiceMeta {
@@ -1051,6 +1072,32 @@ pub struct ProfileForm {
     pub field: usize,
     /// 検証中はキー入力を受け付けない。
     pub verifying: bool,
+}
+
+/// AI Engine専用アカウントトークンの登録フォーム。
+#[derive(Clone, Default)]
+pub struct AiEngineTokenForm {
+    pub entries: Vec<crate::config::AiEngineTokenEntry>,
+    pub index: usize,
+    pub adding: bool,
+    pub name: String,
+    pub token: String,
+    pub field: usize,
+    pub verifying: bool,
+}
+
+impl std::fmt::Debug for AiEngineTokenForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AiEngineTokenForm")
+            .field("token", &"<redacted>")
+            .field("entries", &self.entries)
+            .field("index", &self.index)
+            .field("adding", &self.adding)
+            .field("name", &self.name)
+            .field("field", &self.field)
+            .field("verifying", &self.verifying)
+            .finish()
+    }
 }
 
 impl ProfileForm {
@@ -1979,6 +2026,9 @@ pub enum ConfirmAction {
     DeleteCredential {
         name: String,
     },
+    DeleteAiEngineToken {
+        name: String,
+    },
     DeleteTag {
         host: String,
         repository: String,
@@ -2127,6 +2177,7 @@ pub enum Overlay {
     },
     /// usacloud プロファイルの新規作成。
     ProfileForm(ProfileForm),
+    AiEngineTokenForm(AiEngineTokenForm),
 }
 
 /// コンテナレジストリ画面が持つ状態。
@@ -2168,6 +2219,7 @@ pub struct App {
     apprun_client: Arc<AppRunClient>,
     dedicated_client: Arc<DedicatedClient>,
     monitoring_client: Arc<MonitoringClient>,
+    ai_engine_client: Option<Arc<AiEngineClient>>,
     tx: Tx,
     pub config: Config,
     pub registry_clients: RegistryClients,
@@ -2243,6 +2295,7 @@ impl App {
             apprun_client: clients.apprun,
             dedicated_client: clients.dedicated,
             monitoring_client: clients.monitoring,
+            ai_engine_client: None,
             tx,
             config,
             registry_clients: RegistryClients::default(),
@@ -2328,6 +2381,7 @@ impl App {
 
     pub fn managed_resource_kind(&self) -> Option<ManagedResourceKind> {
         match self.service {
+            Service::AiEngine => Some(ManagedResourceKind::AiEngine),
             Service::ObjectStorage => Some(ManagedResourceKind::ObjectStorage),
             Service::SimpleMq => Some(ManagedResourceKind::SimpleMq),
             Service::EventBus => Some(ManagedResourceKind::EventBus),
@@ -2506,6 +2560,7 @@ impl App {
             | Service::Database
             | Service::Nfs => Pane::CloudResources,
             Service::ObjectStorage
+            | Service::AiEngine
             | Service::SimpleMq
             | Service::EventBus
             | Service::Workflows
@@ -2655,6 +2710,7 @@ impl App {
             | Service::Database
             | Service::Nfs => self.cloud_resources_ensure_loaded(),
             Service::ObjectStorage
+            | Service::AiEngine
             | Service::SimpleMq
             | Service::EventBus
             | Service::Workflows
@@ -2791,6 +2847,57 @@ impl App {
                 self.managed_resources.items.insert(kind, loadable);
                 self.fill_selection(Pane::ManagedResources);
             }
+            Message::AiEngineTokenVerified {
+                name,
+                token,
+                result,
+            } => match result {
+                Ok(models) => {
+                    match crate::config::save_ai_engine_token(
+                        &self.credential_source,
+                        &name,
+                        &token,
+                    ) {
+                        Ok(()) => {
+                            self.ai_engine_client = AiEngineClient::new(token).ok().map(Arc::new);
+                            let count = models.len();
+                            self.managed_resources
+                                .items
+                                .insert(ManagedResourceKind::AiEngine, Loadable::Ready(models));
+                            self.managed_resources
+                                .state
+                                .select((count > 0).then_some(0));
+                            self.overlay = None;
+                            self.set_status(
+                                format!("AI Engineトークン「{name}」を保存しました（利用可能なモデル {count} 件）"),
+                                StatusKind::Success,
+                            );
+                        }
+                        Err(err) => {
+                            self.overlay = Some(Overlay::AiEngineTokenForm(AiEngineTokenForm {
+                                adding: true,
+                                name,
+                                token,
+                                field: 1,
+                                verifying: false,
+                                ..AiEngineTokenForm::default()
+                            }));
+                            self.set_status(fmt_error(err), StatusKind::Error);
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::AiEngineTokenForm(AiEngineTokenForm {
+                        adding: true,
+                        name,
+                        token,
+                        field: 1,
+                        verifying: false,
+                        ..AiEngineTokenForm::default()
+                    }));
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::Registries(Ok(items)) => {
                 let previous = self.selected_registry().map(|r| r.id);
                 let count = items.len();
@@ -3821,6 +3928,13 @@ impl App {
             return;
         }
         match &mut self.overlay {
+            Some(Overlay::AiEngineTokenForm(form)) if form.adding && !form.verifying => {
+                if form.field == 0 {
+                    form.name.push_str(text);
+                } else {
+                    form.token.push_str(text);
+                }
+            }
             Some(Overlay::ProfileForm(form)) => {
                 let field = form.field;
                 if let Some(value) = form.value_mut(field) {
@@ -3976,6 +4090,11 @@ impl App {
             Service::Registry => self.on_key_registry(key),
             Service::AppRun => self.on_key_apprun(key),
             Service::Dedicated => self.on_key_dedicated(key),
+            Service::AiEngine => {
+                if key.code == KeyCode::Char('t') {
+                    self.open_ai_engine_token_form();
+                }
+            }
             Service::Server => self.on_key_server(key),
             Service::Switch => self.on_key_switch(key),
             Service::Disk
@@ -4286,6 +4405,8 @@ impl App {
                     Service::SimpleMonitor => sacloud.list_simple_monitors().await.map(|v| v.len()),
                     Service::AppRun => apprun.list_applications().await.map(|v| v.len()),
                     Service::Dedicated => dedicated.list_clusters().await.map(|v| v.len()),
+                    // AI Engineはcount_labelが無いため、この分岐には通常到達しない。
+                    Service::AiEngine => Ok(0),
                     Service::ObjectStorage => sacloud
                         .list_managed_resources(ManagedResourceKind::ObjectStorage)
                         .await
@@ -4378,6 +4499,7 @@ impl App {
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
             Service::ObjectStorage
+            | Service::AiEngine
             | Service::SimpleMq
             | Service::EventBus
             | Service::Workflows
@@ -4385,6 +4507,7 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb => {
                 let kind = match service {
+                    Service::AiEngine => ManagedResourceKind::AiEngine,
                     Service::ObjectStorage => ManagedResourceKind::ObjectStorage,
                     Service::SimpleMq => ManagedResourceKind::SimpleMq,
                     Service::EventBus => ManagedResourceKind::EventBus,
@@ -4802,6 +4925,126 @@ impl App {
         }));
     }
 
+    fn open_ai_engine_token_form(&mut self) {
+        let entries = match crate::config::list_ai_engine_tokens(&self.credential_source) {
+            Ok(entries) => entries,
+            Err(err) => {
+                self.set_status(fmt_error(err), StatusKind::Error);
+                Vec::new()
+            }
+        };
+        let index = entries.iter().position(|entry| entry.active).unwrap_or(0);
+        self.overlay = Some(Overlay::AiEngineTokenForm(AiEngineTokenForm {
+            entries,
+            index,
+            ..AiEngineTokenForm::default()
+        }));
+    }
+
+    fn submit_ai_engine_token(&mut self, mut form: AiEngineTokenForm) {
+        if let Err(err) = crate::config::validate_ai_engine_token_name(&form.name) {
+            self.set_status(fmt_error(err), StatusKind::Error);
+            self.overlay = Some(Overlay::AiEngineTokenForm(form));
+            return;
+        }
+        let name = form.name.trim().to_string();
+        let valid_shape = form
+            .token
+            .split_once(':')
+            .is_some_and(|(id, secret)| !id.trim().is_empty() && !secret.trim().is_empty());
+        if !valid_shape {
+            self.set_status(
+                "アカウントトークンを UUID:シークレット の形式で入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::AiEngineTokenForm(form));
+            return;
+        }
+        let token = form.token.trim().to_string();
+        let client = match AiEngineClient::new(token.clone()) {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                self.set_status(fmt_error(err), StatusKind::Error);
+                self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                return;
+            }
+        };
+        form.verifying = true;
+        self.overlay = Some(Overlay::AiEngineTokenForm(form));
+        self.inflight += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.list_models().await.map_err(fmt_error);
+            let _ = tx.send(Message::AiEngineTokenVerified {
+                name,
+                token,
+                result,
+            });
+        });
+    }
+
+    fn select_ai_engine_token(&mut self, name: &str) {
+        let token = match crate::config::select_ai_engine_token(&self.credential_source, name) {
+            Ok(Some(token)) => token,
+            Ok(None) => {
+                self.set_status("選択したトークンを読み出せませんでした", StatusKind::Error);
+                return;
+            }
+            Err(err) => {
+                self.set_status(fmt_error(err), StatusKind::Error);
+                return;
+            }
+        };
+        match AiEngineClient::new(token) {
+            Ok(client) => {
+                self.ai_engine_client = Some(Arc::new(client));
+                self.managed_resources
+                    .items
+                    .remove(&ManagedResourceKind::AiEngine);
+                self.overlay = None;
+                self.set_status(
+                    format!("AI Engineトークン「{name}」へ切り替えました"),
+                    StatusKind::Success,
+                );
+                self.managed_resources_ensure_loaded();
+            }
+            Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
+        }
+    }
+
+    fn confirm_delete_ai_engine_token(&mut self, name: String) {
+        self.overlay = Some(Overlay::Confirm {
+            title: "AI Engineトークンの削除".to_string(),
+            body: format!(
+                "このPCのキーチェーンからAI Engineトークン「{name}」を削除します。\n\
+                 AI Engine側のトークンは失効しません。失効はコントロールパネルで行ってください。"
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteAiEngineToken { name },
+        });
+    }
+
+    fn copy_ai_engine_token(&mut self, name: &str, form: AiEngineTokenForm) {
+        match crate::config::load_named_ai_engine_token(&self.credential_source, name) {
+            Ok(Some(token)) => match copy_to_clipboard(&token) {
+                Ok(()) => self.set_status(
+                    format!("AI Engineトークン「{name}」をクリップボードへコピーしました"),
+                    StatusKind::Success,
+                ),
+                Err(err) => self.set_status(
+                    format!("クリップボードへコピーできませんでした: {err}"),
+                    StatusKind::Error,
+                ),
+            },
+            Ok(None) => {
+                self.set_status("コピーできる保存済みトークンがありません", StatusKind::Info)
+            }
+            Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
+        }
+        self.overlay = Some(Overlay::AiEngineTokenForm(form));
+    }
+
     /// 入力内容を検証してから保存する。
     ///
     /// 打ち間違えたトークンを保存してしまわないよう、実際に API を 1 回叩いて
@@ -5023,6 +5266,7 @@ impl App {
         self.apprun_client = Arc::new(apprun);
         self.dedicated_client = Arc::new(dedicated);
         self.monitoring_client = Arc::new(monitoring);
+        self.ai_engine_client = None;
         self.credential_source = source;
         self.has_credentials = true;
 
@@ -5074,6 +5318,7 @@ impl App {
                 self.cloud_resources_ensure_loaded();
             }
             Service::ObjectStorage
+            | Service::AiEngine
             | Service::SimpleMq
             | Service::EventBus
             | Service::Workflows
@@ -5187,6 +5432,54 @@ impl App {
             return;
         }
         self.managed_resources.items.insert(kind, Loadable::Loading);
+        if kind == ManagedResourceKind::AiEngine {
+            let client = match self.ai_engine_client.clone() {
+                Some(client) => client,
+                None => {
+                    let token = match crate::config::load_ai_engine_token(&self.credential_source) {
+                        Ok(Some(token)) => token,
+                        Ok(None) => {
+                            self.managed_resources.items.insert(
+                                kind,
+                                Loadable::Failed(
+                                    "AI Engineアカウントトークンが未設定です。\n\n\
+                                     t キーで、コントロールパネルから発行済みのトークンを登録してください。"
+                                        .to_string(),
+                                ),
+                            );
+                            return;
+                        }
+                        Err(err) => {
+                            self.managed_resources
+                                .items
+                                .insert(kind, Loadable::Failed(fmt_error(err)));
+                            return;
+                        }
+                    };
+                    match AiEngineClient::new(token) {
+                        Ok(client) => {
+                            let client = Arc::new(client);
+                            self.ai_engine_client = Some(client.clone());
+                            client
+                        }
+                        Err(err) => {
+                            self.managed_resources
+                                .items
+                                .insert(kind, Loadable::Failed(fmt_error(err)));
+                            return;
+                        }
+                    }
+                }
+            };
+            self.inflight += 1;
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                let result = client.list_models().await.map_err(fmt_error);
+                let _ = tx.send(Message::ManagedResources { kind, result });
+            });
+            return;
+        }
+
         self.inflight += 1;
         let client = self.sacloud.clone();
         let tx = self.tx.clone();
@@ -5551,6 +5844,22 @@ impl App {
                         }
                         self.set_status(format!("{name} を削除しました"), StatusKind::Success);
                         self.open_profile_picker();
+                    }
+                    Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
+                }
+            }
+            ConfirmAction::DeleteAiEngineToken { name } => {
+                match crate::config::delete_ai_engine_token(&self.credential_source, &name) {
+                    Ok(()) => {
+                        self.ai_engine_client = None;
+                        self.managed_resources
+                            .items
+                            .remove(&ManagedResourceKind::AiEngine);
+                        self.set_status(
+                            format!("このPCからAI Engineトークン「{name}」を削除しました"),
+                            StatusKind::Success,
+                        );
+                        self.open_ai_engine_token_form();
                     }
                     Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
                 }
@@ -5984,6 +6293,97 @@ impl App {
                     edit_profile_form(&mut form, key);
                     self.overlay = Some(Overlay::ProfileForm(form));
                 }
+            },
+            Overlay::AiEngineTokenForm(mut form) => match key.code {
+                _ if form.verifying => {
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Esc if form.adding => {
+                    form.adding = false;
+                    form.name.clear();
+                    form.token.clear();
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Esc => {}
+                KeyCode::Enter if form.adding => self.submit_ai_engine_token(form),
+                KeyCode::Tab | KeyCode::Down | KeyCode::Up if form.adding => {
+                    form.field = (form.field + 1) % 2;
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Backspace if form.adding => {
+                    if form.field == 0 {
+                        form.name.pop();
+                    } else {
+                        form.token.pop();
+                    }
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Char(c) if form.adding => {
+                    if form.field == 0 {
+                        form.name.push(c);
+                    } else {
+                        form.token.push(c);
+                    }
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Char('n') => {
+                    form.adding = true;
+                    form.name.clear();
+                    form.token.clear();
+                    form.field = 0;
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Char('e') => {
+                    let entry = form.entries.get(form.index).cloned();
+                    if let Some(entry) = entry.filter(|entry| !entry.from_env) {
+                        form.adding = true;
+                        form.name = entry.name;
+                        form.token.clear();
+                        form.field = 1;
+                    }
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Enter => {
+                    if let Some(entry) = form.entries.get(form.index) {
+                        let name = entry.name.clone();
+                        self.select_ai_engine_token(&name);
+                    } else {
+                        form.adding = true;
+                        self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                    }
+                }
+                KeyCode::Char('y') => {
+                    if let Some(entry) = form.entries.get(form.index) {
+                        let name = entry.name.clone();
+                        self.copy_ai_engine_token(&name, form);
+                    } else {
+                        self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if let Some(entry) = form.entries.get(form.index) {
+                        if entry.from_env {
+                            self.set_status(
+                                "環境変数のトークンはアプリから削除できません",
+                                StatusKind::Info,
+                            );
+                            self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                        } else {
+                            self.confirm_delete_ai_engine_token(entry.name.clone());
+                        }
+                    } else {
+                        self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') if !form.entries.is_empty() => {
+                    form.index = (form.index + 1) % form.entries.len();
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                KeyCode::Up | KeyCode::Char('k') if !form.entries.is_empty() => {
+                    form.index = (form.index + form.entries.len() - 1) % form.entries.len();
+                    self.overlay = Some(Overlay::AiEngineTokenForm(form));
+                }
+                _ => self.overlay = Some(Overlay::AiEngineTokenForm(form)),
             },
             Overlay::ProfilePicker { sources, mut index } => {
                 // 一覧の最後に「新規作成」の行がある。
@@ -6969,6 +7369,17 @@ mod tests {
         };
         let mut form = SecretForm::new(SecretFormMode::Create, vault, "db-password".to_string());
         form.value = "must-not-appear".to_string();
+        let debug = format!("{form:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn ai_engine_token_form_debug_redacts_token() {
+        let form = AiEngineTokenForm {
+            token: "uuid:must-not-appear".to_string(),
+            ..AiEngineTokenForm::default()
+        };
         let debug = format!("{form:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("must-not-appear"));

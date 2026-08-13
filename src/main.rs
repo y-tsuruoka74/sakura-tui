@@ -3,6 +3,7 @@
 //! コンピュート、ネットワーク、コンテナ、監視など複数サービスを扱う。
 
 mod account;
+mod ai_engine;
 mod app;
 mod apprun;
 mod apprun_dedicated;
@@ -81,6 +82,7 @@ const USAGE: &str = "さくらインターネットのサービスをターミ�
   SAKURA_ACCESS_TOKEN / SAKURA_ACCESS_TOKEN_SECRET   APIキー
   SAKURA_PROFILE                                     usacloud プロファイル名
   SAKURA_TUI_CONFIG                                  設定ファイルのパス
+  SAKURA_AI_ENGINE_TOKEN                             AI Engineアカウントトークン
   SAKURA_API_ROOT_URL                                --api-root と同じ
   SAKURA_TUI_TRACE                                   --trace と同じ";
 

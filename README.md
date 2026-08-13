@@ -2,7 +2,7 @@
 
 さくらインターネットのサービスをターミナルから操作する TUI（[ratatui](https://ratatui.rs) 製）。
 
-`s` キーでサービスを切り替えて使います（24 種類）。
+`s` キーでサービスを切り替えて使います（25 種類）。
 
 ### コンテナレジストリ
 - レジストリの一覧・詳細・作成・編集・削除
@@ -55,6 +55,14 @@
 - イベントバスのスケジュール、トリガー、処理設定（イベントソース、実行間隔、宛先など）
 - ワークフロー一覧（公開状態、ログ設定、同時実行モード、タグ）
 - いずれも絞り込み、更新、リソースIDのコピーに対応
+
+### AI Engine
+- アカウントトークンごとに利用可能なモデル一覧を表示
+- モデルID、種別、提供元、説明、コンテキスト長、対応機能を確認
+- `t` で名前付きアカウントトークンを複数登録し、使用・更新・コピー・削除
+- アプリで登録した各トークンはクラウドAPIプロファイルごとにOSのキーチェーンへ保存
+- `SAKURA_AI_ENGINE_TOKEN` 環境変数にも対応
+- トークンの新規発行・サービス側での失効はAI Engineコントロールパネルで行います
 
 ### CDN・自動運用・マネージドDB（閲覧のみ）
 - ウェブアクセラレータのサイト一覧（状態、ドメイン、オリジン、キャッシュTTL、証明書）
@@ -129,7 +137,7 @@ cargo build --release
                          server / disk / registry / apprun / dedicated /
                          switch / internet / loadbalancer / vpcrouter /
                          database / nfs / object-storage / simplemq /
-                         enhanced-db / eventbus / workflows / webaccel /
+                         enhanced-db / ai-engine / eventbus / workflows / webaccel /
                          autoscale / dns / secrets / monitor / monitoring /
                          account / billing
       --trace            APIリクエストを標準エラーに記録する
@@ -317,11 +325,12 @@ username = "your-registry-user"
 | ファイル | 役割 |
 | --- | --- |
 | `src/config.rs` | 認証情報の読み込み（環境変数 / usacloud プロファイル）と設定ファイルの保存 |
+| `src/ai_engine.rs` | AI Engineのモデル一覧クライアント（Bearer認証） |
 | `src/sacloud.rs` | さくらのクラウド API v1.1 クライアントの土台とコンテナレジストリ |
 | `src/iaas.rs` | ゾーンとサーバー（電源操作を含む） |
 | `src/switch.rs` | ゾーンごとのスイッチ一覧と件数 |
 | `src/cloud_resources.rs` | ディスク、ルータ＋スイッチ、IaaSアプライアンスの共通閲覧クライアント |
-| `src/managed_resources.rs` | オブジェクトストレージ、シンプルMQ、イベントバス、ワークフローの共通閲覧クライアント |
+| `src/managed_resources.rs` | AI Engineモデルやオブジェクトストレージなどの共通一覧・詳細モデル |
 | `src/apprun.rs` | AppRun 共用型 API クライアント |
 | `src/apprun_dedicated.rs` | AppRun 専有型 API クライアント（閲覧のみ、カーソル方式のページング） |
 | `src/commonservice.rs` | DNS とシンプル監視（コンテナレジストリと同じ commonserviceitem） |
@@ -345,6 +354,7 @@ API 呼び出しは全て `tokio::spawn` して結果をチャネルで受け取
 - タグの詳細（サイズ・レイヤ数など）は選択中のタグの分だけ取得します。
 - AppRun（共用型）はアプリの作成・削除・デプロイには未対応です（閲覧とトラフィック切替のみ）。
 - AppRun（専有型）は閲覧のみです。ロードバランサとサービスクラスの一覧は未対応です。
+- AI Engineのモデル一覧はOpenAI互換の `/v1/models` を利用します。トークンの発行・失効APIは公開されていないため、サービス側の管理はコントロールパネルで行います。
 - DNSゾーン名はサービス仕様上、作成後に変更できません。編集できるのは説明のみです。
 - シンプル監視の編集フォームは ping / TCP / HTTP / HTTPS に対応します。その他の方式は閲覧・有効／停止・削除のみ対応します。
 - モニタリングスイートの専有プラン作成時の暗号化・KMS・サービスプリンシパル指定は未対応です。

@@ -19,6 +19,7 @@ const WORKFLOWS_SUFFIX: &str = "api/workflow/1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedResourceKind {
+    AiEngine,
     ObjectStorage,
     SimpleMq,
     EventBus,
@@ -31,6 +32,7 @@ pub enum ManagedResourceKind {
 impl ManagedResourceKind {
     pub fn title(self) -> &'static str {
         match self {
+            Self::AiEngine => "AI Engineモデル",
             Self::ObjectStorage => "オブジェクトストレージ",
             Self::SimpleMq => "シンプルMQ",
             Self::EventBus => "イベントバス",
@@ -76,6 +78,9 @@ impl SacloudClient {
         kind: ManagedResourceKind,
     ) -> Result<Vec<ManagedResource>> {
         match kind {
+            ManagedResourceKind::AiEngine => {
+                anyhow::bail!("AI Engineには専用のアカウントトークンが必要です")
+            }
             ManagedResourceKind::ObjectStorage => self.list_object_storage_buckets().await,
             ManagedResourceKind::SimpleMq => self.list_common_service("simplemq", kind).await,
             ManagedResourceKind::EventBus => self.list_eventbus_resources().await,

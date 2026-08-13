@@ -8,10 +8,10 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, accent};
 use crate::app::{
-    AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, Availability,
-    Category, DashboardForm, DashboardFormMode, DnsRecordForm, DnsRecordFormMode, DnsZoneForm,
-    DnsZoneFormMode, LogMeasureRuleForm, LogMeasureRuleFormMode, LogRoutingForm,
-    LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
+    AiEngineTokenForm, AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode,
+    App, Availability, Category, DashboardForm, DashboardFormMode, DnsRecordForm,
+    DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LogMeasureRuleForm, LogMeasureRuleFormMode,
+    LogRoutingForm, LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
     NotificationRoutingForm, NotificationRoutingFormMode, NotificationTargetForm,
     NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage, RegistryForm,
     RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode,
@@ -71,6 +71,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_service_picker(frame, app, *index, *initial)
         }
         Overlay::ProfileForm(form) => draw_profile_form(frame, app, form),
+        Overlay::AiEngineTokenForm(form) => draw_ai_engine_token_form(frame, form),
     }
 }
 
@@ -210,6 +211,148 @@ fn draw_profile_form(frame: &mut Frame, app: &App, form: &ProfileForm) {
                 },
                 accent(),
             )),
+        area,
+    );
+}
+
+fn draw_ai_engine_token_form(frame: &mut Frame, form: &AiEngineTokenForm) {
+    let mut lines = Vec::new();
+    if form.adding {
+        lines.push(Line::from(Span::styled(
+            "トークン名と、コントロールパネルで発行した値を入力します。",
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::raw(""));
+        lines.push(input_line("名前", &form.name, form.field == 0, false));
+        lines.push(input_line("トークン", &form.token, form.field == 1, true));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{}UUID:シークレット 形式。OSのキーチェーンへ保存します。",
+                " ".repeat(14)
+            ),
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::raw(""));
+        if form.verifying {
+            lines.push(Line::from(Span::styled(
+                "モデル一覧を取得してトークンを検証しています…",
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" 項目移動   "),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" 検証して保存   "),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" 一覧へ"),
+            ]));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "使用するトークンを選択します。値は画面や設定ファイルに表示しません。",
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::raw(""));
+        if form.entries.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "保存済みトークンはありません。n キーで追加できます。",
+                Style::default().fg(DIM),
+            )));
+        } else {
+            let visible = 10usize;
+            let start = form
+                .index
+                .saturating_sub(visible / 2)
+                .min(form.entries.len().saturating_sub(visible));
+            let end = (start + visible).min(form.entries.len());
+            if start > 0 {
+                lines.push(Line::from(Span::styled(
+                    "   ↑ さらにあります",
+                    Style::default().fg(DIM),
+                )));
+            }
+            for (index, entry) in form.entries[start..end].iter().enumerate() {
+                let index = start + index;
+                let selected = index == form.index;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if selected { "▌  " } else { "   " },
+                        Style::default().fg(accent()),
+                    ),
+                    Span::styled(
+                        if entry.active { "● " } else { "○ " },
+                        Style::default().fg(if entry.active { Color::Green } else { DIM }),
+                    ),
+                    Span::styled(
+                        super::pad(&entry.name, 34),
+                        if selected {
+                            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::styled(
+                        if entry.from_env {
+                            "環境変数"
+                        } else {
+                            "キーチェーン"
+                        },
+                        Style::default().fg(DIM),
+                    ),
+                ]));
+            }
+            if end < form.entries.len() {
+                lines.push(Line::from(Span::styled(
+                    "   ↓ さらにあります",
+                    Style::default().fg(DIM),
+                )));
+            }
+        }
+        lines.push(Line::raw(""));
+        let selected_is_local = form
+            .entries
+            .get(form.index)
+            .is_some_and(|entry| !entry.from_env);
+        let mut hints = vec![
+            Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 追加   "),
+        ];
+        if !form.entries.is_empty() {
+            hints.extend([
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" 使用   "),
+                Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" コピー   "),
+            ]);
+        }
+        if selected_is_local {
+            hints.extend([
+                Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" 更新   "),
+                Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" 削除   "),
+            ]);
+        }
+        hints.extend([
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 戻る"),
+        ]);
+        lines.push(Line::from(hints));
+    }
+
+    let area = centered(frame, 76, dialog_height(&lines, 76));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("AI Engineアカウントトークン", accent())),
         area,
     );
 }
@@ -797,6 +940,7 @@ fn draw_help(frame: &mut Frame) {
                 ("z", "ゾーンを切り替え（サーバー / スイッチほか）"),
                 ("t", "トラフィック切替 / シンプル監視の有効・停止"),
                 ("t", "監視のログ／トレース保持期間を変更"),
+                ("t", "AI Engineアカウントトークンを管理"),
                 (
                     "a / e / d",
                     "監視ストレージのアクセスキーを作成 / 編集 / 削除",

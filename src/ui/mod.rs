@@ -251,6 +251,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         | Service::Database
         | Service::Nfs => cloud_resources::draw(frame, area, app),
         Service::ObjectStorage
+        | Service::AiEngine
         | Service::SimpleMq
         | Service::EventBus
         | Service::Workflows
@@ -513,12 +514,17 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         | Service::Database
         | Service::Nfs => hints.push("z ゾーン"),
         Service::ObjectStorage
+        | Service::AiEngine
         | Service::SimpleMq
         | Service::EventBus
         | Service::Workflows
         | Service::WebAccel
         | Service::AutoScale
-        | Service::EnhancedDb => {}
+        | Service::EnhancedDb => {
+            if app.service == Service::AiEngine {
+                hints.push("t トークン管理");
+            }
+        }
     }
     hints.extend(["/ 絞込", "y コピー", "p 認証切替"]);
     hints.push(match app.mode {
