@@ -1,4 +1,4 @@
-//! さくらのクラウド モニタリングスイート API（閲覧のみ）。
+//! さくらのクラウド モニタリングスイート API。
 //!
 //! IaaS とはパスの接尾辞が違う（`api/monitoring/1.0`）ため、専用のクライアントを持つ。
 //! アラートプロジェクトを頂点に、ルールと発報履歴がぶら下がる。
@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::json;
 
 use crate::config::ApiCredentials;
 use crate::sacloud::{flexible_number, null_as_default};
@@ -240,6 +241,38 @@ impl MonitoringClient {
         })
     }
 
+    async fn send<T: DeserializeOwned>(
+        &self,
+        zone: &str,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let url = format!("{}/{zone}/{API_SUFFIX}/{path}", self.api_root);
+        let res = crate::http::send_with_retry(&self.http, || {
+            let mut request = self
+                .http
+                .request(method.clone(), &url)
+                .basic_auth(&self.token, Some(&self.secret));
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+            Ok(request.build()?)
+        })
+        .await
+        .context("モニタリングAPIへのリクエストに失敗しました")?;
+        let status = res.status();
+        let text = res
+            .text()
+            .await
+            .context("モニタリングAPIのレスポンス読み取りに失敗しました")?;
+        if !status.is_success() {
+            bail!("{}", format_api_error(status, &text));
+        }
+        let text = if text.trim().is_empty() { "{}" } else { &text };
+        serde_json::from_str(text).context("モニタリングAPIのレスポンス解析に失敗しました")
+    }
+
     /// `from` / `count` によるページングを辿る。
     async fn collect<T, F, Fut>(&self, mut fetch: F) -> Result<Vec<T>>
     where
@@ -298,6 +331,43 @@ impl MonitoringClient {
         let query = [("from", "0".to_string()), ("count", "1".to_string())];
         let res: Paginated<RawProject> = self.get(zone, "alerts/projects/", &query).await?;
         Ok(res.total)
+    }
+
+    pub async fn create_project(&self, zone: &str, name: &str, description: &str) -> Result<()> {
+        let _: serde_json::Value = self
+            .send(
+                zone,
+                Method::POST,
+                "alerts/projects/",
+                Some(json!({ "name": name, "description": description })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_project(
+        &self,
+        zone: &str,
+        resource_id: i64,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        let path = format!("alerts/projects/{resource_id}/");
+        let _: serde_json::Value = self
+            .send(
+                zone,
+                Method::PATCH,
+                &path,
+                Some(json!({ "name": name, "description": description })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_project(&self, zone: &str, resource_id: i64) -> Result<()> {
+        let path = format!("alerts/projects/{resource_id}/");
+        let _: serde_json::Value = self.send(zone, Method::DELETE, &path, None).await?;
+        Ok(())
     }
 
     pub async fn list_rules(&self, zone: &str, project: i64) -> Result<Vec<AlertRule>> {

@@ -43,7 +43,6 @@ use crate::secretmanager::{Secret, Vault};
 use crate::switch::Switch;
 
 /// 非同期処理の結果。
-#[derive(Debug)]
 pub enum Message {
     Registries(Result<Vec<ContainerRegistry>, String>),
     Users {
@@ -124,14 +123,15 @@ pub enum Message {
         result: Result<(), String>,
     },
     SimpleMonitors(Result<Vec<SimpleMonitor>, String>),
-    Vaults {
-        zone: String,
-        result: Result<Vec<Vault>, String>,
-    },
+    Vaults(Result<Vec<Vault>, String>),
     Secrets {
-        zone: String,
         vault: String,
         result: Result<Vec<Secret>, String>,
+    },
+    SecretManagerAction {
+        label: String,
+        reselect_vault: Option<String>,
+        result: Result<(), String>,
     },
     UnveiledSecret {
         name: String,
@@ -154,6 +154,12 @@ pub enum Message {
     Storages {
         zone: String,
         result: Result<Vec<Storage>, String>,
+    },
+    MonitoringAction {
+        zone: String,
+        label: String,
+        reselect_project: Option<i64>,
+        result: Result<(), String>,
     },
     /// プロファイル作成時の検証結果。検証が通ってから書き出す。
     ProfileVerified {
@@ -548,7 +554,7 @@ impl Service {
                 arg_name: "secrets",
                 countable_label: Some("Vault"),
                 count_label: Some("Vault"),
-                zoned: true,
+                zoned: false,
             },
             Service::SimpleMonitor => ServiceMeta {
                 category: Category::Ops,
@@ -1042,6 +1048,143 @@ pub struct DnsRecordForm {
     pub field: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultFormMode {
+    Create,
+    Edit,
+}
+
+/// Vault の作成・編集フォーム。
+#[derive(Debug, Clone)]
+pub struct VaultForm {
+    pub mode: VaultFormMode,
+    pub target: Option<Vault>,
+    pub name: String,
+    pub description: String,
+    pub kms_key_id: String,
+    /// カンマ区切りで入力する。
+    pub tags: String,
+    pub field: usize,
+}
+
+impl VaultForm {
+    pub const LABELS: [&'static str; 4] = ["名前", "説明", "KMS鍵ID", "タグ"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            2 => &self.kms_key_id,
+            3 => &self.tags,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match (self.mode, index) {
+            (_, 0) => Some(&mut self.name),
+            (_, 1) => Some(&mut self.description),
+            (VaultFormMode::Create, 2) => Some(&mut self.kms_key_id),
+            (_, 3) => Some(&mut self.tags),
+            _ => None,
+        }
+    }
+
+    fn tags(&self) -> Vec<String> {
+        self.tags
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretFormMode {
+    Create,
+    Update,
+}
+
+/// 値を扱うため `Debug` は必ず伏せる。
+#[derive(Clone)]
+pub struct SecretForm {
+    pub mode: SecretFormMode,
+    pub vault: Vault,
+    pub name: String,
+    pub value: String,
+    pub field: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertProjectFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlertProjectForm {
+    pub mode: AlertProjectFormMode,
+    pub target: Option<AlertProject>,
+    pub name: String,
+    pub description: String,
+    pub field: usize,
+}
+
+impl AlertProjectForm {
+    pub const LABELS: [&'static str; 2] = ["名前", "説明"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for SecretForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretForm")
+            .field("mode", &self.mode)
+            .field("vault_id", &self.vault.id)
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("field", &self.field)
+            .finish()
+    }
+}
+
+impl SecretForm {
+    pub const FIELDS: usize = 2;
+
+    pub fn new(mode: SecretFormMode, vault: Vault, name: String) -> Self {
+        Self {
+            mode,
+            vault,
+            name,
+            value: String::new(),
+            field: if mode == SecretFormMode::Create { 0 } else { 1 },
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match (self.mode, index) {
+            (SecretFormMode::Create, 0) => Some(&mut self.name),
+            (_, 1) => Some(&mut self.value),
+            _ => None,
+        }
+    }
+}
+
 impl DnsRecordForm {
     pub const LABELS: [&'static str; 4] = ["名前", "種別", "値", "TTL"];
 
@@ -1112,8 +1255,20 @@ pub enum ConfirmAction {
         version: String,
     },
     UnveilSecret {
-        zone: String,
         vault: String,
+        name: String,
+    },
+    DeleteVault {
+        id: String,
+        name: String,
+    },
+    DeleteSecret {
+        vault: String,
+        name: String,
+    },
+    DeleteAlertProject {
+        zone: String,
+        resource_id: i64,
         name: String,
     },
     PowerAction {
@@ -1149,6 +1304,9 @@ pub enum Overlay {
     DnsRecordForm(DnsRecordForm),
     DnsZoneForm(DnsZoneForm),
     SimpleMonitorForm(SimpleMonitorForm),
+    VaultForm(VaultForm),
+    SecretForm(SecretForm),
+    AlertProjectForm(AlertProjectForm),
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
@@ -1995,21 +2153,51 @@ impl App {
                     }
                 }
             },
-            Message::Vaults { zone, result } => {
-                let loadable = self.store_result(result);
-                self.secrets.vaults.insert(zone, loadable);
-                self.secrets.vault_state.select(None);
+            Message::Vaults(result) => {
+                let reselect = self.secrets.reselect_vault.take();
+                self.secrets.vaults = match result {
+                    Ok(vaults) => {
+                        let index = reselect
+                            .as_deref()
+                            .and_then(|id| vaults.iter().position(|vault| vault.id == id));
+                        self.secrets.vault_state.select(index);
+                        Loadable::Ready(vaults)
+                    }
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        self.secrets.vault_state.select(None);
+                        Loadable::Failed(err)
+                    }
+                };
                 self.ensure_loaded();
             }
-            Message::Secrets {
-                zone,
-                vault,
+            Message::Secrets { vault, result } => {
+                let loadable = self.store_result(result);
+                self.secrets.secrets.insert(vault, loadable);
+                self.ensure_loaded();
+            }
+            Message::SecretManagerAction {
+                label,
+                reselect_vault,
                 result,
-            } => {
-                let loadable = self.store_result(result);
-                self.secrets.secrets.insert((zone, vault), loadable);
-                self.ensure_loaded();
-            }
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.secrets.reselect_vault = reselect_vault;
+                    self.secrets.vaults = Loadable::Idle;
+                    self.secrets.secrets.clear();
+                    self.secrets_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::UnveiledSecret { name, result } => match result {
                 Ok(value) => {
                     // 値はステータス行には出さず、閉じられるダイアログにだけ出す。
@@ -2032,9 +2220,24 @@ impl App {
                 }
             },
             Message::Projects { zone, result } => {
-                let loadable = self.store_result(result);
+                let reselect = self.monitoring.reselect_project.take();
+                let loadable = match result {
+                    Ok(projects) => {
+                        let index = reselect.and_then(|id| {
+                            projects
+                                .iter()
+                                .position(|project| project.resource_id == id)
+                        });
+                        self.monitoring.project_state.select(index);
+                        Loadable::Ready(projects)
+                    }
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        self.monitoring.project_state.select(None);
+                        Loadable::Failed(err)
+                    }
+                };
                 self.monitoring.projects.insert(zone, loadable);
-                self.monitoring.project_state.select(None);
                 self.ensure_loaded();
             }
             Message::AlertRules {
@@ -2060,6 +2263,30 @@ impl App {
                 self.monitoring.storages.insert(zone, loadable);
                 self.ensure_loaded();
             }
+            Message::MonitoringAction {
+                zone,
+                label,
+                reselect_project,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.reselect_project = reselect_project;
+                    self.monitoring.projects.remove(&zone);
+                    self.monitoring.rules.retain(|(z, _), _| z != &zone);
+                    self.monitoring.histories.retain(|(z, _), _| z != &zone);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::ProfileVerified { form, result } => match result {
                 Ok(zones) => {
                     // 環境ごとにゾーン名が違うので、取れた一覧に差し替える。
@@ -2422,6 +2649,24 @@ impl App {
                     value.push_str(text);
                 }
             }
+            Some(Overlay::VaultForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::SecretForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::AlertProjectForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
             Some(Overlay::Confirm { verify, typed, .. }) if verify.is_some() => {
                 typed.push_str(text)
             }
@@ -2646,7 +2891,7 @@ impl App {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&name).await,
                     Service::Switch => sacloud.count_switches(&name).await,
-                    Service::Secrets => sacloud.count_vaults(&name).await,
+                    Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&name).await,
                     _ => Ok(0),
                 };
@@ -2692,7 +2937,7 @@ impl App {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&zone).await,
                     Service::Switch => sacloud.count_switches(&zone).await,
-                    Service::Secrets => sacloud.count_vaults(&zone).await,
+                    Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
                     // 件数専用の API が無いものは一覧を引いて数える。
                     Service::Registry => sacloud.list_registries().await.map(|v| v.len()),
@@ -2740,7 +2985,7 @@ impl App {
             Service::SimpleMonitor => self.simple_monitor.monitors.ready()?.len(),
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
-            Service::Secrets => self.secrets.vaults.get(&self.zone)?.ready()?.len(),
+            Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
             // 請求画面で別の年に移っていることがあるので、
             // 今年を見ているときだけ流用する。
@@ -3362,7 +3607,7 @@ impl App {
             Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
             Service::Switch => self.switch_refresh(),
-            // 閲覧のみのサービスは、該当キャッシュを捨てて読み直すだけ。
+            // 複数ペインのサービスは、該当キャッシュを捨てて読み直す。
             Service::Dns => {
                 self.dns.zones = Loadable::Idle;
                 self.dns_ensure_loaded();
@@ -3372,7 +3617,7 @@ impl App {
                 self.monitor_ensure_loaded();
             }
             Service::Secrets => {
-                self.secrets.vaults.remove(&self.zone);
+                self.secrets.vaults = Loadable::Idle;
                 self.secrets.secrets.clear();
                 self.secrets_ensure_loaded();
             }
@@ -3761,7 +4006,14 @@ impl App {
                     Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
                 }
             }
-            ConfirmAction::UnveilSecret { zone, vault, name } => self.run_unveil(zone, vault, name),
+            ConfirmAction::UnveilSecret { vault, name } => self.run_unveil(vault, name),
+            ConfirmAction::DeleteVault { id, name } => self.run_delete_vault(id, name),
+            ConfirmAction::DeleteSecret { vault, name } => self.run_delete_secret(vault, name),
+            ConfirmAction::DeleteAlertProject {
+                zone,
+                resource_id,
+                name,
+            } => self.run_delete_alert_project(zone, resource_id, name),
             ConfirmAction::PowerAction {
                 id,
                 zone,
@@ -4209,6 +4461,30 @@ impl App {
                     self.overlay = Some(Overlay::SimpleMonitorForm(form));
                 }
             },
+            Overlay::VaultForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_vault_form(form),
+                _ => {
+                    edit_vault_form(&mut form, key);
+                    self.overlay = Some(Overlay::VaultForm(form));
+                }
+            },
+            Overlay::SecretForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_secret_form(form),
+                _ => {
+                    edit_secret_form(&mut form, key);
+                    self.overlay = Some(Overlay::SecretForm(form));
+                }
+            },
+            Overlay::AlertProjectForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_alert_project_form(form),
+                _ => {
+                    edit_alert_project_form(&mut form, key);
+                    self.overlay = Some(Overlay::AlertProjectForm(form));
+                }
+            },
             Overlay::ServicePicker { mut index, initial } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') if initial => self.should_quit = true,
                 KeyCode::Esc | KeyCode::Char('q') => {}
@@ -4434,6 +4710,69 @@ fn edit_simple_monitor_form(form: &mut SimpleMonitorForm, key: KeyEvent) {
     }
 }
 
+fn edit_vault_form(form: &mut VaultForm, key: KeyEvent) {
+    let fields = VaultForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_alert_project_form(form: &mut AlertProjectForm, key: KeyEvent) {
+    let fields = AlertProjectForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_secret_form(form: &mut SecretForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down | KeyCode::BackTab | KeyCode::Up
+            if form.mode == SecretFormMode::Update =>
+        {
+            form.field = 1
+        }
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % SecretForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + SecretForm::FIELDS - 1) % SecretForm::FIELDS
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn edit_profile_form(form: &mut ProfileForm, key: KeyEvent) {
     match key.code {
         KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % ProfileForm::FIELDS,
@@ -4647,12 +4986,31 @@ mod tests {
         assert!(Service::Switch.is_zoned());
         assert_eq!(Service::Switch.arg_name(), "switch");
         assert_eq!(Service::Secrets.category(), Category::Security);
-        assert!(Service::Secrets.is_zoned());
+        // Vault はAPI URLにゾーン名を含むが、リソース自体はグローバル。
+        assert!(!Service::Secrets.is_zoned());
         // 分類が同じでもゾーン依存ではないもの。
         assert_eq!(Service::Registry.category(), Category::Container);
         assert!(!Service::Registry.is_zoned());
         assert!(!Service::Dns.is_zoned());
         assert!(!Service::Billing.is_zoned());
+    }
+
+    #[test]
+    fn secret_form_debug_redacts_value() {
+        let vault = Vault {
+            id: "vault-id".to_string(),
+            name: "prod".to_string(),
+            description: String::new(),
+            tags: Vec::new(),
+            kms_key_id: "kms-id".to_string(),
+            created_at: None,
+            modified_at: None,
+        };
+        let mut form = SecretForm::new(SecretFormMode::Create, vault, "db-password".to_string());
+        form.value = "must-not-appear".to_string();
+        let debug = format!("{form:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("must-not-appear"));
     }
 }
 

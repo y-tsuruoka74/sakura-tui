@@ -382,13 +382,19 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         }
         Service::Account => {}
         Service::Secrets => {
-            hints.push("z ゾーン");
             hints.push(if app.secrets.focus == crate::app::ListFocus::Left {
                 "Enter シークレットへ"
             } else {
                 "Esc Vault へ"
             });
             hints.push("u 値を表示");
+            if app.mode == Mode::Write {
+                if app.secrets.focus == crate::app::ListFocus::Left {
+                    hints.extend(["n Vault作成", "E 編集", "D 削除"]);
+                } else {
+                    hints.extend(["a 登録", "e 新バージョン", "d 削除"]);
+                }
+            }
         }
         Service::Monitoring => {
             hints.push("z ゾーン");
@@ -398,6 +404,12 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 "Esc プロジェクトへ"
             });
             hints.push("Tab タブ");
+            if app.mode == Mode::Write
+                && app.monitoring.focus == crate::app::ListFocus::Left
+                && app.monitoring.tab != crate::app::MonitoringTab::Storages
+            {
+                hints.extend(["n プロジェクト作成", "E 編集", "D 削除"]);
+            }
         }
         Service::Billing => {
             // 月一覧では ↑↓ が月、明細に入ると ↑↓ が明細になる。

@@ -8,10 +8,11 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, accent};
 use crate::app::{
-    App, Availability, Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode,
-    LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
-    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, SwitchForm, SwitchFormMode, UserForm,
-    UserFormMode,
+    AlertProjectForm, AlertProjectFormMode, App, Availability, Category, DnsRecordForm,
+    DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LoginForm, Overlay, ProfileForm,
+    ProfileStorage, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm,
+    SimpleMonitorFormMode, StatusKind, SwitchForm, SwitchFormMode, UserForm, UserFormMode,
+    VaultForm, VaultFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -43,6 +44,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
         Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),
         Overlay::SimpleMonitorForm(form) => draw_simple_monitor_form(frame, form),
+        Overlay::VaultForm(form) => draw_vault_form(frame, form),
+        Overlay::SecretForm(form) => draw_secret_form(frame, form),
+        Overlay::AlertProjectForm(form) => draw_alert_project_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
@@ -1142,6 +1146,106 @@ fn draw_simple_monitor_form(frame: &mut Frame, form: &SimpleMonitorForm) {
     ]));
 
     let area = centered(frame, 82, dialog_height(&lines, 82));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_vault_form(frame: &mut Frame, form: &VaultForm) {
+    let title = match form.mode {
+        VaultFormMode::Create => "Vaultの作成".to_string(),
+        VaultFormMode::Edit => format!("Vaultの編集 — {}", form.name),
+    };
+    let mut lines: Vec<Line> = VaultForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        if form.mode == VaultFormMode::Create {
+            "KMS鍵IDは必須です。タグはカンマ区切りで入力します。"
+        } else {
+            "KMS鍵は編集では変更せず、現在の鍵を維持します。"
+        },
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(form_footer());
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_secret_form(frame: &mut Frame, form: &SecretForm) {
+    let title = match form.mode {
+        SecretFormMode::Create => format!("シークレットの登録 — {}", form.vault.name),
+        SecretFormMode::Update => format!("新バージョンの登録 — {}", form.name),
+    };
+    let mut lines = vec![
+        input_line("名前", &form.name, form.field == 0, false),
+        input_line("値", &form.value, form.field == 1, true),
+        Line::raw(""),
+        Line::from(Span::styled(
+            if form.mode == SecretFormMode::Create {
+                "値は常に伏せて表示し、65,536バイトまで登録できます。"
+            } else {
+                "名前は変更せず、入力した値を新しいバージョンとして登録します。"
+            },
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    // フォームの値はこのダイアログを閉じると画面状態から捨てられる。
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(std::mem::take(&mut lines))
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn form_footer() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ])
+}
+
+fn draw_alert_project_form(frame: &mut Frame, form: &AlertProjectForm) {
+    let title = match form.mode {
+        AlertProjectFormMode::Create => "アラートプロジェクトの作成".to_string(),
+        AlertProjectFormMode::Edit => {
+            format!("アラートプロジェクトの編集 — {}", form.name)
+        }
+    };
+    let mut lines: Vec<Line> = AlertProjectForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(form_footer());
+    let area = centered(frame, 78, dialog_height(&lines, 78));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)

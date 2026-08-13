@@ -6,8 +6,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    App, ConfirmAction, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable,
-    Message, Overlay, Pane, SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, fmt_error,
+    AlertProjectForm, AlertProjectFormMode, App, ConfirmAction, DnsRecordForm, DnsRecordFormMode,
+    DnsZoneForm, DnsZoneFormMode, Loadable, Message, Overlay, Pane, SecretForm, SecretFormMode,
+    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, VaultForm, VaultFormMode, fmt_error,
     matches,
 };
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor, SimpleMonitorInput};
@@ -46,13 +47,15 @@ pub struct SimpleMonitorView {
 /// シークレットマネージャ画面（Vault → シークレット）。
 #[derive(Debug, Default)]
 pub struct SecretsView {
-    /// ゾーンごとの Vault 一覧。
-    pub vaults: HashMap<String, Loadable<Vec<Vault>>>,
+    /// Vault はグローバルリソース。
+    pub vaults: Loadable<Vec<Vault>>,
     pub vault_state: TableState,
     pub focus: ListFocus,
-    /// `(ゾーン, VaultID)` をキーにしたシークレット一覧。値は含まない。
-    pub secrets: HashMap<(String, String), Loadable<Vec<Secret>>>,
+    /// Vault ID をキーにしたシークレット一覧。値は含まない。
+    pub secrets: HashMap<String, Loadable<Vec<Secret>>>,
     pub secret_state: TableState,
+    /// 更新後に同じ Vault を選び直す。
+    pub reselect_vault: Option<String>,
 }
 
 /// モニタリングスイート画面のタブ。
@@ -94,6 +97,7 @@ pub struct MonitoringView {
     pub history_state: TableState,
     pub storages: HashMap<String, Loadable<Vec<Storage>>>,
     pub storage_state: TableState,
+    pub reselect_project: Option<i64>,
 }
 
 impl App {
@@ -323,12 +327,7 @@ impl App {
     // --- シークレットマネージャ ---
 
     pub fn visible_vaults(&self) -> Vec<Vault> {
-        let Some(items) = self
-            .secrets
-            .vaults
-            .get(&self.zone)
-            .and_then(Loadable::ready)
-        else {
+        let Some(items) = self.secrets.vaults.ready() else {
             return Vec::new();
         };
         let filter = self.filters.get(Pane::Vaults);
@@ -351,7 +350,7 @@ impl App {
         let loadable = self
             .secrets
             .secrets
-            .get(&(self.zone.clone(), vault.id))
+            .get(&vault.id)
             .cloned()
             .unwrap_or(Loadable::Idle);
         let Loadable::Ready(items) = loadable else {
@@ -498,15 +497,14 @@ impl App {
     }
 
     pub(super) fn secrets_ensure_loaded(&mut self) {
-        let zone = self.zone.clone();
-        if self.secrets.vaults.get(&zone).is_none_or(Loadable::is_idle) {
-            self.secrets.vaults.insert(zone.clone(), Loadable::Loading);
+        if self.secrets.vaults.is_idle() {
+            self.secrets.vaults = Loadable::Loading;
             self.inflight += 1;
             let client = self.sacloud.clone();
             let tx = self.tx.clone();
             tokio::spawn(async move {
-                let result = client.list_vaults(&zone).await.map_err(fmt_error);
-                let _ = tx.send(Message::Vaults { zone, result });
+                let result = client.list_vaults().await.map_err(fmt_error);
+                let _ = tx.send(Message::Vaults(result));
             });
             return;
         }
@@ -514,7 +512,7 @@ impl App {
         let Some(vault) = self.selected_vault() else {
             return;
         };
-        let key = (zone.clone(), vault.id.clone());
+        let key = vault.id.clone();
         if self.secrets.secrets.get(&key).is_none_or(Loadable::is_idle) {
             self.secrets.secrets.insert(key, Loadable::Loading);
             self.inflight += 1;
@@ -522,12 +520,8 @@ impl App {
             let tx = self.tx.clone();
             let vault_id = vault.id;
             tokio::spawn(async move {
-                let result = client
-                    .list_secrets(&zone, &vault_id)
-                    .await
-                    .map_err(fmt_error);
+                let result = client.list_secrets(&vault_id).await.map_err(fmt_error);
                 let _ = tx.send(Message::Secrets {
-                    zone,
                     vault: vault_id,
                     result,
                 });
@@ -950,8 +944,267 @@ impl App {
             }
             // 値の取得は明示操作のときだけ。
             KeyCode::Char('u') => self.confirm_unveil(),
+            KeyCode::Char('n') if self.secrets.focus == ListFocus::Left => self.open_create_vault(),
+            KeyCode::Char('E') if self.secrets.focus == ListFocus::Left => self.open_edit_vault(),
+            KeyCode::Char('D') if self.secrets.focus == ListFocus::Left => {
+                self.confirm_delete_vault()
+            }
+            KeyCode::Char('a') if self.secrets.focus == ListFocus::Right => {
+                self.open_create_secret()
+            }
+            KeyCode::Char('e') if self.secrets.focus == ListFocus::Right => {
+                self.open_update_secret()
+            }
+            KeyCode::Char('d') if self.secrets.focus == ListFocus::Right => {
+                self.confirm_delete_secret()
+            }
             _ => {}
         }
+    }
+
+    fn open_create_vault(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::VaultForm(VaultForm {
+            mode: VaultFormMode::Create,
+            target: None,
+            name: String::new(),
+            description: String::new(),
+            kms_key_id: String::new(),
+            tags: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_vault(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(vault) = self.selected_vault() else {
+            self.set_status("Vaultを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::VaultForm(VaultForm {
+            mode: VaultFormMode::Edit,
+            target: Some(vault.clone()),
+            name: vault.name,
+            description: vault.description,
+            kms_key_id: vault.kms_key_id,
+            tags: vault.tags.join(", "),
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_vault(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(vault) = self.selected_vault() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "Vaultの削除".to_string(),
+            body: format!(
+                "Vault「{}」を削除します。\n課金はVaultの削除時に停止します。\n\nこの操作は取り消せません。",
+                vault.name
+            ),
+            verify: Some(vault.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteVault {
+                id: vault.id,
+                name: vault.name,
+            },
+        });
+    }
+
+    fn open_create_secret(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(vault) = self.selected_vault() else {
+            self.set_status("Vaultを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::SecretForm(SecretForm::new(
+            SecretFormMode::Create,
+            vault,
+            String::new(),
+        )));
+    }
+
+    fn open_update_secret(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(vault), Some(secret)) = (self.selected_vault(), self.selected_secret()) else {
+            self.set_status("シークレットを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::SecretForm(SecretForm::new(
+            SecretFormMode::Update,
+            vault,
+            secret.name,
+        )));
+    }
+
+    fn confirm_delete_secret(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(vault), Some(secret)) = (self.selected_vault(), self.selected_secret()) else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "シークレットの削除".to_string(),
+            body: format!(
+                "Vault「{}」のシークレット「{}」と全バージョンを削除します。\n\nこの操作は取り消せません。",
+                vault.name, secret.name
+            ),
+            verify: Some(secret.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteSecret {
+                vault: vault.id,
+                name: secret.name,
+            },
+        });
+    }
+
+    pub(super) fn submit_vault_form(&mut self, mut form: VaultForm) {
+        form.name = form.name.trim().to_string();
+        form.kms_key_id = form.kms_key_id.trim().to_string();
+        if form.name.is_empty() {
+            self.set_status("Vaultの名前を入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::VaultForm(form));
+            return;
+        }
+        if form.mode == VaultFormMode::Create && form.kms_key_id.is_empty() {
+            self.set_status("KMS鍵IDを入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::VaultForm(form));
+            return;
+        }
+
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let tags = form.tags();
+        let name = form.name;
+        let description = form.description;
+        let kms_key_id = form.kms_key_id;
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            VaultFormMode::Create => tokio::spawn(async move {
+                let label = format!("Vault「{name}」を作成");
+                let result = client
+                    .create_vault(&name, &description, &kms_key_id, &tags)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::SecretManagerAction {
+                    label,
+                    reselect_vault: None,
+                    result,
+                });
+            }),
+            VaultFormMode::Edit => {
+                let Some(vault) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象のVaultがありません", StatusKind::Error);
+                    return;
+                };
+                let vault_id = vault.id.clone();
+                tokio::spawn(async move {
+                    let label = format!("Vault「{name}」を更新");
+                    let result = client
+                        .update_vault(&vault, &name, &description, &tags)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::SecretManagerAction {
+                        label,
+                        reselect_vault: Some(vault_id),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn submit_secret_form(&mut self, mut form: SecretForm) {
+        form.name = form.name.trim().to_string();
+        if form.name.is_empty() || form.value.is_empty() {
+            self.set_status(
+                "シークレットの名前と値を入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::SecretForm(form));
+            return;
+        }
+        if form.value.len() > 65_536 {
+            self.set_status(
+                "シークレット値は65,536バイト以下にしてください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::SecretForm(form));
+            return;
+        }
+
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let vault_id = form.vault.id;
+        let name = form.name;
+        let value = form.value;
+        let verb = if form.mode == SecretFormMode::Create {
+            "登録"
+        } else {
+            "新バージョンを登録"
+        };
+        let label = format!("シークレット「{name}」を{verb}");
+        let reselect_vault = vault_id.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .put_secret(&vault_id, &name, value)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::SecretManagerAction {
+                label,
+                reselect_vault: Some(reselect_vault),
+                result,
+            });
+        });
+    }
+
+    pub(super) fn run_delete_vault(&mut self, id: String, name: String) {
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let label = format!("Vault「{name}」を削除");
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client.delete_vault(&id).await.map_err(fmt_error);
+            let _ = tx.send(Message::SecretManagerAction {
+                label,
+                reselect_vault: None,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn run_delete_secret(&mut self, vault: String, name: String) {
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let label = format!("シークレット「{name}」を削除");
+        let reselect_vault = vault.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client.delete_secret(&vault, &name).await.map_err(fmt_error);
+            let _ = tx.send(Message::SecretManagerAction {
+                label,
+                reselect_vault: Some(reselect_vault),
+                result,
+            });
+        });
     }
 
     /// シークレットの値を表示する前に確認を挟む。
@@ -973,21 +1226,20 @@ impl App {
             verify: None,
             typed: String::new(),
             action: super::ConfirmAction::UnveilSecret {
-                zone: self.zone.clone(),
                 vault: vault.id,
                 name: secret.name,
             },
         });
     }
 
-    pub(super) fn run_unveil(&mut self, zone: String, vault: String, name: String) {
+    pub(super) fn run_unveil(&mut self, vault: String, name: String) {
         let client = self.sacloud.clone();
         let tx = self.tx.clone();
         self.inflight += 1;
         let secret_name = name.clone();
         tokio::spawn(async move {
             let result = client
-                .unveil_secret(&zone, &vault, &name, None)
+                .unveil_secret(&vault, &name, None)
                 .await
                 .map_err(fmt_error);
             let _ = tx.send(Message::UnveiledSecret {
@@ -1011,8 +1263,155 @@ impl App {
             KeyCode::Char('1') => self.set_monitoring_tab(MonitoringTab::Rules),
             KeyCode::Char('2') => self.set_monitoring_tab(MonitoringTab::Histories),
             KeyCode::Char('3') => self.set_monitoring_tab(MonitoringTab::Storages),
+            KeyCode::Char('n')
+                if self.monitoring.focus == ListFocus::Left
+                    && self.monitoring.tab != MonitoringTab::Storages =>
+            {
+                self.open_create_alert_project()
+            }
+            KeyCode::Char('E')
+                if self.monitoring.focus == ListFocus::Left
+                    && self.monitoring.tab != MonitoringTab::Storages =>
+            {
+                self.open_edit_alert_project()
+            }
+            KeyCode::Char('D')
+                if self.monitoring.focus == ListFocus::Left
+                    && self.monitoring.tab != MonitoringTab::Storages =>
+            {
+                self.confirm_delete_alert_project()
+            }
             _ => {}
         }
+    }
+
+    fn open_create_alert_project(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::AlertProjectForm(AlertProjectForm {
+            mode: AlertProjectFormMode::Create,
+            target: None,
+            name: String::new(),
+            description: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_alert_project(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_project() else {
+            self.set_status("プロジェクトを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::AlertProjectForm(AlertProjectForm {
+            mode: AlertProjectFormMode::Edit,
+            target: Some(project.clone()),
+            name: project.name,
+            description: project.description,
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_alert_project(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_project() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "アラートプロジェクトの削除".to_string(),
+            body: format!(
+                "アラートプロジェクト「{}」を削除します。\n関連するルールと履歴へアクセスできなくなります。\n\nこの操作は取り消せません。",
+                project.name
+            ),
+            verify: Some(project.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteAlertProject {
+                zone: self.zone.clone(),
+                resource_id: project.resource_id,
+                name: project.name,
+            },
+        });
+    }
+
+    pub(super) fn submit_alert_project_form(&mut self, mut form: AlertProjectForm) {
+        form.name = form.name.trim().to_string();
+        if form.name.is_empty() {
+            self.set_status("プロジェクト名を入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::AlertProjectForm(form));
+            return;
+        }
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let name = form.name;
+        let description = form.description;
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            AlertProjectFormMode::Create => tokio::spawn(async move {
+                let label = format!("アラートプロジェクト「{name}」を作成");
+                let result = client
+                    .create_project(&zone, &name, &description)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::MonitoringAction {
+                    zone,
+                    label,
+                    reselect_project: None,
+                    result,
+                });
+            }),
+            AlertProjectFormMode::Edit => {
+                let Some(project) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let label = format!("アラートプロジェクト「{name}」を更新");
+                    let result = client
+                        .update_project(&zone, project.resource_id, &name, &description)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::MonitoringAction {
+                        zone,
+                        label,
+                        reselect_project: Some(project.resource_id),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_alert_project(
+        &mut self,
+        zone: String,
+        resource_id: i64,
+        name: String,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let label = format!("アラートプロジェクト「{name}」を削除");
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_project(&zone, resource_id)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::MonitoringAction {
+                zone,
+                label,
+                reselect_project: None,
+                result,
+            });
+        });
     }
 
     /// タブを選んだらその中身を操作したいはずなので、右に移る。

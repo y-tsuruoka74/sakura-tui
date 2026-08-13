@@ -1,7 +1,7 @@
-//! さくらのクラウド シークレットマネージャ API（閲覧のみ）。
+//! さくらのクラウド シークレットマネージャ API。
 //!
 //! IaaS と同じ `api/cloud/1.1` の下にあるため `SacloudClient` を流用できる。
-//! Vault はゾーンに属するので、ゾーンを指定して呼ぶ。
+//! Vault はグローバルリソースなので、通信には既定ゾーンを使う。
 //!
 //! 値の取得（unveil）は明示的に要求したときだけ行う。一覧では名前と
 //! 最新バージョンしか返らないので、一覧を眺めているだけで値が漏れることはない。
@@ -26,6 +26,7 @@ pub struct Vault {
     pub tags: Vec<String>,
     pub kms_key_id: String,
     pub created_at: Option<String>,
+    pub modified_at: Option<String>,
 }
 
 /// Vault 内のシークレット。値は含まない。
@@ -59,6 +60,8 @@ struct RawVault {
     kms_key_id: String,
     #[serde(rename = "CreatedAt")]
     created_at: Option<String>,
+    #[serde(rename = "ModifiedAt")]
+    modified_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,18 +105,19 @@ impl From<RawVault> for Vault {
             tags: raw.tags,
             kms_key_id: raw.kms_key_id,
             created_at: raw.created_at,
+            modified_at: raw.modified_at,
         }
     }
 }
 
 impl SacloudClient {
-    pub async fn list_vaults(&self, zone: &str) -> Result<Vec<Vault>> {
+    pub async fn list_vaults(&self) -> Result<Vec<Vault>> {
         let mut out = Vec::new();
         let mut from = 0usize;
         for _ in 0..MAX_PAGES {
             let body = json!({ "From": from, "Count": PAGE_SIZE });
             let res: PaginatedVaultList = self
-                .request_in_zone(zone, Method::GET, "secretmanager/vaults", Some(body))
+                .request_common(Method::GET, "secretmanager/vaults", Some(body))
                 .await?;
             let received = res.vaults.len();
             out.extend(res.vaults.into_iter().map(Vault::from));
@@ -125,24 +129,23 @@ impl SacloudClient {
         Ok(out)
     }
 
-    /// 指定ゾーンの Vault 件数だけを数える。
-    pub async fn count_vaults(&self, zone: &str) -> Result<usize> {
+    /// Vault 件数だけを数える。
+    pub async fn count_vaults(&self) -> Result<usize> {
         let body = json!({ "From": 0, "Count": 1 });
         let res: PaginatedVaultList = self
-            .request_in_zone(zone, Method::GET, "secretmanager/vaults", Some(body))
+            .request_common(Method::GET, "secretmanager/vaults", Some(body))
             .await?;
         Ok(res.total)
     }
 
-    pub async fn list_secrets(&self, zone: &str, vault_id: &str) -> Result<Vec<Secret>> {
+    pub async fn list_secrets(&self, vault_id: &str) -> Result<Vec<Secret>> {
         let path = format!("secretmanager/vaults/{vault_id}/secrets");
         let mut out = Vec::new();
         let mut from = 0usize;
         for _ in 0..MAX_PAGES {
             let body = json!({ "From": from, "Count": PAGE_SIZE });
-            let res: PaginatedSecretList = self
-                .request_in_zone(zone, Method::GET, &path, Some(body))
-                .await?;
+            let res: PaginatedSecretList =
+                self.request_common(Method::GET, &path, Some(body)).await?;
             let received = res.secrets.len();
             out.extend(res.secrets.into_iter().map(|s| Secret {
                 name: s.name,
@@ -162,7 +165,6 @@ impl SacloudClient {
     /// 明示的に要求されたときだけ呼ぶこと。`version` が `None` なら最新版。
     pub async fn unveil_secret(
         &self,
-        zone: &str,
         vault_id: &str,
         name: &str,
         version: Option<i64>,
@@ -173,14 +175,77 @@ impl SacloudClient {
             payload["Version"] = json!(version);
         }
         let res: UnveilResponse = self
-            .request_in_zone(
-                zone,
-                Method::POST,
-                &path,
-                Some(json!({ "Secret": payload })),
-            )
+            .request_common(Method::POST, &path, Some(json!({ "Secret": payload })))
             .await?;
         Ok(res.secret.map(|s| s.value).unwrap_or_default())
+    }
+
+    pub async fn create_vault(
+        &self,
+        name: &str,
+        description: &str,
+        kms_key_id: &str,
+        tags: &[String],
+    ) -> Result<()> {
+        let body = json!({
+            "Vault": {
+                "Name": name,
+                "Description": description,
+                "KmsKeyID": kms_key_id,
+                "Tags": tags,
+            }
+        });
+        let _: serde_json::Value = self
+            .request_common(Method::POST, "secretmanager/vaults", Some(body))
+            .await?;
+        Ok(())
+    }
+
+    /// Vault のメタデータを更新する。KMS 鍵は現在値を維持する。
+    pub async fn update_vault(
+        &self,
+        vault: &Vault,
+        name: &str,
+        description: &str,
+        tags: &[String],
+    ) -> Result<()> {
+        let body = json!({
+            "Vault": {
+                "ID": vault.id,
+                "Name": name,
+                "Description": description,
+                "KmsKeyID": vault.kms_key_id,
+                "Tags": tags,
+                "CreatedAt": vault.created_at,
+                "ModifiedAt": vault.modified_at,
+            }
+        });
+        let path = format!("secretmanager/vaults/{}", vault.id);
+        let _: serde_json::Value = self.request_common(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_vault(&self, vault_id: &str) -> Result<()> {
+        let path = format!("secretmanager/vaults/{vault_id}");
+        let _: serde_json::Value = self.request_common(Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
+    /// 同名が存在する場合は新しいバージョンを登録する。
+    pub async fn put_secret(&self, vault_id: &str, name: &str, value: String) -> Result<()> {
+        let path = format!("secretmanager/vaults/{vault_id}/secrets");
+        let body = json!({ "Secret": { "Name": name, "Value": value } });
+        let _: serde_json::Value = self.request_common(Method::POST, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    pub async fn delete_secret(&self, vault_id: &str, name: &str) -> Result<()> {
+        let path = format!("secretmanager/vaults/{vault_id}/secrets");
+        let body = json!({ "Secret": { "Name": name } });
+        let _: serde_json::Value = self
+            .request_common(Method::DELETE, &path, Some(body))
+            .await?;
+        Ok(())
     }
 }
 

@@ -351,19 +351,14 @@ pub fn draw_secrets(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let focus_secrets = app.secrets.focus == ListFocus::Right;
-    let vault_data = app
-        .secrets
-        .vaults
-        .get(&app.zone)
-        .cloned()
-        .unwrap_or(Loadable::Idle);
+    let vault_data = app.secrets.vaults.clone();
     table_pane(
         frame,
         chunks[0],
         TableSpec {
             title: "Vault",
             idle: "読み込み中…",
-            empty: "Vault がありません（z でゾーンを切り替え）",
+            empty: "Vault がありません",
             header: vec!["名前", "説明 / 作成日時", "暗号鍵"],
             widths: vec![
                 Constraint::Min(12),
