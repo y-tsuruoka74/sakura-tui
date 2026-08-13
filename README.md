@@ -2,7 +2,7 @@
 
 さくらインターネットのサービスをターミナルから操作する TUI（[ratatui](https://ratatui.rs) 製）。
 
-`s` キーでサービスを切り替えて使います（25 種類）。
+`s` キーでサービスを切り替えて使います（29 種類）。
 
 ### コンテナレジストリ
 - レジストリの一覧・詳細・作成・編集・削除
@@ -45,7 +45,11 @@
 ### IaaSリソース（閲覧のみ）
 - ディスク（容量、プラン、接続方式、接続サーバー、暗号化）
 - ルータ＋スイッチ（帯域、スイッチ、ネットワーク、マスク長、ゲートウェイ）
+- パケットフィルタ（ルール数とAllow/Deny、プロトコル、送信元、ポート）
+- ブリッジ接続（リージョン、接続スイッチ、サービスクラス）
 - ロードバランサ、VPCルータ、データベース、NFSアプライアンス
+- GSLB（FQDN、監視方法、ポート、実サーバ数）
+- モバイルゲートウェイ（電源状態、接続スイッチ、IPアドレス、インターネット接続）
 - 一覧には名前、状態、プラン、接続先、IDを表示し、右ペインでサービス固有情報を確認
 - すべてゾーン切り替え、絞り込み、リソースIDのコピーに対応
 
@@ -135,7 +139,8 @@ cargo build --release
   -z, --zone <ゾーン>     ゾーン依存のサービスで使うゾーン (例: is1a)
   -s, --service <名前>    起動時に開くサービス
                          server / disk / registry / apprun / dedicated /
-                         switch / internet / loadbalancer / vpcrouter /
+                         switch / internet / packet-filter / bridge /
+                         loadbalancer / vpcrouter / gslb / mobile-gateway /
                          database / nfs / object-storage / simplemq /
                          enhanced-db / ai-engine / eventbus / workflows / webaccel /
                          autoscale / dns / secrets / monitor / monitoring /

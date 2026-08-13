@@ -247,8 +247,12 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Switch => switch::draw(frame, area, app),
         Service::Disk
         | Service::Internet
+        | Service::PacketFilter
+        | Service::Bridge
         | Service::LoadBalancer
         | Service::VpcRouter
+        | Service::Gslb
+        | Service::MobileGateway
         | Service::Database
         | Service::Nfs => cloud_resources::draw(frame, area, app),
         Service::ObjectStorage
@@ -534,8 +538,12 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         }
         Service::Disk
         | Service::Internet
+        | Service::PacketFilter
+        | Service::Bridge
         | Service::LoadBalancer
         | Service::VpcRouter
+        | Service::Gslb
+        | Service::MobileGateway
         | Service::Database
         | Service::Nfs => hints.push("z ゾーン"),
         Service::ObjectStorage

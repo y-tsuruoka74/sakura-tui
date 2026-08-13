@@ -623,8 +623,12 @@ pub enum Service {
     Switch,
     Disk,
     Internet,
+    PacketFilter,
+    Bridge,
     LoadBalancer,
     VpcRouter,
+    Gslb,
+    MobileGateway,
     Database,
     Nfs,
     ObjectStorage,
@@ -651,7 +655,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 25] = [
+    pub const ALL: [Service; 29] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -667,8 +671,12 @@ impl Service {
         // ネットワーク
         Service::Switch,
         Service::Internet,
+        Service::PacketFilter,
+        Service::Bridge,
         Service::LoadBalancer,
         Service::VpcRouter,
+        Service::Gslb,
+        Service::MobileGateway,
         Service::Dns,
         Service::WebAccel,
         // ストレージ・データ
@@ -788,6 +796,22 @@ impl Service {
                 count_label: Some("台"),
                 zoned: true,
             },
+            Service::PacketFilter => ServiceMeta {
+                category: Category::Network,
+                title: "パケットフィルタ",
+                arg_name: "packet-filter",
+                countable_label: Some("パケットフィルタ"),
+                count_label: Some("件"),
+                zoned: true,
+            },
+            Service::Bridge => ServiceMeta {
+                category: Category::Network,
+                title: "ブリッジ接続",
+                arg_name: "bridge",
+                countable_label: Some("ブリッジ"),
+                count_label: Some("件"),
+                zoned: true,
+            },
             Service::LoadBalancer => ServiceMeta {
                 category: Category::Network,
                 title: "ロードバランサ",
@@ -801,6 +825,22 @@ impl Service {
                 title: "VPCルータ",
                 arg_name: "vpcrouter",
                 countable_label: Some("VPCルータ"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Gslb => ServiceMeta {
+                category: Category::Network,
+                title: "GSLB",
+                arg_name: "gslb",
+                countable_label: Some("GSLB"),
+                count_label: Some("台"),
+                zoned: true,
+            },
+            Service::MobileGateway => ServiceMeta {
+                category: Category::Network,
+                title: "モバイルゲートウェイ",
+                arg_name: "mobile-gateway",
+                countable_label: Some("モバイルゲートウェイ"),
                 count_label: Some("台"),
                 zoned: true,
             },
@@ -2340,8 +2380,12 @@ impl App {
         match self.service {
             Service::Disk => Some(CloudResourceKind::Disk),
             Service::Internet => Some(CloudResourceKind::Internet),
+            Service::PacketFilter => Some(CloudResourceKind::PacketFilter),
+            Service::Bridge => Some(CloudResourceKind::Bridge),
             Service::LoadBalancer => Some(CloudResourceKind::LoadBalancer),
             Service::VpcRouter => Some(CloudResourceKind::VpcRouter),
+            Service::Gslb => Some(CloudResourceKind::Gslb),
+            Service::MobileGateway => Some(CloudResourceKind::MobileGateway),
             Service::Database => Some(CloudResourceKind::Database),
             Service::Nfs => Some(CloudResourceKind::Nfs),
             _ => None,
@@ -2555,8 +2599,12 @@ impl App {
             Service::Switch => Pane::Switches,
             Service::Disk
             | Service::Internet
+            | Service::PacketFilter
+            | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
+            | Service::Gslb
+            | Service::MobileGateway
             | Service::Database
             | Service::Nfs => Pane::CloudResources,
             Service::ObjectStorage
@@ -2705,8 +2753,12 @@ impl App {
             Service::Switch => self.switch_ensure_loaded(),
             Service::Disk
             | Service::Internet
+            | Service::PacketFilter
+            | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
+            | Service::Gslb
+            | Service::MobileGateway
             | Service::Database
             | Service::Nfs => self.cloud_resources_ensure_loaded(),
             Service::ObjectStorage
@@ -4099,8 +4151,12 @@ impl App {
             Service::Switch => self.on_key_switch(key),
             Service::Disk
             | Service::Internet
+            | Service::PacketFilter
+            | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
+            | Service::Gslb
+            | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {}
             Service::ObjectStorage
@@ -4301,6 +4357,16 @@ impl App {
                             .count_cloud_resources(&name, CloudResourceKind::Internet)
                             .await
                     }
+                    Service::PacketFilter => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::PacketFilter)
+                            .await
+                    }
+                    Service::Bridge => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Bridge)
+                            .await
+                    }
                     Service::LoadBalancer => {
                         sacloud
                             .count_cloud_resources(&name, CloudResourceKind::LoadBalancer)
@@ -4309,6 +4375,16 @@ impl App {
                     Service::VpcRouter => {
                         sacloud
                             .count_cloud_resources(&name, CloudResourceKind::VpcRouter)
+                            .await
+                    }
+                    Service::Gslb => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Gslb)
+                            .await
+                    }
+                    Service::MobileGateway => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::MobileGateway)
                             .await
                     }
                     Service::Database => {
@@ -4377,6 +4453,16 @@ impl App {
                             .count_cloud_resources(&zone, CloudResourceKind::Internet)
                             .await
                     }
+                    Service::PacketFilter => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::PacketFilter)
+                            .await
+                    }
+                    Service::Bridge => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Bridge)
+                            .await
+                    }
                     Service::LoadBalancer => {
                         sacloud
                             .count_cloud_resources(&zone, CloudResourceKind::LoadBalancer)
@@ -4385,6 +4471,16 @@ impl App {
                     Service::VpcRouter => {
                         sacloud
                             .count_cloud_resources(&zone, CloudResourceKind::VpcRouter)
+                            .await
+                    }
+                    Service::Gslb => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Gslb)
+                            .await
+                    }
+                    Service::MobileGateway => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::MobileGateway)
                             .await
                     }
                     Service::Database => {
@@ -4477,15 +4573,23 @@ impl App {
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
             Service::Disk
             | Service::Internet
+            | Service::PacketFilter
+            | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
+            | Service::Gslb
+            | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {
                 let kind = match service {
                     Service::Disk => CloudResourceKind::Disk,
                     Service::Internet => CloudResourceKind::Internet,
+                    Service::PacketFilter => CloudResourceKind::PacketFilter,
+                    Service::Bridge => CloudResourceKind::Bridge,
                     Service::LoadBalancer => CloudResourceKind::LoadBalancer,
                     Service::VpcRouter => CloudResourceKind::VpcRouter,
+                    Service::Gslb => CloudResourceKind::Gslb,
+                    Service::MobileGateway => CloudResourceKind::MobileGateway,
                     Service::Database => CloudResourceKind::Database,
                     Service::Nfs => CloudResourceKind::Nfs,
                     _ => unreachable!(),
@@ -5306,8 +5410,12 @@ impl App {
             Service::Switch => self.switch_refresh(),
             Service::Disk
             | Service::Internet
+            | Service::PacketFilter
+            | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
+            | Service::Gslb
+            | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {
                 if let Some(kind) = self.cloud_resource_kind() {

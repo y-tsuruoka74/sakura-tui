@@ -13,8 +13,12 @@ const MAX_PAGES: usize = 100;
 pub enum CloudResourceKind {
     Disk,
     Internet,
+    PacketFilter,
+    Bridge,
     LoadBalancer,
     VpcRouter,
+    Gslb,
+    MobileGateway,
     Database,
     Nfs,
 }
@@ -24,8 +28,12 @@ impl CloudResourceKind {
         match self {
             Self::Disk => "ディスク",
             Self::Internet => "ルータ＋スイッチ",
+            Self::PacketFilter => "パケットフィルタ",
+            Self::Bridge => "ブリッジ接続",
             Self::LoadBalancer => "ロードバランサ",
             Self::VpcRouter => "VPCルータ",
+            Self::Gslb => "GSLB",
+            Self::MobileGateway => "モバイルゲートウェイ",
             Self::Database => "データベース",
             Self::Nfs => "NFS",
         }
@@ -35,6 +43,8 @@ impl CloudResourceKind {
         match self {
             Self::Disk => "disk",
             Self::Internet => "internet",
+            Self::PacketFilter => "packetfilter",
+            Self::Bridge => "bridge",
             _ => "appliance",
         }
     }
@@ -43,6 +53,8 @@ impl CloudResourceKind {
         match self {
             Self::LoadBalancer => Some("loadbalancer"),
             Self::VpcRouter => Some("vpcrouter"),
+            Self::Gslb => Some("gslb"),
+            Self::MobileGateway => Some("mobilegateway"),
             Self::Database => Some("database"),
             Self::Nfs => Some("nfs"),
             _ => None,
@@ -67,13 +79,22 @@ pub struct CloudResource {
 
 impl CloudResource {
     pub fn searchable(&self) -> String {
+        let details = self
+            .details
+            .iter()
+            .map(|(label, value)| format!("{label} {value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         format!(
-            "{} {} {} {} {}",
+            "{} {} {} {} {} {} {} {}",
             self.name,
             self.description,
             self.tags.join(" "),
             self.status,
-            self.plan
+            self.plan,
+            self.connection,
+            self.id,
+            details,
         )
     }
 }
@@ -137,6 +158,8 @@ fn find_items<'a>(value: &'a Value, endpoint: &str) -> Vec<&'a Value> {
     let preferred = match endpoint {
         "disk" => &["Disks", "Disk"][..],
         "internet" => &["Internet", "Internets"][..],
+        "packetfilter" => &["PacketFilters", "PacketFilter"][..],
+        "bridge" => &["Bridges", "Bridge"][..],
         _ => &["Appliances", "Appliance"][..],
     };
     preferred
@@ -168,6 +191,24 @@ fn parse_resource(value: &Value, kind: CloudResourceKind) -> Result<CloudResourc
     let connection = match kind {
         CloudResourceKind::Disk => first_non_empty(value, &["/Server/Name", "/Connection"]),
         CloudResourceKind::Internet => first_non_empty(value, &["/Switch/Name", "/BandWidthMbps"]),
+        CloudResourceKind::PacketFilter => value
+            .get("Expression")
+            .and_then(Value::as_array)
+            .map(|rules| format!("{} ルール", rules.len()))
+            .unwrap_or_default(),
+        CloudResourceKind::Bridge => first_non_empty(
+            value,
+            &["/SwitchInZone/Name", "/Region/Name", "/SwitchInZone/ID"],
+        ),
+        CloudResourceKind::Gslb => first_non_empty(value, &["/FQDN", "/Settings/GSLB/FQDN"]),
+        CloudResourceKind::MobileGateway => first_non_empty(
+            value,
+            &[
+                "/Switch/Name",
+                "/Interfaces/1/Switch/Name",
+                "/Interfaces/0/Switch/Name",
+            ],
+        ),
         _ => first_non_empty(value, &["/Switch/Name", "/Interfaces/0/Switch/Name"]),
     };
     let mut details = Vec::new();
@@ -178,6 +219,29 @@ fn parse_resource(value: &Value, kind: CloudResourceKind) -> Result<CloudResourc
     add_detail(&mut details, "接続先", connection.clone());
     for (label, pointers) in detail_fields(kind) {
         add_detail(&mut details, label, first_non_empty(value, pointers));
+    }
+    match kind {
+        CloudResourceKind::PacketFilter => {
+            if let Some(rules) = value.get("Expression").and_then(Value::as_array) {
+                add_detail(&mut details, "ルール数", rules.len().to_string());
+                for (index, rule) in rules.iter().enumerate() {
+                    add_detail(
+                        &mut details,
+                        &format!("ルール {}", index + 1),
+                        packet_filter_rule_summary(rule),
+                    );
+                }
+            }
+        }
+        CloudResourceKind::Gslb => {
+            if let Some(count) = array_len_at(
+                value,
+                &["/Settings/GSLB/Servers", "/Settings/GSLB/RealServers"],
+            ) {
+                add_detail(&mut details, "実サーバ数", count.to_string());
+            }
+        }
+        _ => {}
     }
     add_detail(&mut details, "タグ", tags.join(", "));
     add_detail(&mut details, "作成日時", string_at(value, "/CreatedAt"));
@@ -211,6 +275,29 @@ fn detail_fields(kind: CloudResourceKind) -> &'static [(&'static str, &'static [
             ("マスク長", &["/Switch/Subnets/0/NetworkMaskLen"]),
             ("ゲートウェイ", &["/Switch/Subnets/0/DefaultRoute"]),
         ],
+        CloudResourceKind::PacketFilter => &[("必要ホストバージョン", &["/RequiredHostVersion"])],
+        CloudResourceKind::Bridge => &[
+            ("リージョン", &["/Region/Name", "/Region/ID"]),
+            (
+                "ゾーン内スイッチ",
+                &["/SwitchInZone/Name", "/SwitchInZone/ID"],
+            ),
+            ("サービスクラス", &["/ServiceClass"]),
+        ],
+        CloudResourceKind::Gslb => &[
+            ("FQDN", &["/FQDN", "/Settings/GSLB/FQDN"]),
+            ("監視方法", &["/Settings/GSLB/HealthCheck/Protocol"]),
+            ("ポート", &["/Settings/GSLB/HealthCheck/Port"]),
+        ],
+        CloudResourceKind::MobileGateway => &[
+            ("サービスクラス", &["/ServiceClass"]),
+            ("スイッチ", &["/Switch/Name", "/Interfaces/1/Switch/Name"]),
+            ("IPアドレス", &["/Interfaces/0/IPAddress"]),
+            (
+                "インターネット接続",
+                &["/Settings/MobileGateway/InternetConnection/Enabled"],
+            ),
+        ],
         _ => &[
             ("サービスクラス", &["/ServiceClass"]),
             ("スイッチ", &["/Switch/Name", "/Switch/ID"]),
@@ -222,6 +309,32 @@ fn detail_fields(kind: CloudResourceKind) -> &'static [(&'static str, &'static [
             ("マスク長", &["/Remark/Network/NetworkMaskLen"]),
         ],
     }
+}
+
+fn array_len_at(value: &Value, pointers: &[&str]) -> Option<usize> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer)?.as_array().map(Vec::len))
+}
+
+fn packet_filter_rule_summary(rule: &Value) -> String {
+    let protocol = string_at(rule, "/Protocol");
+    let action = string_at(rule, "/Action");
+    let source_network = first_non_empty(rule, &["/SourceNetwork", "/SourceNetworkAddress"]);
+    let source_port = string_at(rule, "/SourcePort");
+    let destination_port = string_at(rule, "/DestinationPort");
+    let mut parts = vec![action, protocol];
+    if !source_network.is_empty() {
+        parts.push(format!("from {source_network}"));
+    }
+    if !source_port.is_empty() {
+        parts.push(format!("src:{source_port}"));
+    }
+    if !destination_port.is_empty() {
+        parts.push(format!("dst:{destination_port}"));
+    }
+    parts.retain(|part| !part.is_empty());
+    parts.join(" ")
 }
 
 fn add_detail(details: &mut Vec<(String, String)>, label: &str, value: String) {
@@ -284,5 +397,73 @@ mod tests {
         let value = json!({"Total":"1","Internet":[{"ID":"1"}]});
         assert_eq!(find_items(&value, "internet").len(), 1);
         assert_eq!(value_usize(&value["Total"]), Some(1));
+    }
+
+    #[test]
+    fn parses_packet_filter_rules() {
+        let value = json!({
+            "ID": "10",
+            "Name": "web-filter",
+            "Expression": [
+                {"Protocol":"tcp","SourceNetwork":"192.0.2.0/24","DestinationPort":"443","Action":"allow"},
+                {"Protocol":"ip","Action":"deny"}
+            ]
+        });
+        let parsed = parse_resource(&value, CloudResourceKind::PacketFilter).unwrap();
+        assert_eq!(parsed.connection, "2 ルール");
+        assert!(parsed.details.iter().any(|(label, value)| {
+            label == "ルール 1" && value == "allow tcp from 192.0.2.0/24 dst:443"
+        }));
+        assert!(parsed.searchable().contains("192.0.2.0/24"));
+    }
+
+    #[test]
+    fn parses_bridge_and_appliance_specific_details() {
+        let bridge = json!({
+            "ID": 20,
+            "Name": "cross-zone",
+            "Region": {"Name":"石狩"},
+            "SwitchInZone": {"Name":"private"},
+            "ServiceClass":"cloud/bridge/default"
+        });
+        assert_eq!(
+            parse_resource(&bridge, CloudResourceKind::Bridge)
+                .unwrap()
+                .connection,
+            "private"
+        );
+
+        let gslb = json!({
+            "ID": 30,
+            "Name": "public-site",
+            "Class": "gslb",
+            "FQDN":"site-30.gslb.example",
+            "Settings":{"GSLB":{"Servers":[{},{}]}}
+        });
+        let gslb = parse_resource(&gslb, CloudResourceKind::Gslb).unwrap();
+        assert!(gslb.details.contains(&("実サーバ数".into(), "2".into())));
+
+        let gateway = json!({
+            "ID": 40,
+            "Name":"mobile",
+            "Class":"mobilegateway",
+            "Instance":{"Status":"up"},
+            "Interfaces":[{"IPAddress":"198.51.100.2"}, {"Switch":{"Name":"iot"}}]
+        });
+        let gateway = parse_resource(&gateway, CloudResourceKind::MobileGateway).unwrap();
+        assert_eq!(gateway.status, "up");
+        assert_eq!(gateway.connection, "iot");
+    }
+
+    #[test]
+    fn finds_new_endpoint_response_arrays() {
+        assert_eq!(
+            find_items(&json!({"PacketFilters":[{"ID":"1"}]}), "packetfilter").len(),
+            1
+        );
+        assert_eq!(
+            find_items(&json!({"Bridges":[{"ID":"2"}]}), "bridge").len(),
+            1
+        );
     }
 }
