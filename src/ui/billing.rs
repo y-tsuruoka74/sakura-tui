@@ -40,7 +40,11 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(30), Constraint::Min(30)])
+        .constraints([
+            Constraint::Length(30),
+            Constraint::Length(1),
+            Constraint::Min(30),
+        ])
         .split(area);
 
     draw_bills(frame, chunks[0], app);
@@ -48,7 +52,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(chunks[1]);
+        .split(chunks[2]);
     draw_tabs(frame, right[0], app);
 
     match app.billing.tab {

@@ -18,17 +18,25 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     draw_applications(frame, chunks[0], app);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(4)])
-        .split(chunks[1]);
+        .constraints([
+            Constraint::Length(10),
+            Constraint::Length(1),
+            Constraint::Min(4),
+        ])
+        .split(chunks[2]);
     draw_detail(frame, right[0], app);
-    draw_versions(frame, right[1], app);
+    draw_versions(frame, right[2], app);
 }
 
 fn draw_applications(frame: &mut Frame, area: Rect, app: &mut App) {

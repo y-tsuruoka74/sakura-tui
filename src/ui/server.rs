@@ -18,11 +18,15 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .constraints([
+            Constraint::Percentage(62),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     draw_list(frame, chunks[0], app);
-    draw_detail(frame, chunks[1], app);
+    draw_detail(frame, chunks[2], app);
 }
 
 /// 電源状態の色。起動中は緑、停止は灰、処理中は黄。

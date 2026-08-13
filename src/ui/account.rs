@@ -22,10 +22,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // 列に収まらない値があるので、選択した行だけ下に全文を出す。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(4)])
+        .constraints([
+            Constraint::Min(6),
+            Constraint::Length(1),
+            Constraint::Length(4),
+        ])
         .split(area);
     draw_table(frame, chunks[0], app);
-    draw_selected(frame, chunks[1], app);
+    draw_selected(frame, chunks[2], app);
 }
 
 /// 選択中の行の値と説明を、切らずに出す。

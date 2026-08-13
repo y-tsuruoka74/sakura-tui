@@ -85,7 +85,11 @@ fn dim(text: String) -> Cell<'static> {
 pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     let zones: Vec<(String, usize)> = app
@@ -117,8 +121,12 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(6)])
-        .split(chunks[1]);
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(6),
+        ])
+        .split(chunks[2]);
 
     let records = app.visible_dns_records();
     let record_rows: Vec<Row> = records
@@ -204,7 +212,7 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(block),
-        right[1],
+        right[2],
     );
 }
 
@@ -213,7 +221,11 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
 pub fn draw_simple_monitor(frame: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .constraints([
+            Constraint::Percentage(62),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     let monitors: Vec<_> = app
@@ -268,7 +280,7 @@ pub fn draw_simple_monitor(frame: &mut Frame, area: Rect, app: &mut App) {
     let Some(monitor) = app.selected_monitor() else {
         frame.render_widget(
             placeholder("監視を選択してください").block(block),
-            chunks[1],
+            chunks[2],
         );
         return;
     };
@@ -312,7 +324,7 @@ pub fn draw_simple_monitor(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(block),
-        chunks[1],
+        chunks[2],
     );
 }
 
@@ -321,7 +333,11 @@ pub fn draw_simple_monitor(frame: &mut Frame, area: Rect, app: &mut App) {
 pub fn draw_secrets(frame: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     let vaults = app.visible_vaults();
@@ -394,7 +410,7 @@ pub fn draw_secrets(frame: &mut Frame, area: Rect, app: &mut App) {
         .unwrap_or_default();
     table_pane(
         frame,
-        chunks[1],
+        chunks[2],
         TableSpec {
             title: "シークレット",
             idle: "Vault を選択してください",
@@ -425,10 +441,14 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
         draw_monitoring_tabs(frame, rows[0], app);
         let panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .constraints([
+                Constraint::Percentage(55),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
             .split(rows[1]);
         draw_storages(frame, panes[0], app);
-        draw_storage_access_keys(frame, panes[1], app);
+        draw_storage_access_keys(frame, panes[2], app);
         return;
     }
     if matches!(
@@ -451,7 +471,11 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
+        .constraints([
+            Constraint::Percentage(34),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     let projects = app.visible_projects();
@@ -503,7 +527,7 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(chunks[1]);
+        .split(chunks[2]);
     draw_monitoring_tabs(frame, right[0], app);
 
     match app.monitoring.tab {

@@ -179,7 +179,11 @@ fn draw_images(frame: &mut Frame, area: Rect, app: &mut App, registry: &Containe
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     draw_repositories(frame, chunks[0], app);
@@ -187,10 +191,14 @@ fn draw_images(frame: &mut Frame, area: Rect, app: &mut App, registry: &Containe
     // タグ一覧と、選択中タグの詳細を縦に並べる。
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(9)])
-        .split(chunks[1]);
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(9),
+        ])
+        .split(chunks[2]);
     draw_tags(frame, right[0], app);
-    draw_tag_detail(frame, right[1], app);
+    draw_tag_detail(frame, right[2], app);
 }
 
 /// 選択中タグのサイズ・レイヤ数・プラットフォーム・ビルド日時。

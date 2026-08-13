@@ -238,6 +238,7 @@ fn mode_badge(mode: Mode) -> Span<'static> {
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
+    let area = service_content_area(area);
     match app.service {
         Service::Registry => draw_registry(frame, area, app),
         Service::AppRun => apprun::draw(frame, area, app),
@@ -267,10 +268,34 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// 各サービス画面に共通の外側余白を設ける。
+///
+/// 幅や高さが足りない端末では段階的に余白を落とし、情報そのものを優先する。
+fn service_content_area(area: Rect) -> Rect {
+    let horizontal = if area.width >= 72 {
+        2
+    } else if area.width >= 40 {
+        1
+    } else {
+        0
+    };
+    let vertical = u16::from(area.height >= 16);
+    Rect {
+        x: area.x.saturating_add(horizontal),
+        y: area.y.saturating_add(vertical),
+        width: area.width.saturating_sub(horizontal * 2),
+        height: area.height.saturating_sub(vertical * 2),
+    }
+}
+
 fn draw_registry(frame: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .constraints([
+            Constraint::Percentage(38),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     registries::draw(frame, chunks[0], app);
@@ -278,7 +303,7 @@ fn draw_registry(frame: &mut Frame, area: Rect, app: &mut App) {
     let detail = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
-        .split(chunks[1]);
+        .split(chunks[2]);
     draw_tabs(frame, detail[0], app);
     detail::draw(frame, detail[1], app);
 }
@@ -672,5 +697,22 @@ mod color_tests {
         for name in PROFILE_COLORS {
             assert!(parse_color(name).is_some(), "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn spacious_service_area_has_balanced_margins() {
+        let area = service_content_area(Rect::new(0, 1, 120, 30));
+        assert_eq!(area, Rect::new(2, 2, 116, 28));
+    }
+
+    #[test]
+    fn compact_service_area_keeps_all_available_space() {
+        let area = service_content_area(Rect::new(3, 4, 30, 10));
+        assert_eq!(area, Rect::new(3, 4, 30, 10));
     }
 }

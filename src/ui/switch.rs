@@ -17,11 +17,15 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .constraints([
+            Constraint::Percentage(58),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
 
     draw_list(frame, chunks[0], app);
-    draw_detail(frame, chunks[1], app);
+    draw_detail(frame, chunks[2], app);
 }
 
 fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
