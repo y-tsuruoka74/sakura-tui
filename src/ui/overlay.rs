@@ -10,8 +10,9 @@ use super::{DIM, accent};
 use crate::app::{
     AiEngineTokenForm, AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode,
     App, Availability, Category, DashboardForm, DashboardFormMode, DnsRecordForm,
-    DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LogMeasureRuleForm, LogMeasureRuleFormMode,
-    LogRoutingForm, LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
+    DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, IamCredentialForm, IamResourceForm,
+    IamResourceFormMode, IamRoleForm, LogMeasureRuleForm, LogMeasureRuleFormMode, LogRoutingForm,
+    LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
     NotificationRoutingForm, NotificationRoutingFormMode, NotificationTargetForm,
     NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage, RegistryForm,
     RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode,
@@ -45,6 +46,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         } => draw_confirm(frame, title, body, verify.as_deref(), typed),
         Overlay::UserForm(form) => draw_user_form(frame, form),
         Overlay::RegistryForm(form) => draw_registry_form(frame, form),
+        Overlay::IamResourceForm(form) => draw_iam_resource_form(frame, form),
+        Overlay::IamRoleForm(form) => draw_iam_role_form(frame, form),
         Overlay::SwitchForm(form) => draw_switch_form(frame, form),
         Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
         Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),
@@ -72,6 +75,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         Overlay::ProfileForm(form) => draw_profile_form(frame, app, form),
         Overlay::AiEngineTokenForm(form) => draw_ai_engine_token_form(frame, form),
+        Overlay::IamCredentialForm(form) => draw_iam_credential_form(frame, form),
     }
 }
 
@@ -353,6 +357,65 @@ fn draw_ai_engine_token_form(frame: &mut Frame, form: &AiEngineTokenForm) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog("AI Engineアカウントトークン", accent())),
+        area,
+    );
+}
+
+fn draw_iam_credential_form(frame: &mut Frame, form: &IamCredentialForm) {
+    let key_status = if form.private_key.is_empty() {
+        "未入力".to_string()
+    } else {
+        format!("貼り付け済み（{}文字）", form.private_key.chars().count())
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "IAM API専用のサービスプリンシパルを設定します。",
+            Style::default().fg(DIM),
+        )),
+        Line::from(Span::styled(
+            "秘密鍵はOSのキーチェーンに保存され、設定ファイルには書きません。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        input_line(
+            "リソースID",
+            &form.service_principal_id,
+            form.field == 0,
+            false,
+        ),
+        input_line("キーID", &form.key_id, form.field == 1, false),
+        input_line("RSA秘密鍵", &key_status, form.field == 2, false),
+        Line::from(Span::styled(
+            format!("{}PEM全文をこの欄へ貼り付けてください", " ".repeat(14)),
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+    ];
+    if form.verifying {
+        lines.push(Line::from(Span::styled(
+            "Bearerトークンの発行とユーザー参照権限を検証しています…",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 項目移動   "),
+            Span::styled(
+                "Enter",
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" 検証して保存   "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 閉じる"),
+        ]));
+    }
+
+    let area = centered(frame, 76, dialog_height(&lines, 76));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("IAMサービスプリンシパル認証", accent())),
         area,
     );
 }
@@ -1190,6 +1253,86 @@ fn draw_registry_form(frame: &mut Frame, form: &RegistryForm) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_iam_resource_form(frame: &mut Frame, form: &IamResourceForm) {
+    let action = match form.mode {
+        IamResourceFormMode::Create => "作成",
+        IamResourceFormMode::Edit => "編集",
+    };
+    let title = format!("IAM {}の{action}", form.resource_type);
+    let mut lines: Vec<Line> = form
+        .labels()
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            input_line(
+                label,
+                form.value(index),
+                form.field == index,
+                *label == "パスワード",
+            )
+        })
+        .collect();
+    if form.mode == IamResourceFormMode::Edit && form.resource_type == "ユーザー" {
+        lines.push(Line::from(Span::styled(
+            "パスワードは空欄なら変更しません。メール変更は現在未対応です。",
+            Style::default().fg(DIM),
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+    let area = centered(frame, 72, dialog_height(&lines, 72));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_iam_role_form(frame: &mut Frame, form: &IamRoleForm) {
+    let action = if form.grant { "付与" } else { "解除" };
+    let mut lines: Vec<Line> = IamRoleForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(index, label)| input_line(label, form.value(index), form.field == index, false))
+        .collect();
+    lines.push(Line::from(Span::styled(
+        "プリンシパル種別: user / group / service-principal",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {action}確認へ   ")),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+    let area = centered(frame, 76, dialog_height(&lines, 76));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&format!("IAMロールの{action}"), accent())),
         area,
     );
 }

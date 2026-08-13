@@ -2,7 +2,7 @@
 
 さくらインターネットのサービスをターミナルから操作する TUI（[ratatui](https://ratatui.rs) 製）。
 
-`s` キーでサービスを切り替えて使います（35 種類）。
+`s` キーでサービスを切り替えて使います（36 種類）。
 
 ### コンテナレジストリ
 - レジストリの一覧・詳細・作成・編集・削除
@@ -107,6 +107,13 @@
 - KMS鍵の一覧、状態、サービスクラス、鍵の由来、最新バージョン、タグ
 - 絞り込み、更新、リソースIDのコピーに対応
 
+### IAM
+- ユーザー、グループ、プロジェクト、IAMロール、サービスプリンシパルの一覧と詳細
+- OTP・セキュリティキーの設定状態、所属プロジェクト、ロールカテゴリと付与可能階層を表示
+- ユーザー、グループ、プロジェクト、サービスプリンシパルの作成・編集・削除
+- プロジェクトIAMポリシーへのプリセットロール付与・解除（ユーザー、グループ、サービスプリンシパル）
+- パスワードや秘密鍵などの機密値は一覧で取得・表示しません。入力したパスワードも保存しません
+
 ### モニタリングスイート
 - アラートプロジェクトとルール（発報中かどうかを色分け）
 - アラートプロジェクトの作成・編集・削除
@@ -152,7 +159,7 @@ cargo build --release
                          loadbalancer / enhanced-loadbalancer / vpcrouter /
                          gslb / mobile-gateway / local-router /
                          database / nfs / object-storage / simplemq /
-                         simple-notification / kms /
+                         simple-notification / kms / iam /
                          enhanced-db / ai-engine / eventbus / workflows / webaccel /
                          autoscale / dns / secrets / monitor / monitoring /
                          account / billing
@@ -188,6 +195,31 @@ cargo build --release
 起動後は `p` キーでピッカーを開き、環境変数・usacloud プロファイル・キーチェーンに預けた
 資格情報のあいだを切り替えられます。切り替えはそのセッション限りで、
 `~/.usacloud/current` は書き換えません。
+
+### IAM API
+
+IAM APIは通常のAPIキーではなく、サービスプリンシパルのBearer認証を使用します。
+IAM画面で `a` キーを押し、以下を登録してください。
+
+- サービスプリンシパルのリソースID
+- サービスプリンシパルキーのキーID
+- キー作成時の公開鍵と対になるPEM形式のRSA秘密鍵
+
+保存前にBearerトークンの発行とユーザー一覧の取得を行い、認証と参照権限を検証します。
+識別情報は設定ファイル、RSA秘密鍵はOSのキーチェーンに保存します。ユーザー一覧の閲覧には
+IDポリシーの「ID閲覧者」以上、ユーザーやグループの変更には「ID管理者」が必要です。
+プロジェクトのIAMロールを付与・解除する場合は、対象プロジェクトのIAMポリシーを編集できる
+「オーナー」等のロールも必要です。
+
+CIなどでは、公式SDKと同じ環境変数も利用できます。
+
+```sh
+export SAKURA_SERVICE_PRINCIPAL_ID=...
+export SAKURA_SERVICE_PRINCIPAL_KEY_ID=...
+export SAKURA_PRIVATE_KEY='-----BEGIN PRIVATE KEY-----
+...
+-----END PRIVATE KEY-----'
+```
 
 ピッカー内のキー:
 

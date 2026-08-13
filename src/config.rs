@@ -167,6 +167,78 @@ pub struct AiEngineTokenEntry {
     pub from_env: bool,
 }
 
+/// IAM APIへ接続するサービスプリンシパルの認証情報。
+///
+/// 秘密鍵をログやDebug表示へ誤って出さないよう、Debugは識別情報だけを表示する。
+#[derive(Clone, PartialEq, Eq)]
+pub struct IamCredentials {
+    pub service_principal_id: String,
+    pub key_id: String,
+    pub private_key: String,
+}
+
+impl std::fmt::Debug for IamCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IamCredentials")
+            .field("service_principal_id", &self.service_principal_id)
+            .field("key_id", &self.key_id)
+            .field("private_key", &"<redacted>")
+            .finish()
+    }
+}
+
+/// IAMサービスプリンシパルを読み込む。
+///
+/// CIでは公式SDKと同じ環境変数を優先し、対話利用では現在のクラウドAPI認証元に
+/// 紐づけたキーチェーンの秘密鍵を使う。
+pub fn load_iam_credentials(source: &CredentialSource) -> Result<Option<IamCredentials>> {
+    let env_id = env_multi(&["SAKURA_SERVICE_PRINCIPAL_ID"]);
+    let env_key_id = env_multi(&["SAKURA_SERVICE_PRINCIPAL_KEY_ID"]);
+    let env_private_key = env_multi(&["SAKURA_PRIVATE_KEY"]);
+    if env_id.is_some() || env_key_id.is_some() || env_private_key.is_some() {
+        let service_principal_id =
+            env_id.context("SAKURA_SERVICE_PRINCIPAL_ID が設定されていません")?;
+        let key_id = env_key_id.context("SAKURA_SERVICE_PRINCIPAL_KEY_ID が設定されていません")?;
+        let private_key = env_private_key.context("SAKURA_PRIVATE_KEY が設定されていません")?;
+        return Ok(Some(IamCredentials {
+            service_principal_id,
+            key_id,
+            private_key,
+        }));
+    }
+
+    let config = Config::load()?;
+    let profile_key = source.config_key();
+    let Some(metadata) = config.iam_credentials.get(&profile_key) else {
+        return Ok(None);
+    };
+    let private_key = crate::keychain::get_iam_private_key(&profile_key)?
+        .context("IAMサービスプリンシパルの秘密鍵がキーチェーンにありません")?;
+    Ok(Some(IamCredentials {
+        service_principal_id: metadata.service_principal_id.clone(),
+        key_id: metadata.key_id.clone(),
+        private_key,
+    }))
+}
+
+/// IAMサービスプリンシパルを現在のクラウドAPI認証元に紐づけて保存する。
+pub fn save_iam_credentials(
+    source: &CredentialSource,
+    credentials: &IamCredentials,
+) -> Result<PathBuf> {
+    let profile_key = source.config_key();
+    crate::keychain::set_iam_private_key(&profile_key, &credentials.private_key)?;
+    let mut config = Config::load()?;
+    config.iam_credentials.insert(
+        profile_key,
+        IamCredentialMetadata {
+            service_principal_id: credentials.service_principal_id.clone(),
+            key_id: credentials.key_id.clone(),
+        },
+    );
+    config.save()
+}
+
 /// 現在選択中のAI Engineトークンを読む。
 pub fn load_ai_engine_token(source: &CredentialSource) -> Result<Option<String>> {
     let mut config = Config::load()?;
@@ -626,7 +698,12 @@ pub fn delete_keychain_credential(name: &str) -> Result<()> {
         bail!("設定に資格情報 {name} がありません");
     }
     crate::keychain::delete_api_credentials(name)?;
-    delete_all_ai_engine_tokens(&CredentialSource::Keychain(name.to_string()))?;
+    let source = CredentialSource::Keychain(name.to_string());
+    delete_all_ai_engine_tokens(&source)?;
+    let profile_key = source.config_key();
+    config.ai_engine_tokens.remove(&profile_key);
+    config.iam_credentials.remove(&profile_key);
+    crate::keychain::delete_iam_private_key(&profile_key)?;
     config.save()?;
     Ok(())
 }
@@ -726,6 +803,13 @@ pub struct AiEngineTokenProfile {
     pub names: Vec<String>,
 }
 
+/// IAMの識別情報。秘密鍵本体はOSのキーチェーンにのみ保存する。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IamCredentialMetadata {
+    pub service_principal_id: String,
+    pub key_id: String,
+}
+
 /// `~/.config/sakura-tui/config.toml` の内容。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -741,6 +825,9 @@ pub struct Config {
     /// AI Engineトークンの名前と選択状態。秘密値は含まない。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ai_engine_tokens: BTreeMap<String, AiEngineTokenProfile>,
+    /// クラウドAPI認証元ごとのIAMサービスプリンシパル識別情報。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub iam_credentials: BTreeMap<String, IamCredentialMetadata>,
 }
 
 impl Config {
@@ -938,6 +1025,23 @@ mod tests {
         assert!(text.contains("batch"));
         assert!(text.contains("interactive"));
         assert!(!text.contains("uuid:secret"));
+    }
+
+    #[test]
+    fn iam_config_stores_ids_but_has_no_private_key_field() {
+        let mut config = Config::default();
+        config.iam_credentials.insert(
+            "prod".to_string(),
+            IamCredentialMetadata {
+                service_principal_id: "sp-resource-id".to_string(),
+                key_id: "key-id".to_string(),
+            },
+        );
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("sp-resource-id"));
+        assert!(text.contains("key-id"));
+        assert!(!text.contains("private_key"));
+        assert!(!text.contains("BEGIN PRIVATE KEY"));
     }
 
     #[test]

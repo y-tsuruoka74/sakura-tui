@@ -131,6 +131,23 @@ pub fn delete_api_credentials(name: &str) -> Result<()> {
     delete_password(&legacy_key(name, "secret"))
 }
 
+/// クラウドAPIの認証元ごとにIAMサービスプリンシパルの秘密鍵を分離する。
+fn iam_private_key_key(profile_key: &str) -> String {
+    format!("@iam-service-principal:{profile_key}")
+}
+
+pub fn set_iam_private_key(profile_key: &str, private_key: &str) -> Result<()> {
+    set_password(&iam_private_key_key(profile_key), private_key)
+}
+
+pub fn get_iam_private_key(profile_key: &str) -> Result<Option<String>> {
+    get_password(&iam_private_key_key(profile_key))
+}
+
+pub fn delete_iam_private_key(profile_key: &str) -> Result<()> {
+    delete_password(&iam_private_key_key(profile_key))
+}
+
 /// クラウドAPIの認証元ごとにAI Engine専用トークンを分離する。
 fn ai_engine_key(profile_key: &str) -> String {
     format!("@ai-engine:{profile_key}")

@@ -36,7 +36,7 @@ use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
 use crate::cloud_resources::{CloudResource, CloudResourceKind};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
-use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
+use crate::config::{ApiCredentials, Config, CredentialSource, IamCredentials, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
 use crate::managed_resources::{ManagedResource, ManagedResourceKind};
 use crate::monitoring::{
@@ -61,10 +61,18 @@ pub enum Message {
         kind: ManagedResourceKind,
         result: Result<Vec<ManagedResource>, String>,
     },
+    IamAction {
+        label: String,
+        result: Result<(), String>,
+    },
     AiEngineTokenVerified {
         name: String,
         token: String,
         result: Result<Vec<ManagedResource>, String>,
+    },
+    IamCredentialsVerified {
+        form: Box<IamCredentialForm>,
+        result: Result<(), String>,
     },
     Registries(Result<Vec<ContainerRegistry>, String>),
     Users {
@@ -643,6 +651,7 @@ pub enum Service {
     SimpleMonitor,
     Secrets,
     Kms,
+    Iam,
     Monitoring,
     Account,
     Billing,
@@ -661,7 +670,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 35] = [
+    pub const ALL: [Service; 36] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -699,6 +708,7 @@ impl Service {
         // セキュリティ
         Service::Secrets,
         Service::Kms,
+        Service::Iam,
         // 運用・監視
         Service::SimpleMonitor,
         Service::Monitoring,
@@ -960,6 +970,14 @@ impl Service {
                 count_label: Some("鍵"),
                 zoned: false,
             },
+            Service::Iam => ServiceMeta {
+                category: Category::Security,
+                title: "IAM",
+                arg_name: "iam",
+                countable_label: None,
+                count_label: Some("リソース"),
+                zoned: false,
+            },
             Service::SimpleMonitor => ServiceMeta {
                 category: Category::Ops,
                 title: "シンプル監視",
@@ -1186,6 +1204,40 @@ pub struct AiEngineTokenForm {
     pub verifying: bool,
 }
 
+/// IAMサービスプリンシパルの登録フォーム。
+#[derive(Clone, Default)]
+pub struct IamCredentialForm {
+    pub service_principal_id: String,
+    pub key_id: String,
+    pub private_key: String,
+    pub field: usize,
+    pub verifying: bool,
+}
+
+impl IamCredentialForm {
+    pub const FIELDS: usize = 3;
+
+    fn credentials(&self) -> IamCredentials {
+        IamCredentials {
+            service_principal_id: self.service_principal_id.trim().to_string(),
+            key_id: self.key_id.trim().to_string(),
+            private_key: self.private_key.trim().to_string(),
+        }
+    }
+}
+
+impl std::fmt::Debug for IamCredentialForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IamCredentialForm")
+            .field("service_principal_id", &self.service_principal_id)
+            .field("key_id", &self.key_id)
+            .field("private_key", &"<redacted>")
+            .field("field", &self.field)
+            .field("verifying", &self.verifying)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for AiEngineTokenForm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AiEngineTokenForm")
@@ -1307,6 +1359,149 @@ pub struct RegistryForm {
     pub description: String,
     pub virtual_domain: String,
     pub field: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IamResourceFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Clone)]
+pub struct IamResourceForm {
+    pub mode: IamResourceFormMode,
+    pub resource_type: String,
+    pub target_id: Option<String>,
+    pub name: String,
+    pub code: String,
+    pub password: String,
+    pub description: String,
+    /// ユーザーはメール、プロジェクトは親フォルダID、SPはプロジェクトID。
+    pub extra: String,
+    pub field: usize,
+}
+
+impl std::fmt::Debug for IamResourceForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IamResourceForm")
+            .field("mode", &self.mode)
+            .field("resource_type", &self.resource_type)
+            .field("target_id", &self.target_id)
+            .field("name", &self.name)
+            .field("code", &self.code)
+            .field("password", &"<redacted>")
+            .field("description", &self.description)
+            .field("extra", &self.extra)
+            .field("field", &self.field)
+            .finish()
+    }
+}
+
+impl IamResourceForm {
+    pub fn labels(&self) -> &'static [&'static str] {
+        match (self.mode, self.resource_type.as_str()) {
+            (IamResourceFormMode::Create, "ユーザー") => {
+                &["名前", "ユーザーコード", "パスワード", "説明", "メール"]
+            }
+            (IamResourceFormMode::Create, "プロジェクト") => {
+                &["名前", "プロジェクトコード", "説明", "親フォルダID"]
+            }
+            (IamResourceFormMode::Create, "サービスプリンシパル") => {
+                &["名前", "説明", "プロジェクトID"]
+            }
+            (IamResourceFormMode::Edit, "ユーザー") => &["名前", "パスワード", "説明"],
+            _ => &["名前", "説明"],
+        }
+    }
+
+    pub fn value(&self, index: usize) -> &str {
+        match (self.mode, self.resource_type.as_str(), index) {
+            (IamResourceFormMode::Create, "ユーザー", 0) => &self.name,
+            (IamResourceFormMode::Create, "ユーザー", 1) => &self.code,
+            (IamResourceFormMode::Create, "ユーザー", 2) => &self.password,
+            (IamResourceFormMode::Create, "ユーザー", 3) => &self.description,
+            (IamResourceFormMode::Create, "ユーザー", 4) => &self.extra,
+            (IamResourceFormMode::Create, "プロジェクト", 0) => &self.name,
+            (IamResourceFormMode::Create, "プロジェクト", 1) => &self.code,
+            (IamResourceFormMode::Create, "プロジェクト", 2) => &self.description,
+            (IamResourceFormMode::Create, "プロジェクト", 3) => &self.extra,
+            (IamResourceFormMode::Create, "サービスプリンシパル", 0) => &self.name,
+            (IamResourceFormMode::Create, "サービスプリンシパル", 1) => &self.description,
+            (IamResourceFormMode::Create, "サービスプリンシパル", 2) => &self.extra,
+            (IamResourceFormMode::Edit, "ユーザー", 0) => &self.name,
+            (IamResourceFormMode::Edit, "ユーザー", 1) => &self.password,
+            (IamResourceFormMode::Edit, "ユーザー", 2) => &self.description,
+            (IamResourceFormMode::Edit, _, 0) => &self.name,
+            (IamResourceFormMode::Edit, _, 1) => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match (self.mode, self.resource_type.as_str(), index) {
+            (IamResourceFormMode::Create, "ユーザー", 0) => Some(&mut self.name),
+            (IamResourceFormMode::Create, "ユーザー", 1) => Some(&mut self.code),
+            (IamResourceFormMode::Create, "ユーザー", 2) => Some(&mut self.password),
+            (IamResourceFormMode::Create, "ユーザー", 3) => Some(&mut self.description),
+            (IamResourceFormMode::Create, "ユーザー", 4) => Some(&mut self.extra),
+            (IamResourceFormMode::Create, "プロジェクト", 0) => Some(&mut self.name),
+            (IamResourceFormMode::Create, "プロジェクト", 1) => Some(&mut self.code),
+            (IamResourceFormMode::Create, "プロジェクト", 2) => Some(&mut self.description),
+            (IamResourceFormMode::Create, "プロジェクト", 3) => Some(&mut self.extra),
+            (IamResourceFormMode::Create, "サービスプリンシパル", 0) => {
+                Some(&mut self.name)
+            }
+            (IamResourceFormMode::Create, "サービスプリンシパル", 1) => {
+                Some(&mut self.description)
+            }
+            (IamResourceFormMode::Create, "サービスプリンシパル", 2) => {
+                Some(&mut self.extra)
+            }
+            (IamResourceFormMode::Edit, "ユーザー", 0) => Some(&mut self.name),
+            (IamResourceFormMode::Edit, "ユーザー", 1) => Some(&mut self.password),
+            (IamResourceFormMode::Edit, "ユーザー", 2) => Some(&mut self.description),
+            (IamResourceFormMode::Edit, _, 0) => Some(&mut self.name),
+            (IamResourceFormMode::Edit, _, 1) => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IamRoleForm {
+    pub grant: bool,
+    pub project_id: String,
+    pub principal_type: String,
+    pub principal_id: String,
+    pub role_id: String,
+    pub field: usize,
+}
+
+impl IamRoleForm {
+    pub const LABELS: [&'static str; 4] = [
+        "プロジェクトID",
+        "プリンシパル種別",
+        "プリンシパルID",
+        "ロールID",
+    ];
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.project_id,
+            1 => &self.principal_type,
+            2 => &self.principal_id,
+            3 => &self.role_id,
+            _ => "",
+        }
+    }
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.project_id),
+            1 => Some(&mut self.principal_type),
+            2 => Some(&mut self.principal_id),
+            3 => Some(&mut self.role_id),
+            _ => None,
+        }
+    }
 }
 
 impl RegistryForm {
@@ -2216,6 +2411,18 @@ pub enum ConfirmAction {
         name: String,
         action: PowerAction,
     },
+    DeleteIamResource {
+        resource_type: String,
+        id: String,
+        name: String,
+    },
+    ChangeIamRole {
+        project_id: i64,
+        principal_type: String,
+        principal_id: i64,
+        role_id: String,
+        grant: bool,
+    },
 }
 
 /// 前面に表示するダイアログ。
@@ -2239,6 +2446,8 @@ pub enum Overlay {
     },
     UserForm(UserForm),
     RegistryForm(RegistryForm),
+    IamResourceForm(IamResourceForm),
+    IamRoleForm(IamRoleForm),
     SwitchForm(SwitchForm),
     DnsRecordForm(DnsRecordForm),
     DnsZoneForm(DnsZoneForm),
@@ -2278,6 +2487,7 @@ pub enum Overlay {
     /// usacloud プロファイルの新規作成。
     ProfileForm(ProfileForm),
     AiEngineTokenForm(AiEngineTokenForm),
+    IamCredentialForm(IamCredentialForm),
 }
 
 /// コンテナレジストリ画面が持つ状態。
@@ -2497,6 +2707,7 @@ impl App {
             Service::LocalRouter => Some(ManagedResourceKind::LocalRouter),
             Service::Gslb => Some(ManagedResourceKind::Gslb),
             Service::Kms => Some(ManagedResourceKind::Kms),
+            Service::Iam => Some(ManagedResourceKind::Iam),
             Service::AutoScale => Some(ManagedResourceKind::AutoScale),
             Service::EnhancedDb => Some(ManagedResourceKind::EnhancedDb),
             _ => None,
@@ -2685,6 +2896,7 @@ impl App {
             | Service::LocalRouter
             | Service::Gslb
             | Service::Kms
+            | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => Pane::ManagedResources,
             Service::Dns => match self.dns.focus {
@@ -2845,6 +3057,7 @@ impl App {
             | Service::LocalRouter
             | Service::Gslb
             | Service::Kms
+            | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
@@ -2977,6 +3190,26 @@ impl App {
                 self.managed_resources.items.insert(kind, loadable);
                 self.fill_selection(Pane::ManagedResources);
             }
+            Message::IamAction { label, result } => match result {
+                Ok(()) => {
+                    self.managed_resources
+                        .items
+                        .remove(&ManagedResourceKind::Iam);
+                    self.service_counts.remove(&Service::Iam);
+                    self.managed_resources.state.select(None);
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.managed_resources_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::AiEngineTokenVerified {
                 name,
                 token,
@@ -3025,6 +3258,44 @@ impl App {
                         verifying: false,
                         ..AiEngineTokenForm::default()
                     }));
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::IamCredentialsVerified { form, result } => match result {
+                Ok(()) => {
+                    let credentials = form.credentials();
+                    match crate::config::save_iam_credentials(&self.credential_source, &credentials)
+                    {
+                        Ok(path) => {
+                            if let Ok(config) = Config::load() {
+                                self.config = config;
+                            }
+                            self.managed_resources
+                                .items
+                                .remove(&ManagedResourceKind::Iam);
+                            self.service_counts.remove(&Service::Iam);
+                            self.overlay = None;
+                            self.set_status(
+                                format!(
+                                    "IAMサービスプリンシパルを保存しました: {}",
+                                    path.display()
+                                ),
+                                StatusKind::Success,
+                            );
+                            self.managed_resources_ensure_loaded();
+                        }
+                        Err(err) => {
+                            let mut form = *form;
+                            form.verifying = false;
+                            self.overlay = Some(Overlay::IamCredentialForm(form));
+                            self.set_status(fmt_error(err), StatusKind::Error);
+                        }
+                    }
+                }
+                Err(err) => {
+                    let mut form = *form;
+                    form.verifying = false;
+                    self.overlay = Some(Overlay::IamCredentialForm(form));
                     self.set_status(err, StatusKind::Error);
                 }
             },
@@ -4049,6 +4320,22 @@ impl App {
     ///
     /// 改行やタブが混ざっていても欄が壊れないよう空白に潰す。
     pub fn on_paste(&mut self, text: &str) {
+        // PEM秘密鍵だけは改行を維持する。通常の入力欄は従来どおり制御文字を除く。
+        if let Some(Overlay::IamCredentialForm(form)) = &mut self.overlay
+            && !form.verifying
+        {
+            if form.field == 2 {
+                form.private_key.push_str(text.trim());
+            } else {
+                let value = text.trim().replace(['\r', '\n', '\t'], "");
+                if form.field == 0 {
+                    form.service_principal_id.push_str(&value);
+                } else {
+                    form.key_id.push_str(&value);
+                }
+            }
+            return;
+        }
         let text: String = text
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -4082,6 +4369,18 @@ impl App {
                 _ => {}
             },
             Some(Overlay::RegistryForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::IamResourceForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::IamRoleForm(form)) => {
                 let field = form.field;
                 if let Some(value) = form.value_mut(field) {
                     value.push_str(text);
@@ -4238,6 +4537,7 @@ impl App {
             | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {}
+            Service::Iam => self.on_key_iam(key),
             Service::ObjectStorage
             | Service::SimpleMq
             | Service::SimpleNotification
@@ -4319,6 +4619,342 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => self.focus_right(),
             _ => {}
         }
+    }
+
+    fn on_key_iam(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('a') => self.open_iam_credential_form(),
+            KeyCode::Char('u') => self.open_create_iam_resource("ユーザー"),
+            KeyCode::Char('U') => self.open_create_iam_resource("グループ"),
+            KeyCode::Char('P') => self.open_create_iam_resource("プロジェクト"),
+            KeyCode::Char('N') => self.open_create_iam_resource("サービスプリンシパル"),
+            KeyCode::Char('E') => self.open_edit_iam_resource(),
+            KeyCode::Char('D') => self.confirm_delete_iam_resource(),
+            KeyCode::Char('g') => self.open_iam_role_form(true),
+            KeyCode::Char('G') => self.open_iam_role_form(false),
+            _ => {}
+        }
+    }
+
+    fn open_iam_credential_form(&mut self) {
+        let credentials = match crate::config::load_iam_credentials(&self.credential_source) {
+            Ok(credentials) => credentials,
+            Err(err) => {
+                self.set_status(fmt_error(err), StatusKind::Error);
+                None
+            }
+        };
+        self.overlay = Some(Overlay::IamCredentialForm(match credentials {
+            Some(credentials) => IamCredentialForm {
+                service_principal_id: credentials.service_principal_id,
+                key_id: credentials.key_id,
+                private_key: credentials.private_key,
+                ..IamCredentialForm::default()
+            },
+            None => IamCredentialForm::default(),
+        }));
+    }
+
+    fn submit_iam_credentials(&mut self, mut form: IamCredentialForm) {
+        let credentials = form.credentials();
+        if credentials.service_principal_id.is_empty()
+            || credentials.key_id.is_empty()
+            || credentials.private_key.is_empty()
+        {
+            self.set_status(
+                "リソースID、キーID、RSA秘密鍵をすべて入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::IamCredentialForm(form));
+            return;
+        }
+        if !credentials.private_key.contains("-----BEGIN")
+            || !credentials.private_key.contains("PRIVATE KEY-----")
+        {
+            self.set_status("PEM形式のRSA秘密鍵を貼り付けてください", StatusKind::Error);
+            self.overlay = Some(Overlay::IamCredentialForm(form));
+            return;
+        }
+        form.verifying = true;
+        self.overlay = Some(Overlay::IamCredentialForm(form.clone()));
+        self.inflight += 1;
+        self.set_status("IAMサービスプリンシパルを検証しています…", StatusKind::Info);
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .verify_iam_credentials(&credentials)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::IamCredentialsVerified {
+                form: Box::new(form),
+                result,
+            });
+        });
+    }
+
+    fn open_create_iam_resource(&mut self, resource_type: &str) {
+        if !self.require_write() {
+            return;
+        }
+        self.overlay = Some(Overlay::IamResourceForm(IamResourceForm {
+            mode: IamResourceFormMode::Create,
+            resource_type: resource_type.to_string(),
+            target_id: None,
+            name: String::new(),
+            code: String::new(),
+            password: String::new(),
+            description: String::new(),
+            extra: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_iam_resource(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(resource) = self.selected_managed_resource() else {
+            return;
+        };
+        if resource.resource_type == "ロール" {
+            self.set_status("IAMロールの定義は編集できません", StatusKind::Info);
+            return;
+        }
+        self.overlay = Some(Overlay::IamResourceForm(IamResourceForm {
+            mode: IamResourceFormMode::Edit,
+            resource_type: resource.resource_type,
+            target_id: Some(resource.id),
+            name: resource.name,
+            code: String::new(),
+            password: String::new(),
+            description: resource.description,
+            extra: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn submit_iam_resource_form(&mut self, form: IamResourceForm) {
+        if form.name.trim().is_empty() {
+            self.set_status("名前を入力してください", StatusKind::Error);
+            self.overlay = Some(Overlay::IamResourceForm(form));
+            return;
+        }
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let label = format!(
+            "{}「{}」を{}",
+            form.resource_type,
+            form.name,
+            match form.mode {
+                IamResourceFormMode::Create => "作成",
+                IamResourceFormMode::Edit => "更新",
+            }
+        );
+        let validation_error = match (form.mode, form.resource_type.as_str()) {
+            (IamResourceFormMode::Create, "ユーザー")
+                if form.code.is_empty() || form.password.is_empty() =>
+            {
+                Some("ユーザーコードとパスワードを入力してください")
+            }
+            (IamResourceFormMode::Create, "プロジェクト") if form.code.is_empty() => {
+                Some("プロジェクトコードを入力してください")
+            }
+            (IamResourceFormMode::Create, "サービスプリンシパル")
+                if form.extra.parse::<i64>().is_err() =>
+            {
+                Some("プロジェクトIDを数値で入力してください")
+            }
+            _ => None,
+        };
+        if let Some(error) = validation_error {
+            self.set_status(error, StatusKind::Error);
+            self.overlay = Some(Overlay::IamResourceForm(form));
+            return;
+        }
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = match (form.mode, form.resource_type.as_str()) {
+                (IamResourceFormMode::Create, "ユーザー") => {
+                    client
+                        .create_iam_user(
+                            &form.name,
+                            &form.code,
+                            &form.password,
+                            &form.description,
+                            &form.extra,
+                        )
+                        .await
+                }
+                (IamResourceFormMode::Create, "プロジェクト") => {
+                    let parent = if form.extra.is_empty() {
+                        None
+                    } else {
+                        form.extra.parse::<i64>().ok()
+                    };
+                    client
+                        .create_iam_project(&form.name, &form.code, &form.description, parent)
+                        .await
+                }
+                (IamResourceFormMode::Create, "グループ") => {
+                    client.create_iam_group(&form.name, &form.description).await
+                }
+                (IamResourceFormMode::Create, "サービスプリンシパル") => {
+                    client
+                        .create_iam_service_principal(
+                            form.extra.parse().unwrap_or_default(),
+                            &form.name,
+                            &form.description,
+                        )
+                        .await
+                }
+                (IamResourceFormMode::Edit, "ユーザー") => {
+                    client
+                        .update_iam_user(
+                            form.target_id.as_deref().unwrap_or_default(),
+                            &form.name,
+                            (!form.password.is_empty()).then_some(form.password.as_str()),
+                            &form.description,
+                        )
+                        .await
+                }
+                (IamResourceFormMode::Edit, "プロジェクト") => {
+                    client
+                        .update_iam_project(
+                            form.target_id.as_deref().unwrap_or_default(),
+                            &form.name,
+                            &form.description,
+                        )
+                        .await
+                }
+                (IamResourceFormMode::Edit, "グループ") => {
+                    client
+                        .update_iam_group(
+                            form.target_id.as_deref().unwrap_or_default(),
+                            &form.name,
+                            &form.description,
+                        )
+                        .await
+                }
+                (IamResourceFormMode::Edit, "サービスプリンシパル") => {
+                    client
+                        .update_iam_service_principal(
+                            form.target_id.as_deref().unwrap_or_default(),
+                            &form.name,
+                            &form.description,
+                        )
+                        .await
+                }
+                _ => Err(anyhow::anyhow!("このIAMリソースは操作できません")),
+            }
+            .map_err(fmt_error);
+            let _ = tx.send(Message::IamAction { label, result });
+        });
+    }
+
+    fn confirm_delete_iam_resource(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(resource) = self.selected_managed_resource() else {
+            return;
+        };
+        if resource.resource_type == "ロール" {
+            self.set_status("IAMロールの定義は削除できません", StatusKind::Info);
+            return;
+        }
+        self.overlay = Some(Overlay::Confirm {
+            title: format!("{}の削除", resource.resource_type),
+            body: format!(
+                "{}「{}」を削除します。関連するアクセスが失われる可能性があります。\n実行するには名前を入力してください。",
+                resource.resource_type, resource.name
+            ),
+            verify: Some(resource.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteIamResource {
+                resource_type: resource.resource_type,
+                id: resource.id,
+                name: resource.name,
+            },
+        });
+    }
+
+    fn open_iam_role_form(&mut self, grant: bool) {
+        if !self.require_write() {
+            return;
+        }
+        let selected = self.selected_managed_resource();
+        let mut form = IamRoleForm {
+            grant,
+            project_id: String::new(),
+            principal_type: "user".to_string(),
+            principal_id: String::new(),
+            role_id: String::new(),
+            field: 0,
+        };
+        if let Some(resource) = selected {
+            match resource.resource_type.as_str() {
+                "プロジェクト" => form.project_id = resource.id,
+                "ユーザー" => form.principal_id = resource.id,
+                "グループ" => {
+                    form.principal_type = "group".to_string();
+                    form.principal_id = resource.id;
+                }
+                "サービスプリンシパル" => {
+                    form.principal_type = "service-principal".to_string();
+                    form.principal_id = resource.id;
+                    form.project_id = resource.plan;
+                }
+                "ロール" => form.role_id = resource.id,
+                _ => {}
+            }
+        }
+        self.overlay = Some(Overlay::IamRoleForm(form));
+    }
+
+    fn submit_iam_role_form(&mut self, form: IamRoleForm) {
+        let (Ok(project_id), Ok(principal_id)) = (
+            form.project_id.parse::<i64>(),
+            form.principal_id.parse::<i64>(),
+        ) else {
+            self.set_status(
+                "プロジェクトIDとプリンシパルIDは数値で入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::IamRoleForm(form));
+            return;
+        };
+        if form.role_id.is_empty()
+            || !matches!(
+                form.principal_type.as_str(),
+                "user" | "group" | "service-principal"
+            )
+        {
+            self.set_status(
+                "ロールIDとプリンシパル種別(user/group/service-principal)を確認してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::IamRoleForm(form));
+            return;
+        }
+        let action_label = if form.grant { "付与" } else { "解除" };
+        self.overlay = Some(Overlay::Confirm {
+            title: format!("IAMロールの{action_label}"),
+            body: format!(
+                "プロジェクト {project_id} の {} {principal_id} に対して、\nロール「{}」を{action_label}します。実行しますか？",
+                form.principal_type, form.role_id
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::ChangeIamRole {
+                project_id,
+                principal_type: form.principal_type,
+                principal_id,
+                role_id: form.role_id,
+                grant: form.grant,
+            },
+        });
     }
 
     // --- サービスの切り替え ---
@@ -4637,6 +5273,10 @@ impl App {
                         .list_managed_resources(ManagedResourceKind::Kms)
                         .await
                         .map(|v| v.len()),
+                    Service::Iam => sacloud
+                        .list_managed_resources(ManagedResourceKind::Iam)
+                        .await
+                        .map(|v| v.len()),
                     Service::AutoScale => sacloud
                         .list_managed_resources(ManagedResourceKind::AutoScale)
                         .await
@@ -4729,6 +5369,7 @@ impl App {
             | Service::LocalRouter
             | Service::Gslb
             | Service::Kms
+            | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => {
                 let kind = match service {
@@ -4743,6 +5384,7 @@ impl App {
                     Service::LocalRouter => ManagedResourceKind::LocalRouter,
                     Service::Gslb => ManagedResourceKind::Gslb,
                     Service::Kms => ManagedResourceKind::Kms,
+                    Service::Iam => ManagedResourceKind::Iam,
                     Service::AutoScale => ManagedResourceKind::AutoScale,
                     Service::EnhancedDb => ManagedResourceKind::EnhancedDb,
                     _ => unreachable!(),
@@ -5563,6 +6205,7 @@ impl App {
             | Service::LocalRouter
             | Service::Gslb
             | Service::Kms
+            | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => {
                 if let Some(kind) = self.managed_resource_kind() {
@@ -6163,6 +6806,51 @@ impl App {
                 name,
                 action,
             } => self.run_power_action(id, zone, name, action),
+            ConfirmAction::DeleteIamResource {
+                resource_type,
+                id,
+                name,
+            } => {
+                let client = self.sacloud.clone();
+                let tx = self.tx.clone();
+                let label = format!("{resource_type}「{name}」を削除");
+                self.inflight += 1;
+                tokio::spawn(async move {
+                    let result = client
+                        .delete_iam_resource(&resource_type, &id)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::IamAction { label, result });
+                });
+                self.set_status("送信中…", StatusKind::Info);
+            }
+            ConfirmAction::ChangeIamRole {
+                project_id,
+                principal_type,
+                principal_id,
+                role_id,
+                grant,
+            } => {
+                let client = self.sacloud.clone();
+                let tx = self.tx.clone();
+                let action = if grant { "付与" } else { "解除" };
+                let label = format!("IAMロール「{role_id}」を{action}");
+                self.inflight += 1;
+                tokio::spawn(async move {
+                    let result = client
+                        .change_project_iam_role(
+                            project_id,
+                            &role_id,
+                            &principal_type,
+                            principal_id,
+                            grant,
+                        )
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::IamAction { label, result });
+                });
+                self.set_status("送信中…", StatusKind::Info);
+            }
             ConfirmAction::ForgetLogin { host } => {
                 self.registry_clients.remove(&host);
                 self.registry.auto_login_tried.remove(&host);
@@ -6625,6 +7313,45 @@ impl App {
                 }
                 _ => self.overlay = Some(Overlay::AiEngineTokenForm(form)),
             },
+            Overlay::IamCredentialForm(mut form) => match key.code {
+                _ if form.verifying => {
+                    self.overlay = Some(Overlay::IamCredentialForm(form));
+                }
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_iam_credentials(form),
+                KeyCode::Tab | KeyCode::Down => {
+                    form.field = (form.field + 1) % IamCredentialForm::FIELDS;
+                    self.overlay = Some(Overlay::IamCredentialForm(form));
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    form.field =
+                        (form.field + IamCredentialForm::FIELDS - 1) % IamCredentialForm::FIELDS;
+                    self.overlay = Some(Overlay::IamCredentialForm(form));
+                }
+                KeyCode::Backspace => {
+                    match form.field {
+                        0 => {
+                            form.service_principal_id.pop();
+                        }
+                        1 => {
+                            form.key_id.pop();
+                        }
+                        _ => {
+                            form.private_key.pop();
+                        }
+                    }
+                    self.overlay = Some(Overlay::IamCredentialForm(form));
+                }
+                KeyCode::Char(c) if form.field < 2 => {
+                    if form.field == 0 {
+                        form.service_principal_id.push(c);
+                    } else {
+                        form.key_id.push(c);
+                    }
+                    self.overlay = Some(Overlay::IamCredentialForm(form));
+                }
+                _ => self.overlay = Some(Overlay::IamCredentialForm(form)),
+            },
             Overlay::ProfilePicker { sources, mut index } => {
                 // 一覧の最後に「新規作成」の行がある。
                 let rows = sources.len() + 1;
@@ -6661,6 +7388,22 @@ impl App {
                 _ => {
                     edit_registry_form(&mut form, key);
                     self.overlay = Some(Overlay::RegistryForm(form));
+                }
+            },
+            Overlay::IamResourceForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_iam_resource_form(form),
+                _ => {
+                    edit_iam_resource_form(&mut form, key);
+                    self.overlay = Some(Overlay::IamResourceForm(form));
+                }
+            },
+            Overlay::IamRoleForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_iam_role_form(form),
+                _ => {
+                    edit_iam_role_form(&mut form, key);
+                    self.overlay = Some(Overlay::IamRoleForm(form));
                 }
             },
             Overlay::SwitchForm(mut form) => match key.code {
@@ -6934,6 +7677,44 @@ fn edit_registry_form(form: &mut RegistryForm, key: KeyEvent) {
         KeyCode::Char(c) => {
             let field = form.field;
             if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_iam_resource_form(form: &mut IamResourceForm, key: KeyEvent) {
+    let fields = form.labels().len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_iam_role_form(form: &mut IamRoleForm, key: KeyEvent) {
+    let fields = IamRoleForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
                 value.push(c);
             }
         }
@@ -7599,6 +8380,7 @@ mod tests {
         assert!(!Service::Gslb.is_zoned());
         assert!(!Service::SimpleNotification.is_zoned());
         assert!(!Service::Kms.is_zoned());
+        assert!(!Service::Iam.is_zoned());
         assert!(Service::Archive.is_zoned());
         assert!(Service::IsoImage.is_zoned());
     }
@@ -7626,6 +8408,38 @@ mod tests {
         let form = AiEngineTokenForm {
             token: "uuid:must-not-appear".to_string(),
             ..AiEngineTokenForm::default()
+        };
+        let debug = format!("{form:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn iam_user_form_debug_redacts_password() {
+        let form = IamResourceForm {
+            mode: IamResourceFormMode::Create,
+            resource_type: "ユーザー".to_string(),
+            target_id: None,
+            name: "alice".to_string(),
+            code: "alice".to_string(),
+            password: "must-not-appear".to_string(),
+            description: String::new(),
+            extra: String::new(),
+            field: 0,
+        };
+        let debug = format!("{form:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("must-not-appear"));
+    }
+
+    #[test]
+    fn iam_credential_form_debug_redacts_private_key() {
+        let form = IamCredentialForm {
+            service_principal_id: "sp-1".to_string(),
+            key_id: "key-1".to_string(),
+            private_key: "must-not-appear".to_string(),
+            field: 2,
+            verifying: false,
         };
         let debug = format!("{form:?}");
         assert!(debug.contains("<redacted>"));

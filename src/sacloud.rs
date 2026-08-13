@@ -5,6 +5,7 @@
 //! 常に既定ゾーン `is1a` のエンドポイントを使う。
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Method, StatusCode};
@@ -12,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::config::ApiCredentials;
+use crate::config::{ApiCredentials, CredentialSource, IamCredentials};
 
 /// プロファイルにゾーン指定が無い場合の既定ゾーン。
 const DEFAULT_ZONE: &str = "is1a";
@@ -320,6 +321,19 @@ pub struct SacloudClient {
     default_zone: String,
     /// API のルート URL（末尾にスラッシュを含まない）。環境ごとに変わる。
     api_root: String,
+    credential_source: CredentialSource,
+    iam_token: tokio::sync::Mutex<Option<CachedIamToken>>,
+}
+
+#[derive(Debug)]
+struct CachedIamToken {
+    value: String,
+    fingerprint: u64,
+    expires_at: Instant,
+}
+
+fn global_api_root(api_root: &str) -> &str {
+    api_root.strip_suffix("/zone").unwrap_or(api_root)
 }
 
 impl SacloudClient {
@@ -334,6 +348,8 @@ impl SacloudClient {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_ZONE.to_string()),
             api_root: creds.api_root().to_string(),
+            credential_source: creds.source.clone(),
+            iam_token: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -433,6 +449,131 @@ impl SacloudClient {
             let head: String = text.chars().take(200).collect();
             format!("APIレスポンスの解析に失敗しました: {head}")
         })
+    }
+
+    /// ゾーンをURLに含まないグローバルAPIを呼ぶ。
+    ///
+    /// IAM APIは `/cloud/api/iam/1.0` にあり、IaaS APIのような
+    /// `/zone/{zone}` を経由しない。テスト環境のルートも維持できるよう、
+    /// 設定済みのAPIルートから末尾の `/zone` だけを取り除いて組み立てる。
+    pub(crate) async fn request_global_with_query<T: DeserializeOwned>(
+        &self,
+        suffix: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
+        self.request_global(Method::GET, suffix, path, query, None)
+            .await
+    }
+
+    pub(crate) async fn request_global<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        suffix: &str,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let root = global_api_root(&self.api_root);
+        let base = format!("{root}/{suffix}");
+        let mut url = reqwest::Url::parse(&format!("{base}/{path}"))
+            .with_context(|| format!("URLの組み立てに失敗しました: {base}/{path}"))?;
+        url.query_pairs_mut()
+            .extend_pairs(query.iter().map(|(key, value)| (*key, value.as_str())));
+
+        let bearer = if suffix == "api/iam/1.0" {
+            let credentials = crate::config::load_iam_credentials(&self.credential_source)?
+                .context(
+                    "IAM認証が未設定です。IAM画面で a キーを押し、サービスプリンシパルを設定してください",
+                )?;
+            Some(self.iam_access_token(&credentials).await?)
+        } else {
+            None
+        };
+        let res = crate::http::send_with_retry(&self.http, || {
+            let mut request = self.http.request(method.clone(), url.clone());
+            request = if let Some(token) = &bearer {
+                request
+                    .bearer_auth(token)
+                    .header("X-Requested-With", "XMLHttpRequest")
+            } else {
+                request.basic_auth(&self.token, Some(&self.secret))
+            };
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+            Ok(request.build()?)
+        })
+        .await
+        .context("さくらのクラウドAPIへのリクエストに失敗しました")?;
+        let status = res.status();
+        let text = res
+            .text()
+            .await
+            .context("APIレスポンスの読み取りに失敗しました")?;
+        if !status.is_success() {
+            bail!("{}", format_api_error(status, &text));
+        }
+        let text = if text.trim().is_empty() { "{}" } else { &text };
+        serde_json::from_str(text).with_context(|| {
+            let head: String = text.chars().take(200).collect();
+            format!("APIレスポンスの解析に失敗しました: {head}")
+        })
+    }
+
+    async fn iam_access_token(&self, credentials: &IamCredentials) -> Result<String> {
+        let fingerprint = crate::iam_auth::credentials_fingerprint(credentials);
+        let mut cached = self.iam_token.lock().await;
+        if let Some(token) = cached.as_ref()
+            && token.fingerprint == fingerprint
+            && token.expires_at > Instant::now() + Duration::from_secs(60)
+        {
+            return Ok(token.value.clone());
+        }
+        let issued =
+            crate::iam_auth::issue_access_token(&self.http, &self.api_root, credentials).await?;
+        let value = issued.value.clone();
+        *cached = Some(CachedIamToken {
+            value: issued.value,
+            fingerprint,
+            expires_at: Instant::now()
+                + Duration::from_secs(issued.expires_in.saturating_sub(30).max(1)),
+        });
+        Ok(value)
+    }
+
+    /// 入力されたIAMサービスプリンシパルの認証とユーザー参照権限を保存前に検証する。
+    pub async fn verify_iam_credentials(&self, credentials: &IamCredentials) -> Result<()> {
+        let token =
+            crate::iam_auth::issue_access_token(&self.http, &self.api_root, credentials).await?;
+        let root = global_api_root(&self.api_root);
+        let url = format!("{root}/api/iam/1.0/compat/users?page=1&per_page=1");
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token.value)
+            .header("X-Requested-With", "XMLHttpRequest")
+            .send()
+            .await
+            .context("IAMユーザー一覧の検証リクエストに失敗しました")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("IAMユーザー一覧の検証応答を読み取れませんでした")?;
+        if !status.is_success() {
+            let hint = if status == StatusCode::FORBIDDEN {
+                "\nサービスプリンシパルへIDポリシーの「ID閲覧者」または「ID管理者」を付与してください。"
+            } else {
+                ""
+            };
+            bail!(
+                "IAMユーザー一覧を取得できませんでした ({}): {}{hint}",
+                status,
+                body.chars().take(300).collect::<String>()
+            );
+        }
+        Ok(())
     }
 
     /// コンテナレジストリを全件取得する（ページングを辿る）。
@@ -782,6 +923,22 @@ mod find_tests {
         let query = url.query().unwrap();
         assert!(query.contains("Provider.Class"), "{query}");
         assert!(query.contains(REGISTRY_CLASS), "{query}");
+    }
+
+    #[test]
+    fn global_api_root_removes_only_the_zone_suffix() {
+        assert_eq!(
+            global_api_root("https://secure.sakura.ad.jp/cloud/zone"),
+            "https://secure.sakura.ad.jp/cloud"
+        );
+        assert_eq!(
+            global_api_root("https://secure.sakura.ad.jp/cloud-test/zone"),
+            "https://secure.sakura.ad.jp/cloud-test"
+        );
+        assert_eq!(
+            global_api_root("https://example.com/custom"),
+            "https://example.com/custom"
+        );
     }
 }
 

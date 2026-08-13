@@ -13,6 +13,7 @@ mod commonservice;
 mod config;
 mod http;
 mod iaas;
+mod iam_auth;
 mod keychain;
 mod managed_resources;
 mod monitoring;
@@ -83,6 +84,9 @@ const USAGE: &str = "さくらインターネットのサービスをターミ�
   SAKURA_PROFILE                                     usacloud プロファイル名
   SAKURA_TUI_CONFIG                                  設定ファイルのパス
   SAKURA_AI_ENGINE_TOKEN                             AI Engineアカウントトークン
+  SAKURA_SERVICE_PRINCIPAL_ID                        IAMサービスプリンシパルID
+  SAKURA_SERVICE_PRINCIPAL_KEY_ID                    IAMサービスプリンシパルキーID
+  SAKURA_PRIVATE_KEY                                 IAMサービスプリンシパルRSA秘密鍵
   SAKURA_API_ROOT_URL                                --api-root と同じ
   SAKURA_TUI_TRACE                                   --trace と同じ";
 

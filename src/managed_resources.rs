@@ -18,6 +18,7 @@ const WEBACCEL_SUFFIX: &str = "api/webaccel/1.0";
 const WORKFLOWS_SUFFIX: &str = "api/workflow/1.0";
 const KMS_API_ZONE: &str = "is1a";
 const KMS_SUFFIX: &str = "api/cloud/1.1/kms";
+const IAM_SUFFIX: &str = "api/iam/1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedResourceKind {
@@ -31,6 +32,7 @@ pub enum ManagedResourceKind {
     LocalRouter,
     Gslb,
     Kms,
+    Iam,
     SimpleNotification,
     AutoScale,
     EnhancedDb,
@@ -49,6 +51,7 @@ impl ManagedResourceKind {
             Self::LocalRouter => "ローカルルータ",
             Self::Gslb => "GSLB",
             Self::Kms => "KMS",
+            Self::Iam => "IAM",
             Self::SimpleNotification => "シンプル通知",
             Self::AutoScale => "オートスケール",
             Self::EnhancedDb => "エンハンスドデータベース",
@@ -112,6 +115,7 @@ impl SacloudClient {
             ManagedResourceKind::LocalRouter => self.list_common_service("localrouter", kind).await,
             ManagedResourceKind::Gslb => self.list_common_service("gslb", kind).await,
             ManagedResourceKind::Kms => self.list_kms_keys().await,
+            ManagedResourceKind::Iam => self.list_iam_resources().await,
             ManagedResourceKind::SimpleNotification => {
                 self.list_simple_notification_resources().await
             }
@@ -222,6 +226,201 @@ impl SacloudClient {
                 .then(a.name.cmp(&b.name))
         });
         Ok(out)
+    }
+
+    async fn list_iam_resources(&self) -> Result<Vec<ManagedResource>> {
+        let mut out = Vec::new();
+        for (path, resource_type) in [
+            ("compat/users", "ユーザー"),
+            ("groups", "グループ"),
+            ("projects", "プロジェクト"),
+            ("iam-roles", "ロール"),
+            ("service-principals", "サービスプリンシパル"),
+        ] {
+            out.extend(self.list_iam_resource_type(path, resource_type).await?);
+        }
+        out.sort_by(|a, b| {
+            a.resource_type
+                .cmp(&b.resource_type)
+                .then(a.name.cmp(&b.name))
+        });
+        Ok(out)
+    }
+
+    async fn list_iam_resource_type(
+        &self,
+        path: &str,
+        resource_type: &str,
+    ) -> Result<Vec<ManagedResource>> {
+        let mut out = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let value: Value = self
+                .request_global_with_query(
+                    IAM_SUFFIX,
+                    path,
+                    &[
+                        ("page", page.to_string()),
+                        ("per_page", PAGE_SIZE.to_string()),
+                    ],
+                )
+                .await
+                .with_context(|| format!("IAMの{resource_type}一覧を取得できませんでした"))?;
+            let total = value.get("count").and_then(value_usize).unwrap_or(0);
+            let items = first_array(&value, &["/items", "/Items"]);
+            let received = items.len();
+            out.extend(
+                items
+                    .iter()
+                    .map(|item| parse_iam_resource(item, resource_type))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            if received == 0 || out.len() >= total {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn create_iam_user(
+        &self,
+        name: &str,
+        code: &str,
+        password: &str,
+        description: &str,
+        email: &str,
+    ) -> Result<()> {
+        let mut body = json!({
+            "name": name, "code": code, "password": password, "description": description
+        });
+        if !email.is_empty() {
+            body["email"] = json!(email);
+        }
+        self.iam_write(Method::POST, "compat/users", Some(body))
+            .await
+    }
+
+    pub async fn update_iam_user(
+        &self,
+        id: &str,
+        name: &str,
+        password: Option<&str>,
+        description: &str,
+    ) -> Result<()> {
+        let mut body = json!({"name": name, "description": description});
+        if let Some(password) = password.filter(|value| !value.is_empty()) {
+            body["password"] = json!(password);
+        }
+        self.iam_write(Method::PUT, &format!("compat/users/{id}"), Some(body))
+            .await
+    }
+
+    pub async fn create_iam_project(
+        &self,
+        name: &str,
+        code: &str,
+        description: &str,
+        parent_folder_id: Option<i64>,
+    ) -> Result<()> {
+        let mut body = json!({"name": name, "code": code, "description": description});
+        if let Some(parent_folder_id) = parent_folder_id {
+            body["parent_folder_id"] = json!(parent_folder_id);
+        }
+        self.iam_write(Method::POST, "projects", Some(body)).await
+    }
+
+    pub async fn create_iam_group(&self, name: &str, description: &str) -> Result<()> {
+        self.iam_write(
+            Method::POST,
+            "groups",
+            Some(json!({"name": name, "description": description})),
+        )
+        .await
+    }
+
+    pub async fn update_iam_group(&self, id: &str, name: &str, description: &str) -> Result<()> {
+        self.iam_write(
+            Method::PUT,
+            &format!("groups/{id}"),
+            Some(json!({"name": name, "description": description})),
+        )
+        .await
+    }
+
+    pub async fn update_iam_project(&self, id: &str, name: &str, description: &str) -> Result<()> {
+        self.iam_write(
+            Method::PUT,
+            &format!("projects/{id}"),
+            Some(json!({"name": name, "description": description})),
+        )
+        .await
+    }
+
+    pub async fn create_iam_service_principal(
+        &self,
+        project_id: i64,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        self.iam_write(
+            Method::POST,
+            "service-principals",
+            Some(json!({
+                "project_id": project_id, "name": name, "description": description
+            })),
+        )
+        .await
+    }
+
+    pub async fn update_iam_service_principal(
+        &self,
+        id: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        self.iam_write(
+            Method::PUT,
+            &format!("service-principals/{id}"),
+            Some(json!({"name": name, "description": description})),
+        )
+        .await
+    }
+
+    pub async fn delete_iam_resource(&self, resource_type: &str, id: &str) -> Result<()> {
+        let path = match resource_type {
+            "ユーザー" => format!("compat/users/{id}"),
+            "グループ" => format!("groups/{id}"),
+            "プロジェクト" => format!("projects/{id}"),
+            "サービスプリンシパル" => format!("service-principals/{id}"),
+            _ => anyhow::bail!("{resource_type}は削除できません"),
+        };
+        self.iam_write(Method::DELETE, &path, None).await
+    }
+
+    pub async fn change_project_iam_role(
+        &self,
+        project_id: i64,
+        role_id: &str,
+        principal_type: &str,
+        principal_id: i64,
+        grant: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(principal_type, "user" | "group" | "service-principal"),
+            "プリンシパル種別が不正です"
+        );
+        let path = format!("projects/{project_id}/iam-policy");
+        let mut policy: Value = self
+            .request_global(Method::GET, IAM_SUFFIX, &path, &[], None)
+            .await?;
+        change_policy_binding(&mut policy, role_id, principal_type, principal_id, grant)?;
+        self.iam_write(Method::PUT, &path, Some(policy)).await
+    }
+
+    async fn iam_write(&self, method: Method, path: &str, body: Option<Value>) -> Result<()> {
+        let _: Value = self
+            .request_global(method, IAM_SUFFIX, path, &[], body)
+            .await?;
+        Ok(())
     }
 
     async fn list_object_storage_buckets(&self) -> Result<Vec<ManagedResource>> {
@@ -728,6 +927,133 @@ fn parse_kms_key(value: &Value) -> Result<ManagedResource> {
     })
 }
 
+fn parse_iam_resource(value: &Value, resource_type: &str) -> Result<ManagedResource> {
+    let id = first_non_empty(value, &["/id", "/ID"]);
+    anyhow::ensure!(!id.is_empty(), "IAMの{resource_type} IDがありません");
+    let name = first_non_empty(value, &["/name", "/code", "/id"]);
+    let description = string_at(value, "/description");
+    let status = string_at(value, "/status");
+    let plan = match resource_type {
+        "ユーザー" | "プロジェクト" => string_at(value, "/code"),
+        "ロール" => string_at(value, "/category"),
+        "サービスプリンシパル" => string_at(value, "/project_id"),
+        _ => String::new(),
+    };
+    let created_at = string_at(value, "/created_at");
+    let mut details = Vec::new();
+    add_detail(&mut details, "ID", id.clone());
+    add_detail(&mut details, "種別", resource_type.to_string());
+    add_detail(&mut details, "状態", status.clone());
+    match resource_type {
+        "ユーザー" => {
+            add_detail(&mut details, "ユーザーコード", string_at(value, "/code"));
+            add_detail(&mut details, "メールアドレス", string_at(value, "/email"));
+            add_detail(&mut details, "会員ID", string_at(value, "/member/code"));
+            add_detail(&mut details, "OTP", string_at(value, "/otp/status"));
+            add_detail(
+                &mut details,
+                "セキュリティキー登録済み",
+                string_at(value, "/is_security_key_registered"),
+            );
+            add_detail(
+                &mut details,
+                "パスワードレス",
+                string_at(value, "/is_passwordless"),
+            );
+        }
+        "プロジェクト" => {
+            add_detail(
+                &mut details,
+                "プロジェクトコード",
+                string_at(value, "/code"),
+            );
+            add_detail(
+                &mut details,
+                "親フォルダID",
+                string_at(value, "/parent_folder_id"),
+            );
+        }
+        "ロール" => {
+            add_detail(&mut details, "カテゴリ", string_at(value, "/category"));
+            add_detail(
+                &mut details,
+                "付与可能な最低階層",
+                string_at(value, "/lowest_grantable_resource"),
+            );
+        }
+        "サービスプリンシパル" => {
+            add_detail(
+                &mut details,
+                "プロジェクトID",
+                string_at(value, "/project_id"),
+            );
+        }
+        _ => {}
+    }
+    add_detail(&mut details, "作成日時", created_at.clone());
+    add_detail(&mut details, "更新日時", string_at(value, "/updated_at"));
+    Ok(ManagedResource {
+        id,
+        name,
+        description,
+        tags: Vec::new(),
+        resource_type: resource_type.to_string(),
+        status,
+        plan,
+        created_at,
+        details,
+    })
+}
+
+fn change_policy_binding(
+    policy: &mut Value,
+    role_id: &str,
+    principal_type: &str,
+    principal_id: i64,
+    grant: bool,
+) -> Result<()> {
+    let bindings = policy
+        .get_mut("bindings")
+        .and_then(Value::as_array_mut)
+        .context("IAMポリシーにbindingsがありません")?;
+    let target = json!({"type": principal_type, "id": principal_id});
+    if grant {
+        if let Some(binding) = bindings
+            .iter_mut()
+            .find(|binding| string_at(binding, "/role/id") == role_id)
+        {
+            let principals = binding
+                .get_mut("principals")
+                .and_then(Value::as_array_mut)
+                .context("IAMポリシーのprincipalsが不正です")?;
+            if !principals.iter().any(|principal| principal == &target) {
+                principals.push(target);
+            }
+        } else {
+            bindings.push(json!({
+                "role": {"type": "preset", "id": role_id},
+                "principals": [target]
+            }));
+        }
+    } else {
+        for binding in bindings.iter_mut() {
+            if string_at(binding, "/role/id") == role_id
+                && let Some(principals) =
+                    binding.get_mut("principals").and_then(Value::as_array_mut)
+            {
+                principals.retain(|principal| principal != &target);
+            }
+        }
+        bindings.retain(|binding| {
+            binding
+                .get("principals")
+                .and_then(Value::as_array)
+                .is_some_and(|principals| !principals.is_empty())
+        });
+    }
+    Ok(())
+}
+
 fn parse_webaccel_site(value: &Value) -> Result<ManagedResource> {
     let id = first_non_empty(value, &["/ID", "/Name"]);
     anyhow::ensure!(!id.is_empty(), "ウェブアクセラレータのサイトIDがありません");
@@ -1113,5 +1439,94 @@ mod tests {
                 .any(|v| v == &("最新バージョン".into(), "3".into()))
         );
         assert!(item.searchable().contains("prod"));
+    }
+
+    #[test]
+    fn parses_iam_users_and_projects_without_secret_fields() {
+        let user = json!({
+            "id": 101, "name": "Alice", "code": "alice", "status": "available",
+            "description": "operator", "email": "alice@example.com",
+            "member": {"id": 1, "code": "abc12345"},
+            "otp": {"status": "activated", "has_recovery_code": true},
+            "is_security_key_registered": true, "is_passwordless": false,
+            "created_at": "2026-08-01T00:00:00Z", "updated_at": "2026-08-02T00:00:00Z",
+            "password": "must-not-be-shown"
+        });
+        let item = parse_iam_resource(&user, "ユーザー").unwrap();
+        assert_eq!(item.id, "101");
+        assert_eq!(item.plan, "alice");
+        assert!(item.searchable().contains("alice@example.com"));
+        assert!(!item.searchable().contains("must-not-be-shown"));
+
+        let project = json!({
+            "id": 201, "code": "production", "name": "Production",
+            "description": "main project", "status": "available",
+            "parent_folder_id": 12, "created_at": "2026-08-01T00:00:00Z"
+        });
+        let item = parse_iam_resource(&project, "プロジェクト").unwrap();
+        assert_eq!(item.name, "Production");
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("親フォルダID".into(), "12".into()))
+        );
+    }
+
+    #[test]
+    fn parses_iam_roles_and_service_principals() {
+        let group = json!({
+            "id": 250, "name": "developers", "description": "development team",
+            "created_at": "2026-08-01T00:00:00Z"
+        });
+        let item = parse_iam_resource(&group, "グループ").unwrap();
+        assert_eq!(item.id, "250");
+        assert!(item.searchable().contains("development team"));
+
+        let role = json!({
+            "id": "sakura-cloud-viewer", "name": "リソース閲覧",
+            "description": "リソースを閲覧できます", "category": "sakura-cloud",
+            "lowest_grantable_resource": "project"
+        });
+        let item = parse_iam_resource(&role, "ロール").unwrap();
+        assert_eq!(item.id, "sakura-cloud-viewer");
+        assert_eq!(item.plan, "sakura-cloud");
+        assert!(item.searchable().contains("project"));
+
+        let principal = json!({
+            "id": 301, "project_id": 201, "name": "backup-worker",
+            "description": "nightly backup", "created_at": "2026-08-01T00:00:00Z"
+        });
+        let item = parse_iam_resource(&principal, "サービスプリンシパル").unwrap();
+        assert_eq!(item.plan, "201");
+        assert!(item.searchable().contains("backup-worker"));
+    }
+
+    #[test]
+    fn iam_policy_grant_is_idempotent_and_preserves_existing_bindings() {
+        let mut policy = json!({"bindings": [
+            {"role":{"type":"preset","id":"viewer"}, "principals":[{"type":"user","id":1}]},
+            {"role":{"type":"preset","id":"admin"}, "principals":[{"type":"group","id":2}]}
+        ]});
+        change_policy_binding(&mut policy, "viewer", "service-principal", 3, true).unwrap();
+        change_policy_binding(&mut policy, "viewer", "service-principal", 3, true).unwrap();
+        let bindings = policy["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0]["principals"].as_array().unwrap().len(), 2);
+        assert_eq!(bindings[1]["role"]["id"], "admin");
+    }
+
+    #[test]
+    fn iam_policy_revoke_removes_only_the_target_principal() {
+        let mut policy = json!({"bindings": [
+            {"role":{"type":"preset","id":"viewer"}, "principals":[
+                {"type":"user","id":1}, {"type":"user","id":2}
+            ]},
+            {"role":{"type":"preset","id":"admin"}, "principals":[{"type":"user","id":1}]}
+        ]});
+        change_policy_binding(&mut policy, "viewer", "user", 1, false).unwrap();
+        let bindings = policy["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0]["principals"], json!([{"type":"user","id":2}]));
+        assert_eq!(bindings[1]["principals"], json!([{"type":"user","id":1}]));
     }
 }

@@ -267,6 +267,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         | Service::LocalRouter
         | Service::Gslb
         | Service::Kms
+        | Service::Iam
         | Service::AutoScale
         | Service::EnhancedDb => managed_resources::draw(frame, area, app),
         Service::Dns => observability::draw_dns(frame, area, app),
@@ -564,10 +565,26 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         | Service::LocalRouter
         | Service::Gslb
         | Service::Kms
+        | Service::Iam
         | Service::AutoScale
         | Service::EnhancedDb => {
             if app.service == Service::AiEngine {
                 hints.push("t トークン管理");
+            }
+            if app.service == Service::Iam && app.mode == Mode::Write {
+                hints.extend([
+                    "u ユーザー作成",
+                    "U グループ作成",
+                    "P プロジェクト作成",
+                    "N SP作成",
+                    "E 編集",
+                    "D 削除",
+                    "g ロール付与",
+                    "G ロール解除",
+                ]);
+            }
+            if app.service == Service::Iam {
+                hints.push("a IAM認証");
             }
         }
     }
