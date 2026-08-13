@@ -222,15 +222,19 @@ fn service_picker_lines(
     app: &App,
     index: usize,
     current: Option<Service>,
-    _spacious: bool,
+    spacious: bool,
+    content_width: usize,
 ) -> (Vec<Line<'static>>, usize) {
     let mut lines = Vec::new();
     let mut selected_line = 0;
     let selected_category = Service::ALL[index].category();
-    for (i, service) in Service::ALL.iter().enumerate() {
-        if service.category() != selected_category {
-            continue;
-        }
+    let category_services: Vec<(usize, &Service)> = Service::ALL
+        .iter()
+        .enumerate()
+        .filter(|(_, service)| service.category() == selected_category)
+        .collect();
+    let category_len = category_services.len();
+    for (row, (i, service)) in category_services.into_iter().enumerate() {
         let selected = i == index;
         if selected {
             selected_line = lines.len();
@@ -255,40 +259,93 @@ fn service_picker_lines(
         };
         let mut spans = vec![
             Span::styled(
-                if selected { "▌ " } else { "  " },
+                if selected { "▌  " } else { "   " },
                 Style::default().fg(accent()),
             ),
             Span::styled(format!("{marker} {}", service.title()), name_style),
         ];
-        // どのサービスにどれだけあるかを、そのサービスに行かずに見せる。
-        // 件数は桁を揃えたいので、先に空白で埋めてから置く。
-        let used = super::width(&spans);
-        let pad_then = |spans: &mut Vec<Span<'static>>| {
-            spans.push(Span::raw(" ".repeat(COUNT_COLUMN.saturating_sub(used))));
-        };
-        if let Availability::Unusable(reason) = availability {
-            pad_then(&mut spans);
-            spans.push(Span::styled(
-                format!("利用できません（{reason}）"),
+        // 件数列は右端を基準に揃える。現在表示を固定幅の別列にすることで、
+        // サービス名や桁数が変わっても数字の位置が動かない。
+        let (count_text, count_style) = if let Availability::Unusable(reason) = availability {
+            (
+                format!("利用不可: {reason}"),
                 Style::default().fg(Color::Red),
-            ));
+            )
         } else if let Some(label) = service.count_label() {
-            pad_then(&mut spans);
-            spans.push(service_count_span(app, *service, label));
-        }
-        if is_current {
-            spans.push(Span::styled("  (現在)", Style::default().fg(DIM)));
+            service_count_text(app, *service, label)
+        } else {
+            (String::new(), Style::default())
+        };
+        let current_width = if current.is_some() { 8 } else { 0 };
+        let used = super::width(&spans);
+        let count_width = unicode_width::UnicodeWidthStr::width(count_text.as_str());
+        let padding = aligned_padding(content_width, used, count_width, current_width);
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.push(Span::styled(count_text, count_style));
+        if current.is_some() {
+            spans.push(Span::styled(
+                if is_current { "  現在" } else { "      " },
+                if is_current {
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ));
         }
         lines.push(Line::from(spans));
+        if spacious && row + 1 < category_len {
+            lines.push(Line::raw(""));
+        }
     }
     (lines, selected_line)
 }
 
-/// 件数を書き始める桁。サービス名で一番長いものより後ろに置く。
-const COUNT_COLUMN: usize = 28;
+fn aligned_padding(
+    content_width: usize,
+    used_width: usize,
+    value_width: usize,
+    trailing_width: usize,
+) -> usize {
+    content_width
+        .saturating_sub(trailing_width)
+        .saturating_sub(used_width)
+        .saturating_sub(value_width)
+        .max(2)
+}
+
+/// カテゴリ名を左、件数を枠の右端に揃えた行を作る。
+///
+/// 日本語は文字数と端末上の表示幅が異なるため、固定文字数ではなく表示セル数から
+/// 余白を計算する。
+fn category_picker_line(category: Category, selected: bool, content_width: usize) -> Line<'static> {
+    let marker = if selected { "▌  " } else { "   " };
+    let count = category.services().count().to_string();
+    let name = category.title();
+    let used_width =
+        unicode_width::UnicodeWidthStr::width(marker) + unicode_width::UnicodeWidthStr::width(name);
+    let count_width = unicode_width::UnicodeWidthStr::width(count.as_str());
+    let padding = aligned_padding(content_width, used_width, count_width, 0);
+
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(accent())),
+        Span::styled(
+            name.to_string(),
+            if selected {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(
+            count,
+            Style::default().fg(if selected { Color::Cyan } else { DIM }),
+        ),
+    ])
+}
 
 /// サービスごとのリソース数。0 件は薄く、取得中は「…」で出す。
-fn service_count_span(app: &App, service: Service, label: &str) -> Span<'static> {
+fn service_count_text(app: &App, service: Service, label: &str) -> (String, Style) {
     // ゾーン依存のサービスは、どのゾーンの数なのかを添える。
     let suffix = if service.is_zoned() {
         format!(" @{}", app.zone)
@@ -296,30 +353,29 @@ fn service_count_span(app: &App, service: Service, label: &str) -> Span<'static>
         String::new()
     };
     match app.service_counts.get(&service) {
-        Some(Loadable::Ready(0)) => Span::styled(format!("なし{suffix}"), Style::default().fg(DIM)),
-        Some(Loadable::Ready(count)) => Span::styled(
+        Some(Loadable::Ready(0)) => (format!("0 {label}{suffix}"), Style::default().fg(DIM)),
+        Some(Loadable::Ready(count)) => (
             format!("{count} {label}{suffix}"),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         // 失敗は呼び出し側が「利用できません」として出す。
-        Some(Loadable::Failed(_)) => Span::raw(""),
-        _ => Span::styled("…", Style::default().fg(DIM)),
+        Some(Loadable::Failed(_)) => (String::new(), Style::default()),
+        _ => (format!("… {label}{suffix}"), Style::default().fg(DIM)),
     }
 }
 
 fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, initial: bool) {
     let current = (!initial).then_some(app.service);
     let selected_category = Service::ALL[index].category();
-    let (services, _) = service_picker_lines(app, index, current, false);
     let area = frame.area();
     frame.render_widget(Clear, area);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(1),
         ])
@@ -361,7 +417,7 @@ fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, initial: bool
             Span::styled(" カテゴリ   ", Style::default().fg(DIM)),
             Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
-                " サービス   @ は現在のゾーンの件数",
+                " サービス   件数は右端に表示（@ は現在のゾーン）",
                 Style::default().fg(DIM),
             ),
         ])),
@@ -375,52 +431,53 @@ fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, initial: bool
             Constraint::Length(2),
         ])
         .split(rows[2]);
-    let wide = body[1].width >= 64;
+    let wide = body[1].width >= 72;
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(if wide {
-            [Constraint::Length(26), Constraint::Min(30)]
+            [Constraint::Length(34), Constraint::Min(38)]
         } else {
             [Constraint::Length(0), Constraint::Min(1)]
         })
         .split(body[1]);
-    let category_lines: Vec<Line> = Category::ALL
-        .iter()
-        .map(|category| {
-            let selected = *category == selected_category;
-            let count = category.services().count();
-            Line::from(vec![
-                Span::styled(
-                    if selected { "▌ " } else { "  " },
-                    Style::default().fg(accent()),
-                ),
-                Span::styled(
-                    super::pad(category.title(), 18),
-                    if selected {
-                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(DIM)
-                    },
-                ),
-                Span::styled(count.to_string(), Style::default().fg(DIM)),
-            ])
-        })
-        .collect();
+    // 左右 1 セルと上 1 行を枠内の余白として確保する。
+    let category_inner_width = columns[0].width.saturating_sub(4) as usize;
+    let category_spacious =
+        columns[0].height.saturating_sub(3) >= (Category::ALL.len() * 2 - 1) as u16;
+    let mut category_lines: Vec<Line> = Vec::new();
+    for (row, category) in Category::ALL.iter().enumerate() {
+        let selected = *category == selected_category;
+        category_lines.push(category_picker_line(
+            *category,
+            selected,
+            category_inner_width,
+        ));
+        if category_spacious && row + 1 < Category::ALL.len() {
+            category_lines.push(Line::raw(""));
+        }
+    }
     if wide {
         frame.render_widget(
             Paragraph::new(category_lines).block(
                 Block::bordered()
                     .title(" カテゴリ ")
-                    .border_style(Style::default().fg(accent())),
+                    .border_style(Style::default().fg(accent()))
+                    .padding(ratatui::widgets::Padding::new(1, 1, 1, 0)),
             ),
             columns[0],
         );
     }
+    let service_inner_width = columns[1].width.saturating_sub(4) as usize;
+    let service_count = selected_category.services().count();
+    let service_spacious = columns[1].height.saturating_sub(3) >= (service_count * 2 - 1) as u16;
+    let (services, _) =
+        service_picker_lines(app, index, current, service_spacious, service_inner_width);
     frame.render_widget(
         Paragraph::new(services).block(
             Block::bordered()
                 .title(format!(" {} ", selected_category.title()))
-                .border_style(Style::default().fg(accent())),
+                .border_style(Style::default().fg(accent()))
+                .padding(ratatui::widgets::Padding::new(1, 1, 1, 0)),
         ),
         columns[1],
     );
@@ -1867,4 +1924,42 @@ fn permission_line(selected: usize, focused: bool) -> Line<'static> {
         spans.push(Span::styled(format!(" {} ", permission.as_str()), style));
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{aligned_padding, category_picker_line};
+    use crate::app::Category;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn count_values_end_at_the_same_column() {
+        let content = 52;
+        let trailing = 8;
+        for (name_width, value_width) in [(12, 4), (24, 9), (18, 13)] {
+            let padding = aligned_padding(content, name_width, value_width, trailing);
+            assert_eq!(name_width + padding + value_width + trailing, content);
+        }
+    }
+
+    #[test]
+    fn narrow_rows_keep_a_minimum_gap() {
+        assert_eq!(aligned_padding(20, 18, 8, 0), 2);
+    }
+
+    #[test]
+    fn every_category_count_ends_at_the_content_edge() {
+        let content_width = 30;
+        for category in Category::ALL {
+            for selected in [false, true] {
+                let line = category_picker_line(category, selected, content_width);
+                let width: usize = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref().width())
+                    .sum();
+                assert_eq!(width, content_width, "{}", category.title());
+            }
+        }
+    }
 }

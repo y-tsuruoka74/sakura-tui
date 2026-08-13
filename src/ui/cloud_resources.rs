@@ -18,12 +18,29 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         super::draw_full_width_error(frame, area, title, &err);
         return;
     }
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(area);
-    draw_list(frame, chunks[0], app, title);
-    draw_detail(frame, chunks[1], app, title);
+    if area.width >= 100 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(56),
+                Constraint::Length(1),
+                Constraint::Min(36),
+            ])
+            .split(area);
+        draw_list(frame, chunks[0], app, title);
+        draw_detail(frame, chunks[2], app, title);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(56),
+                Constraint::Length(1),
+                Constraint::Min(8),
+            ])
+            .split(area);
+        draw_list(frame, chunks[0], app, title);
+        draw_detail(frame, chunks[2], app, title);
+    }
 }
 
 fn draw_list(frame: &mut Frame, area: Rect, app: &mut App, title: &str) {
@@ -34,7 +51,8 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App, title: &str) {
             format!(" {title} — {} ({count}) ", app.zone),
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
-        .border_style(border_style(true));
+        .border_style(border_style(true))
+        .padding(ratatui::widgets::Padding::horizontal(1));
     match &resources {
         Loadable::Idle | Loadable::Loading => {
             frame.render_widget(placeholder("読み込み中…").block(block), area)
@@ -88,6 +106,8 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App, title: &str) {
                     .fg(accent())
                     .add_modifier(Modifier::BOLD | Modifier::REVERSED),
             )
+            .highlight_symbol("▌ ")
+            .column_spacing(1)
             .block(block);
             frame.render_stateful_widget(table, area, &mut app.cloud_resources.state);
         }

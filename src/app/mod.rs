@@ -608,6 +608,7 @@ pub enum Service {
     SimpleMq,
     EventBus,
     Workflows,
+    AutoScale,
     Server,
     Switch,
     Disk,
@@ -617,6 +618,8 @@ pub enum Service {
     Database,
     Nfs,
     ObjectStorage,
+    EnhancedDb,
+    WebAccel,
     Dns,
     SimpleMonitor,
     Secrets,
@@ -638,7 +641,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 21] = [
+    pub const ALL: [Service; 24] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -655,16 +658,19 @@ impl Service {
         Service::LoadBalancer,
         Service::VpcRouter,
         Service::Dns,
+        Service::WebAccel,
         // ストレージ・データ
         Service::Disk,
         Service::Database,
         Service::Nfs,
         Service::ObjectStorage,
+        Service::EnhancedDb,
         // セキュリティ
         Service::Secrets,
         // 運用・監視
         Service::SimpleMonitor,
         Service::Monitoring,
+        Service::AutoScale,
         // アカウント
         Service::Account,
         Service::Billing,
@@ -729,6 +735,14 @@ impl Service {
                 count_label: Some("件"),
                 zoned: false,
             },
+            Service::AutoScale => ServiceMeta {
+                category: Category::Ops,
+                title: "オートスケール",
+                arg_name: "autoscale",
+                countable_label: None,
+                count_label: Some("設定"),
+                zoned: false,
+            },
             Service::Switch => ServiceMeta {
                 category: Category::Network,
                 title: "スイッチ",
@@ -791,6 +805,22 @@ impl Service {
                 arg_name: "object-storage",
                 countable_label: None,
                 count_label: Some("バケット"),
+                zoned: false,
+            },
+            Service::EnhancedDb => ServiceMeta {
+                category: Category::Storage,
+                title: "エンハンスドデータベース",
+                arg_name: "enhanced-db",
+                countable_label: None,
+                count_label: Some("DB"),
+                zoned: false,
+            },
+            Service::WebAccel => ServiceMeta {
+                category: Category::Network,
+                title: "ウェブアクセラレータ",
+                arg_name: "webaccel",
+                countable_label: None,
+                count_label: Some("サイト"),
                 zoned: false,
             },
             Service::Dns => ServiceMeta {
@@ -2302,6 +2332,9 @@ impl App {
             Service::SimpleMq => Some(ManagedResourceKind::SimpleMq),
             Service::EventBus => Some(ManagedResourceKind::EventBus),
             Service::Workflows => Some(ManagedResourceKind::Workflows),
+            Service::WebAccel => Some(ManagedResourceKind::WebAccel),
+            Service::AutoScale => Some(ManagedResourceKind::AutoScale),
+            Service::EnhancedDb => Some(ManagedResourceKind::EnhancedDb),
             _ => None,
         }
     }
@@ -2472,9 +2505,13 @@ impl App {
             | Service::VpcRouter
             | Service::Database
             | Service::Nfs => Pane::CloudResources,
-            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
-                Pane::ManagedResources
-            }
+            Service::ObjectStorage
+            | Service::SimpleMq
+            | Service::EventBus
+            | Service::Workflows
+            | Service::WebAccel
+            | Service::AutoScale
+            | Service::EnhancedDb => Pane::ManagedResources,
             Service::Dns => match self.dns.focus {
                 ListFocus::Left => Pane::DnsZones,
                 ListFocus::Right => Pane::DnsRecords,
@@ -2617,9 +2654,13 @@ impl App {
             | Service::VpcRouter
             | Service::Database
             | Service::Nfs => self.cloud_resources_ensure_loaded(),
-            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
-                self.managed_resources_ensure_loaded()
-            }
+            Service::ObjectStorage
+            | Service::SimpleMq
+            | Service::EventBus
+            | Service::Workflows
+            | Service::WebAccel
+            | Service::AutoScale
+            | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
@@ -3943,8 +3984,13 @@ impl App {
             | Service::VpcRouter
             | Service::Database
             | Service::Nfs => {}
-            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
-            }
+            Service::ObjectStorage
+            | Service::SimpleMq
+            | Service::EventBus
+            | Service::Workflows
+            | Service::WebAccel
+            | Service::AutoScale
+            | Service::EnhancedDb => {}
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
             // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
@@ -4256,6 +4302,18 @@ impl App {
                         .list_managed_resources(ManagedResourceKind::Workflows)
                         .await
                         .map(|v| v.len()),
+                    Service::WebAccel => sacloud
+                        .list_managed_resources(ManagedResourceKind::WebAccel)
+                        .await
+                        .map(|v| v.len()),
+                    Service::AutoScale => sacloud
+                        .list_managed_resources(ManagedResourceKind::AutoScale)
+                        .await
+                        .map(|v| v.len()),
+                    Service::EnhancedDb => sacloud
+                        .list_managed_resources(ManagedResourceKind::EnhancedDb)
+                        .await
+                        .map(|v| v.len()),
                     // 請求はアカウントIDを引いてから年を指定して数える。
                     Service::Billing => match sacloud.billing_identity().await {
                         Ok(identity) => sacloud
@@ -4319,12 +4377,21 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
-            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+            Service::ObjectStorage
+            | Service::SimpleMq
+            | Service::EventBus
+            | Service::Workflows
+            | Service::WebAccel
+            | Service::AutoScale
+            | Service::EnhancedDb => {
                 let kind = match service {
                     Service::ObjectStorage => ManagedResourceKind::ObjectStorage,
                     Service::SimpleMq => ManagedResourceKind::SimpleMq,
                     Service::EventBus => ManagedResourceKind::EventBus,
                     Service::Workflows => ManagedResourceKind::Workflows,
+                    Service::WebAccel => ManagedResourceKind::WebAccel,
+                    Service::AutoScale => ManagedResourceKind::AutoScale,
+                    Service::EnhancedDb => ManagedResourceKind::EnhancedDb,
                     _ => unreachable!(),
                 };
                 self.managed_resources.items.get(&kind)?.ready()?.len()
@@ -5006,7 +5073,13 @@ impl App {
                 }
                 self.cloud_resources_ensure_loaded();
             }
-            Service::ObjectStorage | Service::SimpleMq | Service::EventBus | Service::Workflows => {
+            Service::ObjectStorage
+            | Service::SimpleMq
+            | Service::EventBus
+            | Service::Workflows
+            | Service::WebAccel
+            | Service::AutoScale
+            | Service::EnhancedDb => {
                 if let Some(kind) = self.managed_resource_kind() {
                     self.managed_resources.items.remove(&kind);
                 }
@@ -6914,7 +6987,7 @@ mod tests {
         assert_eq!(move_service_within_category(switch, 1), internet);
         assert_eq!(
             Service::ALL[move_service_within_category(switch, -1)],
-            Service::Dns
+            Category::Network.services().last().unwrap()
         );
     }
 

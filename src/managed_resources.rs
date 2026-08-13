@@ -13,6 +13,8 @@ const MAX_PAGES: usize = 100;
 /// バケット自体の配置先サイトとは別物で、公式SDKも `is1a` を固定で使用する。
 const OBJECT_STORAGE_API_ZONE: &str = "is1a";
 const OBJECT_STORAGE_SUFFIX: &str = "api/objectstorage/1.0";
+const WEBACCEL_API_ZONE: &str = "is1a";
+const WEBACCEL_SUFFIX: &str = "api/webaccel/1.0";
 const WORKFLOWS_SUFFIX: &str = "api/workflow/1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +23,9 @@ pub enum ManagedResourceKind {
     SimpleMq,
     EventBus,
     Workflows,
+    WebAccel,
+    AutoScale,
+    EnhancedDb,
 }
 
 impl ManagedResourceKind {
@@ -30,6 +35,9 @@ impl ManagedResourceKind {
             Self::SimpleMq => "シンプルMQ",
             Self::EventBus => "イベントバス",
             Self::Workflows => "ワークフロー",
+            Self::WebAccel => "ウェブアクセラレータ",
+            Self::AutoScale => "オートスケール",
+            Self::EnhancedDb => "エンハンスドデータベース",
         }
     }
 }
@@ -72,6 +80,9 @@ impl SacloudClient {
             ManagedResourceKind::SimpleMq => self.list_common_service("simplemq", kind).await,
             ManagedResourceKind::EventBus => self.list_eventbus_resources().await,
             ManagedResourceKind::Workflows => self.list_workflows().await,
+            ManagedResourceKind::WebAccel => self.list_webaccel_sites().await,
+            ManagedResourceKind::AutoScale => self.list_common_service("autoscale", kind).await,
+            ManagedResourceKind::EnhancedDb => self.list_common_service("enhanceddb", kind).await,
         }
     }
 
@@ -260,6 +271,25 @@ impl SacloudClient {
         }
         Ok(out)
     }
+
+    async fn list_webaccel_sites(&self) -> Result<Vec<ManagedResource>> {
+        let value: Value = self
+            .request_with_suffix(
+                WEBACCEL_API_ZONE,
+                WEBACCEL_SUFFIX,
+                Method::GET,
+                "site",
+                None,
+            )
+            .await?;
+        value
+            .get("Sites")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(parse_webaccel_site)
+            .collect()
+    }
 }
 
 fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<ManagedResource> {
@@ -271,6 +301,8 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
         "eventbusschedule" => "スケジュール",
         "eventbustrigger" => "トリガー",
         "eventbusprocessconfiguration" => "処理設定",
+        "autoscale" => "スケール設定",
+        "enhanceddb" => "データベース",
         _ => class.as_str(),
     }
     .to_string();
@@ -282,91 +314,135 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
     add_detail(&mut details, "種別", resource_type.clone());
     add_detail(&mut details, "状態", status.clone());
     add_detail(&mut details, "サービスクラス", plan.clone());
-    if kind == ManagedResourceKind::SimpleMq {
-        add_detail(
-            &mut details,
-            "キュー名",
-            first_non_empty(value, &["/Status/QueueName", "/Name"]),
-        );
-        add_detail(
-            &mut details,
-            "可視性タイムアウト(秒)",
-            string_at(value, "/Settings/VisibilityTimeoutSeconds"),
-        );
-        add_detail(
-            &mut details,
-            "保存期間(秒)",
-            string_at(value, "/Settings/ExpireSeconds"),
-        );
-    } else {
-        add_detail(
-            &mut details,
-            "プロバイダー",
-            string_at(value, "/Provider/Name"),
-        );
-        match class.as_str() {
-            "eventbusschedule" => {
-                add_detail(
-                    &mut details,
-                    "処理設定ID",
-                    string_at(value, "/Settings/ProcessConfigurationID"),
-                );
-                add_detail(
-                    &mut details,
-                    "開始時刻",
-                    string_at(value, "/Settings/StartsAt"),
-                );
-                add_detail(
-                    &mut details,
-                    "crontab",
-                    string_at(value, "/Settings/Crontab"),
-                );
-                let interval = [
-                    string_at(value, "/Settings/RecurringStep"),
-                    string_at(value, "/Settings/RecurringUnit"),
-                ]
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-                add_detail(&mut details, "実行間隔", interval);
-            }
-            "eventbustrigger" => {
-                add_detail(
-                    &mut details,
-                    "イベントソース",
-                    string_at(value, "/Settings/Source"),
-                );
-                add_detail(
-                    &mut details,
-                    "イベント種別",
-                    string_array_at(value, "/Settings/Types").join(", "),
-                );
-                add_detail(
-                    &mut details,
-                    "処理設定ID",
-                    string_at(value, "/Settings/ProcessConfigurationID"),
-                );
-            }
-            "eventbusprocessconfiguration" => {
-                add_detail(
-                    &mut details,
-                    "宛先",
-                    string_at(value, "/Settings/Destination"),
-                );
-                add_detail(
-                    &mut details,
-                    "パラメータ",
-                    string_at(value, "/Settings/Parameters"),
-                );
-            }
-            _ => {}
+    match kind {
+        ManagedResourceKind::SimpleMq => {
+            add_detail(
+                &mut details,
+                "キュー名",
+                first_non_empty(value, &["/Status/QueueName", "/Name"]),
+            );
+            add_detail(
+                &mut details,
+                "可視性タイムアウト(秒)",
+                string_at(value, "/Settings/VisibilityTimeoutSeconds"),
+            );
+            add_detail(
+                &mut details,
+                "保存期間(秒)",
+                string_at(value, "/Settings/ExpireSeconds"),
+            );
         }
-        add_detail(
-            &mut details,
-            "最終結果",
-            string_at(value, "/Status/Message"),
-        );
+        ManagedResourceKind::AutoScale => {
+            add_detail(
+                &mut details,
+                "トリガー",
+                string_at(value, "/Settings/TriggerType"),
+            );
+            add_detail(
+                &mut details,
+                "対象ゾーン",
+                string_array_at(value, "/Settings/SakuraCloudZones").join(", "),
+            );
+            add_detail(
+                &mut details,
+                "停止中",
+                string_at(value, "/Settings/Disabled"),
+            );
+            add_detail(
+                &mut details,
+                "登録元",
+                string_at(value, "/Status/RegisteredBy"),
+            );
+        }
+        ManagedResourceKind::EnhancedDb => {
+            add_detail(
+                &mut details,
+                "データベース名",
+                string_at(value, "/Status/database_name"),
+            );
+            add_detail(
+                &mut details,
+                "データベース種別",
+                string_at(value, "/Status/database_type"),
+            );
+            add_detail(
+                &mut details,
+                "リージョン",
+                string_at(value, "/Status/region"),
+            );
+            add_detail(&mut details, "ホスト", string_at(value, "/Status/hostname"));
+            add_detail(&mut details, "ポート", string_at(value, "/Status/port"));
+        }
+        _ => {
+            add_detail(
+                &mut details,
+                "プロバイダー",
+                string_at(value, "/Provider/Name"),
+            );
+            match class.as_str() {
+                "eventbusschedule" => {
+                    add_detail(
+                        &mut details,
+                        "処理設定ID",
+                        string_at(value, "/Settings/ProcessConfigurationID"),
+                    );
+                    add_detail(
+                        &mut details,
+                        "開始時刻",
+                        string_at(value, "/Settings/StartsAt"),
+                    );
+                    add_detail(
+                        &mut details,
+                        "crontab",
+                        string_at(value, "/Settings/Crontab"),
+                    );
+                    let interval = [
+                        string_at(value, "/Settings/RecurringStep"),
+                        string_at(value, "/Settings/RecurringUnit"),
+                    ]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                    add_detail(&mut details, "実行間隔", interval);
+                }
+                "eventbustrigger" => {
+                    add_detail(
+                        &mut details,
+                        "イベントソース",
+                        string_at(value, "/Settings/Source"),
+                    );
+                    add_detail(
+                        &mut details,
+                        "イベント種別",
+                        string_array_at(value, "/Settings/Types").join(", "),
+                    );
+                    add_detail(
+                        &mut details,
+                        "処理設定ID",
+                        string_at(value, "/Settings/ProcessConfigurationID"),
+                    );
+                }
+                "eventbusprocessconfiguration" => {
+                    add_detail(
+                        &mut details,
+                        "宛先",
+                        string_at(value, "/Settings/Destination"),
+                    );
+                    add_detail(
+                        &mut details,
+                        "パラメータ",
+                        string_at(value, "/Settings/Parameters"),
+                    );
+                }
+                _ => {}
+            }
+            add_detail(
+                &mut details,
+                "最終結果",
+                string_at(value, "/Status/Message"),
+            );
+        }
     }
     add_detail(&mut details, "タグ", tags.join(", "));
     add_detail(&mut details, "作成日時", string_at(value, "/CreatedAt"));
@@ -379,6 +455,61 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
         resource_type,
         status,
         plan,
+        created_at: string_at(value, "/CreatedAt"),
+        details,
+    })
+}
+
+fn parse_webaccel_site(value: &Value) -> Result<ManagedResource> {
+    let id = first_non_empty(value, &["/ID", "/Name"]);
+    anyhow::ensure!(!id.is_empty(), "ウェブアクセラレータのサイトIDがありません");
+    let status = string_at(value, "/Status");
+    let origin_type = match string_at(value, "/OriginType").as_str() {
+        "0" => "ウェブサーバー",
+        "1" => "オブジェクトストレージ",
+        _ => "不明",
+    }
+    .to_string();
+    let domain = first_non_empty(value, &["/Domain", "/Subdomain"]);
+    let mut details = Vec::new();
+    add_detail(&mut details, "ID", id.clone());
+    add_detail(&mut details, "状態", status.clone());
+    add_detail(&mut details, "ドメイン", domain);
+    add_detail(&mut details, "オリジン種別", origin_type.clone());
+    add_detail(&mut details, "オリジン", string_at(value, "/Origin"));
+    add_detail(
+        &mut details,
+        "オリジンプロトコル",
+        string_at(value, "/OriginProtocol"),
+    );
+    add_detail(
+        &mut details,
+        "キャッシュTTL(秒)",
+        string_at(value, "/DefaultCacheTTL"),
+    );
+    add_detail(
+        &mut details,
+        "証明書",
+        if value
+            .get("HasCertificate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "設定済み"
+        } else {
+            "未設定"
+        }
+        .to_string(),
+    );
+    add_detail(&mut details, "作成日時", string_at(value, "/CreatedAt"));
+    Ok(ManagedResource {
+        id,
+        name: string_at(value, "/Name"),
+        description: String::new(),
+        tags: Vec::new(),
+        resource_type: origin_type,
+        status,
+        plan: string_at(value, "/RequestProtocol"),
         created_at: string_at(value, "/CreatedAt"),
         details,
     })
@@ -529,5 +660,50 @@ mod tests {
         let unauthorized = anyhow::anyhow!("API エラー (401 Unauthorized): Authentication failed");
         assert!(is_api_status(&missing, 404));
         assert!(!is_api_status(&unauthorized, 404));
+    }
+
+    #[test]
+    fn parses_webaccel_site_details() {
+        let value = json!({
+            "ID": "000000000001", "Name": "docs", "Status": "enabled",
+            "Domain": "docs.example.com", "OriginType": "0",
+            "Origin": "origin.example.com", "OriginProtocol": "https",
+            "DefaultCacheTTL": 3600, "HasCertificate": true
+        });
+        let item = parse_webaccel_site(&value).unwrap();
+        assert_eq!(item.resource_type, "ウェブサーバー");
+        assert_eq!(item.status, "enabled");
+        assert!(
+            item.details
+                .iter()
+                .any(|(label, value)| { label == "証明書" && value == "設定済み" })
+        );
+    }
+
+    #[test]
+    fn parses_autoscale_and_enhanced_db_details() {
+        let autoscale = json!({
+            "ID": "1", "Name": "scale-web", "Availability": "available",
+            "Provider": {"Class": "autoscale"},
+            "Settings": {"TriggerType": "cpu", "SakuraCloudZones": ["is1b"], "Disabled": false}
+        });
+        let item = parse_common_service(&autoscale, ManagedResourceKind::AutoScale).unwrap();
+        assert!(
+            item.details
+                .iter()
+                .any(|(label, value)| { label == "対象ゾーン" && value == "is1b" })
+        );
+
+        let database = json!({
+            "ID": "2", "Name": "app-db", "Availability": "available",
+            "Provider": {"Class": "enhanceddb"},
+            "Status": {"database_name": "app", "database_type": "mariadb", "hostname": "db.example", "port": 3306}
+        });
+        let item = parse_common_service(&database, ManagedResourceKind::EnhancedDb).unwrap();
+        assert!(
+            item.details
+                .iter()
+                .any(|(label, value)| { label == "ホスト" && value == "db.example" })
+        );
     }
 }
