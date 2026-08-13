@@ -616,6 +616,7 @@ pub enum Service {
     Dedicated,
     AiEngine,
     SimpleMq,
+    SimpleNotification,
     EventBus,
     Workflows,
     AutoScale,
@@ -626,17 +627,22 @@ pub enum Service {
     PacketFilter,
     Bridge,
     LoadBalancer,
+    EnhancedLoadBalancer,
     VpcRouter,
     Gslb,
     MobileGateway,
+    LocalRouter,
     Database,
     Nfs,
+    Archive,
+    IsoImage,
     ObjectStorage,
     EnhancedDb,
     WebAccel,
     Dns,
     SimpleMonitor,
     Secrets,
+    Kms,
     Monitoring,
     Account,
     Billing,
@@ -655,7 +661,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 29] = [
+    pub const ALL: [Service; 35] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -666,6 +672,7 @@ impl Service {
         Service::AiEngine,
         // アプリケーション連携
         Service::SimpleMq,
+        Service::SimpleNotification,
         Service::EventBus,
         Service::Workflows,
         // ネットワーク
@@ -674,19 +681,24 @@ impl Service {
         Service::PacketFilter,
         Service::Bridge,
         Service::LoadBalancer,
+        Service::EnhancedLoadBalancer,
         Service::VpcRouter,
         Service::Gslb,
         Service::MobileGateway,
+        Service::LocalRouter,
         Service::Dns,
         Service::WebAccel,
         // ストレージ・データ
         Service::Disk,
+        Service::Archive,
+        Service::IsoImage,
         Service::Database,
         Service::Nfs,
         Service::ObjectStorage,
         Service::EnhancedDb,
         // セキュリティ
         Service::Secrets,
+        Service::Kms,
         // 運用・監視
         Service::SimpleMonitor,
         Service::Monitoring,
@@ -746,6 +758,14 @@ impl Service {
                 arg_name: "simplemq",
                 countable_label: None,
                 count_label: Some("キュー"),
+                zoned: false,
+            },
+            Service::SimpleNotification => ServiceMeta {
+                category: Category::Integration,
+                title: "シンプル通知",
+                arg_name: "simple-notification",
+                countable_label: None,
+                count_label: Some("設定"),
                 zoned: false,
             },
             Service::EventBus => ServiceMeta {
@@ -820,6 +840,14 @@ impl Service {
                 count_label: Some("台"),
                 zoned: true,
             },
+            Service::EnhancedLoadBalancer => ServiceMeta {
+                category: Category::Network,
+                title: "エンハンスドロードバランサ",
+                arg_name: "enhanced-loadbalancer",
+                countable_label: None,
+                count_label: Some("台"),
+                zoned: false,
+            },
             Service::VpcRouter => ServiceMeta {
                 category: Category::Network,
                 title: "VPCルータ",
@@ -832,9 +860,9 @@ impl Service {
                 category: Category::Network,
                 title: "GSLB",
                 arg_name: "gslb",
-                countable_label: Some("GSLB"),
+                countable_label: None,
                 count_label: Some("台"),
-                zoned: true,
+                zoned: false,
             },
             Service::MobileGateway => ServiceMeta {
                 category: Category::Network,
@@ -843,6 +871,14 @@ impl Service {
                 countable_label: Some("モバイルゲートウェイ"),
                 count_label: Some("台"),
                 zoned: true,
+            },
+            Service::LocalRouter => ServiceMeta {
+                category: Category::Network,
+                title: "ローカルルータ",
+                arg_name: "local-router",
+                countable_label: None,
+                count_label: Some("台"),
+                zoned: false,
             },
             Service::Database => ServiceMeta {
                 category: Category::Storage,
@@ -858,6 +894,22 @@ impl Service {
                 arg_name: "nfs",
                 countable_label: Some("NFS"),
                 count_label: Some("台"),
+                zoned: true,
+            },
+            Service::Archive => ServiceMeta {
+                category: Category::Storage,
+                title: "アーカイブ",
+                arg_name: "archive",
+                countable_label: Some("アーカイブ"),
+                count_label: Some("件"),
+                zoned: true,
+            },
+            Service::IsoImage => ServiceMeta {
+                category: Category::Storage,
+                title: "ISOイメージ",
+                arg_name: "iso-image",
+                countable_label: Some("ISOイメージ"),
+                count_label: Some("件"),
                 zoned: true,
             },
             Service::ObjectStorage => ServiceMeta {
@@ -898,6 +950,14 @@ impl Service {
                 arg_name: "secrets",
                 countable_label: Some("Vault"),
                 count_label: Some("Vault"),
+                zoned: false,
+            },
+            Service::Kms => ServiceMeta {
+                category: Category::Security,
+                title: "KMS",
+                arg_name: "kms",
+                countable_label: None,
+                count_label: Some("鍵"),
                 zoned: false,
             },
             Service::SimpleMonitor => ServiceMeta {
@@ -2379,12 +2439,13 @@ impl App {
     pub fn cloud_resource_kind(&self) -> Option<CloudResourceKind> {
         match self.service {
             Service::Disk => Some(CloudResourceKind::Disk),
+            Service::Archive => Some(CloudResourceKind::Archive),
+            Service::IsoImage => Some(CloudResourceKind::IsoImage),
             Service::Internet => Some(CloudResourceKind::Internet),
             Service::PacketFilter => Some(CloudResourceKind::PacketFilter),
             Service::Bridge => Some(CloudResourceKind::Bridge),
             Service::LoadBalancer => Some(CloudResourceKind::LoadBalancer),
             Service::VpcRouter => Some(CloudResourceKind::VpcRouter),
-            Service::Gslb => Some(CloudResourceKind::Gslb),
             Service::MobileGateway => Some(CloudResourceKind::MobileGateway),
             Service::Database => Some(CloudResourceKind::Database),
             Service::Nfs => Some(CloudResourceKind::Nfs),
@@ -2428,9 +2489,14 @@ impl App {
             Service::AiEngine => Some(ManagedResourceKind::AiEngine),
             Service::ObjectStorage => Some(ManagedResourceKind::ObjectStorage),
             Service::SimpleMq => Some(ManagedResourceKind::SimpleMq),
+            Service::SimpleNotification => Some(ManagedResourceKind::SimpleNotification),
             Service::EventBus => Some(ManagedResourceKind::EventBus),
             Service::Workflows => Some(ManagedResourceKind::Workflows),
             Service::WebAccel => Some(ManagedResourceKind::WebAccel),
+            Service::EnhancedLoadBalancer => Some(ManagedResourceKind::EnhancedLoadBalancer),
+            Service::LocalRouter => Some(ManagedResourceKind::LocalRouter),
+            Service::Gslb => Some(ManagedResourceKind::Gslb),
+            Service::Kms => Some(ManagedResourceKind::Kms),
             Service::AutoScale => Some(ManagedResourceKind::AutoScale),
             Service::EnhancedDb => Some(ManagedResourceKind::EnhancedDb),
             _ => None,
@@ -2598,21 +2664,27 @@ impl App {
             Service::Server => Pane::Servers,
             Service::Switch => Pane::Switches,
             Service::Disk
+            | Service::Archive
+            | Service::IsoImage
             | Service::Internet
             | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
-            | Service::Gslb
             | Service::MobileGateway
             | Service::Database
             | Service::Nfs => Pane::CloudResources,
             Service::ObjectStorage
             | Service::AiEngine
             | Service::SimpleMq
+            | Service::SimpleNotification
             | Service::EventBus
             | Service::Workflows
             | Service::WebAccel
+            | Service::EnhancedLoadBalancer
+            | Service::LocalRouter
+            | Service::Gslb
+            | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => Pane::ManagedResources,
             Service::Dns => match self.dns.focus {
@@ -2752,21 +2824,27 @@ impl App {
             Service::Server => self.server_ensure_loaded(),
             Service::Switch => self.switch_ensure_loaded(),
             Service::Disk
+            | Service::Archive
+            | Service::IsoImage
             | Service::Internet
             | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
-            | Service::Gslb
             | Service::MobileGateway
             | Service::Database
             | Service::Nfs => self.cloud_resources_ensure_loaded(),
             Service::ObjectStorage
             | Service::AiEngine
             | Service::SimpleMq
+            | Service::SimpleNotification
             | Service::EventBus
             | Service::Workflows
             | Service::WebAccel
+            | Service::EnhancedLoadBalancer
+            | Service::LocalRouter
+            | Service::Gslb
+            | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
@@ -4150,20 +4228,26 @@ impl App {
             Service::Server => self.on_key_server(key),
             Service::Switch => self.on_key_switch(key),
             Service::Disk
+            | Service::Archive
+            | Service::IsoImage
             | Service::Internet
             | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
-            | Service::Gslb
             | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {}
             Service::ObjectStorage
             | Service::SimpleMq
+            | Service::SimpleNotification
             | Service::EventBus
             | Service::Workflows
             | Service::WebAccel
+            | Service::EnhancedLoadBalancer
+            | Service::LocalRouter
+            | Service::Gslb
+            | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {}
             Service::Secrets => self.on_key_secrets(key),
@@ -4352,6 +4436,16 @@ impl App {
                             .count_cloud_resources(&name, CloudResourceKind::Disk)
                             .await
                     }
+                    Service::Archive => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::Archive)
+                            .await
+                    }
+                    Service::IsoImage => {
+                        sacloud
+                            .count_cloud_resources(&name, CloudResourceKind::IsoImage)
+                            .await
+                    }
                     Service::Internet => {
                         sacloud
                             .count_cloud_resources(&name, CloudResourceKind::Internet)
@@ -4375,11 +4469,6 @@ impl App {
                     Service::VpcRouter => {
                         sacloud
                             .count_cloud_resources(&name, CloudResourceKind::VpcRouter)
-                            .await
-                    }
-                    Service::Gslb => {
-                        sacloud
-                            .count_cloud_resources(&name, CloudResourceKind::Gslb)
                             .await
                     }
                     Service::MobileGateway => {
@@ -4448,6 +4537,16 @@ impl App {
                             .count_cloud_resources(&zone, CloudResourceKind::Disk)
                             .await
                     }
+                    Service::Archive => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::Archive)
+                            .await
+                    }
+                    Service::IsoImage => {
+                        sacloud
+                            .count_cloud_resources(&zone, CloudResourceKind::IsoImage)
+                            .await
+                    }
                     Service::Internet => {
                         sacloud
                             .count_cloud_resources(&zone, CloudResourceKind::Internet)
@@ -4471,11 +4570,6 @@ impl App {
                     Service::VpcRouter => {
                         sacloud
                             .count_cloud_resources(&zone, CloudResourceKind::VpcRouter)
-                            .await
-                    }
-                    Service::Gslb => {
-                        sacloud
-                            .count_cloud_resources(&zone, CloudResourceKind::Gslb)
                             .await
                     }
                     Service::MobileGateway => {
@@ -4511,6 +4605,10 @@ impl App {
                         .list_managed_resources(ManagedResourceKind::SimpleMq)
                         .await
                         .map(|v| v.len()),
+                    Service::SimpleNotification => sacloud
+                        .list_managed_resources(ManagedResourceKind::SimpleNotification)
+                        .await
+                        .map(|v| v.len()),
                     Service::EventBus => sacloud
                         .list_managed_resources(ManagedResourceKind::EventBus)
                         .await
@@ -4521,6 +4619,22 @@ impl App {
                         .map(|v| v.len()),
                     Service::WebAccel => sacloud
                         .list_managed_resources(ManagedResourceKind::WebAccel)
+                        .await
+                        .map(|v| v.len()),
+                    Service::EnhancedLoadBalancer => sacloud
+                        .list_managed_resources(ManagedResourceKind::EnhancedLoadBalancer)
+                        .await
+                        .map(|v| v.len()),
+                    Service::LocalRouter => sacloud
+                        .list_managed_resources(ManagedResourceKind::LocalRouter)
+                        .await
+                        .map(|v| v.len()),
+                    Service::Gslb => sacloud
+                        .list_managed_resources(ManagedResourceKind::Gslb)
+                        .await
+                        .map(|v| v.len()),
+                    Service::Kms => sacloud
+                        .list_managed_resources(ManagedResourceKind::Kms)
                         .await
                         .map(|v| v.len()),
                     Service::AutoScale => sacloud
@@ -4572,23 +4686,25 @@ impl App {
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
             Service::Disk
+            | Service::Archive
+            | Service::IsoImage
             | Service::Internet
             | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
-            | Service::Gslb
             | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {
                 let kind = match service {
                     Service::Disk => CloudResourceKind::Disk,
+                    Service::Archive => CloudResourceKind::Archive,
+                    Service::IsoImage => CloudResourceKind::IsoImage,
                     Service::Internet => CloudResourceKind::Internet,
                     Service::PacketFilter => CloudResourceKind::PacketFilter,
                     Service::Bridge => CloudResourceKind::Bridge,
                     Service::LoadBalancer => CloudResourceKind::LoadBalancer,
                     Service::VpcRouter => CloudResourceKind::VpcRouter,
-                    Service::Gslb => CloudResourceKind::Gslb,
                     Service::MobileGateway => CloudResourceKind::MobileGateway,
                     Service::Database => CloudResourceKind::Database,
                     Service::Nfs => CloudResourceKind::Nfs,
@@ -4605,18 +4721,28 @@ impl App {
             Service::ObjectStorage
             | Service::AiEngine
             | Service::SimpleMq
+            | Service::SimpleNotification
             | Service::EventBus
             | Service::Workflows
             | Service::WebAccel
+            | Service::EnhancedLoadBalancer
+            | Service::LocalRouter
+            | Service::Gslb
+            | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {
                 let kind = match service {
                     Service::AiEngine => ManagedResourceKind::AiEngine,
                     Service::ObjectStorage => ManagedResourceKind::ObjectStorage,
                     Service::SimpleMq => ManagedResourceKind::SimpleMq,
+                    Service::SimpleNotification => ManagedResourceKind::SimpleNotification,
                     Service::EventBus => ManagedResourceKind::EventBus,
                     Service::Workflows => ManagedResourceKind::Workflows,
                     Service::WebAccel => ManagedResourceKind::WebAccel,
+                    Service::EnhancedLoadBalancer => ManagedResourceKind::EnhancedLoadBalancer,
+                    Service::LocalRouter => ManagedResourceKind::LocalRouter,
+                    Service::Gslb => ManagedResourceKind::Gslb,
+                    Service::Kms => ManagedResourceKind::Kms,
                     Service::AutoScale => ManagedResourceKind::AutoScale,
                     Service::EnhancedDb => ManagedResourceKind::EnhancedDb,
                     _ => unreachable!(),
@@ -5409,12 +5535,13 @@ impl App {
             Service::Server => self.server_refresh(),
             Service::Switch => self.switch_refresh(),
             Service::Disk
+            | Service::Archive
+            | Service::IsoImage
             | Service::Internet
             | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
-            | Service::Gslb
             | Service::MobileGateway
             | Service::Database
             | Service::Nfs => {
@@ -5428,9 +5555,14 @@ impl App {
             Service::ObjectStorage
             | Service::AiEngine
             | Service::SimpleMq
+            | Service::SimpleNotification
             | Service::EventBus
             | Service::Workflows
             | Service::WebAccel
+            | Service::EnhancedLoadBalancer
+            | Service::LocalRouter
+            | Service::Gslb
+            | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {
                 if let Some(kind) = self.managed_resource_kind() {
@@ -7462,6 +7594,13 @@ mod tests {
         assert!(!Service::Registry.is_zoned());
         assert!(!Service::Dns.is_zoned());
         assert!(!Service::Billing.is_zoned());
+        assert!(!Service::EnhancedLoadBalancer.is_zoned());
+        assert!(!Service::LocalRouter.is_zoned());
+        assert!(!Service::Gslb.is_zoned());
+        assert!(!Service::SimpleNotification.is_zoned());
+        assert!(!Service::Kms.is_zoned());
+        assert!(Service::Archive.is_zoned());
+        assert!(Service::IsoImage.is_zoned());
     }
 
     #[test]

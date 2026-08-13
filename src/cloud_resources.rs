@@ -12,12 +12,13 @@ const MAX_PAGES: usize = 100;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CloudResourceKind {
     Disk,
+    Archive,
+    IsoImage,
     Internet,
     PacketFilter,
     Bridge,
     LoadBalancer,
     VpcRouter,
-    Gslb,
     MobileGateway,
     Database,
     Nfs,
@@ -27,12 +28,13 @@ impl CloudResourceKind {
     pub fn title(self) -> &'static str {
         match self {
             Self::Disk => "ディスク",
+            Self::Archive => "アーカイブ",
+            Self::IsoImage => "ISOイメージ",
             Self::Internet => "ルータ＋スイッチ",
             Self::PacketFilter => "パケットフィルタ",
             Self::Bridge => "ブリッジ接続",
             Self::LoadBalancer => "ロードバランサ",
             Self::VpcRouter => "VPCルータ",
-            Self::Gslb => "GSLB",
             Self::MobileGateway => "モバイルゲートウェイ",
             Self::Database => "データベース",
             Self::Nfs => "NFS",
@@ -42,6 +44,8 @@ impl CloudResourceKind {
     fn endpoint(self) -> &'static str {
         match self {
             Self::Disk => "disk",
+            Self::Archive => "archive",
+            Self::IsoImage => "cdrom",
             Self::Internet => "internet",
             Self::PacketFilter => "packetfilter",
             Self::Bridge => "bridge",
@@ -53,7 +57,6 @@ impl CloudResourceKind {
         match self {
             Self::LoadBalancer => Some("loadbalancer"),
             Self::VpcRouter => Some("vpcrouter"),
-            Self::Gslb => Some("gslb"),
             Self::MobileGateway => Some("mobilegateway"),
             Self::Database => Some("database"),
             Self::Nfs => Some("nfs"),
@@ -157,6 +160,8 @@ impl SacloudClient {
 fn find_items<'a>(value: &'a Value, endpoint: &str) -> Vec<&'a Value> {
     let preferred = match endpoint {
         "disk" => &["Disks", "Disk"][..],
+        "archive" => &["Archives", "Archive"][..],
+        "cdrom" => &["CDROMs", "CDROM"][..],
         "internet" => &["Internet", "Internets"][..],
         "packetfilter" => &["PacketFilters", "PacketFilter"][..],
         "bridge" => &["Bridges", "Bridge"][..],
@@ -190,6 +195,9 @@ fn parse_resource(value: &Value, kind: CloudResourceKind) -> Result<CloudResourc
     let plan = first_non_empty(value, &["/Plan/Name", "/Remark/Plan/Name", "/ServiceClass"]);
     let connection = match kind {
         CloudResourceKind::Disk => first_non_empty(value, &["/Server/Name", "/Connection"]),
+        CloudResourceKind::Archive | CloudResourceKind::IsoImage => {
+            first_non_empty(value, &["/Storage/Name", "/Scope"])
+        }
         CloudResourceKind::Internet => first_non_empty(value, &["/Switch/Name", "/BandWidthMbps"]),
         CloudResourceKind::PacketFilter => value
             .get("Expression")
@@ -200,7 +208,6 @@ fn parse_resource(value: &Value, kind: CloudResourceKind) -> Result<CloudResourc
             value,
             &["/SwitchInZone/Name", "/Region/Name", "/SwitchInZone/ID"],
         ),
-        CloudResourceKind::Gslb => first_non_empty(value, &["/FQDN", "/Settings/GSLB/FQDN"]),
         CloudResourceKind::MobileGateway => first_non_empty(
             value,
             &[
@@ -220,28 +227,17 @@ fn parse_resource(value: &Value, kind: CloudResourceKind) -> Result<CloudResourc
     for (label, pointers) in detail_fields(kind) {
         add_detail(&mut details, label, first_non_empty(value, pointers));
     }
-    match kind {
-        CloudResourceKind::PacketFilter => {
-            if let Some(rules) = value.get("Expression").and_then(Value::as_array) {
-                add_detail(&mut details, "ルール数", rules.len().to_string());
-                for (index, rule) in rules.iter().enumerate() {
-                    add_detail(
-                        &mut details,
-                        &format!("ルール {}", index + 1),
-                        packet_filter_rule_summary(rule),
-                    );
-                }
-            }
+    if kind == CloudResourceKind::PacketFilter
+        && let Some(rules) = value.get("Expression").and_then(Value::as_array)
+    {
+        add_detail(&mut details, "ルール数", rules.len().to_string());
+        for (index, rule) in rules.iter().enumerate() {
+            add_detail(
+                &mut details,
+                &format!("ルール {}", index + 1),
+                packet_filter_rule_summary(rule),
+            );
         }
-        CloudResourceKind::Gslb => {
-            if let Some(count) = array_len_at(
-                value,
-                &["/Settings/GSLB/Servers", "/Settings/GSLB/RealServers"],
-            ) {
-                add_detail(&mut details, "実サーバ数", count.to_string());
-            }
-        }
-        _ => {}
     }
     add_detail(&mut details, "タグ", tags.join(", "));
     add_detail(&mut details, "作成日時", string_at(value, "/CreatedAt"));
@@ -268,6 +264,19 @@ fn detail_fields(kind: CloudResourceKind) -> &'static [(&'static str, &'static [
             ("サーバー", &["/Server/Name", "/Server/ID"]),
             ("暗号化", &["/EncryptionAlgorithm"]),
         ],
+        CloudResourceKind::Archive => &[
+            ("容量(MB)", &["/SizeMB"]),
+            ("スコープ", &["/Scope"]),
+            ("ストレージ", &["/Storage/Name", "/Storage/ID"]),
+            ("ディスクプラン", &["/Plan/Name", "/Plan/StorageClass"]),
+            ("コピー元ディスク", &["/SourceDisk/ID"]),
+            ("コピー元アーカイブ", &["/SourceArchive/ID"]),
+        ],
+        CloudResourceKind::IsoImage => &[
+            ("容量(MB)", &["/SizeMB"]),
+            ("スコープ", &["/Scope"]),
+            ("ストレージ", &["/Storage/Name", "/Storage/ID"]),
+        ],
         CloudResourceKind::Internet => &[
             ("帯域(Mbps)", &["/BandWidthMbps"]),
             ("スイッチ", &["/Switch/Name", "/Switch/ID"]),
@@ -283,11 +292,6 @@ fn detail_fields(kind: CloudResourceKind) -> &'static [(&'static str, &'static [
                 &["/SwitchInZone/Name", "/SwitchInZone/ID"],
             ),
             ("サービスクラス", &["/ServiceClass"]),
-        ],
-        CloudResourceKind::Gslb => &[
-            ("FQDN", &["/FQDN", "/Settings/GSLB/FQDN"]),
-            ("監視方法", &["/Settings/GSLB/HealthCheck/Protocol"]),
-            ("ポート", &["/Settings/GSLB/HealthCheck/Port"]),
         ],
         CloudResourceKind::MobileGateway => &[
             ("サービスクラス", &["/ServiceClass"]),
@@ -309,12 +313,6 @@ fn detail_fields(kind: CloudResourceKind) -> &'static [(&'static str, &'static [
             ("マスク長", &["/Remark/Network/NetworkMaskLen"]),
         ],
     }
-}
-
-fn array_len_at(value: &Value, pointers: &[&str]) -> Option<usize> {
-    pointers
-        .iter()
-        .find_map(|pointer| value.pointer(pointer)?.as_array().map(Vec::len))
 }
 
 fn packet_filter_rule_summary(rule: &Value) -> String {
@@ -433,16 +431,6 @@ mod tests {
             "private"
         );
 
-        let gslb = json!({
-            "ID": 30,
-            "Name": "public-site",
-            "Class": "gslb",
-            "FQDN":"site-30.gslb.example",
-            "Settings":{"GSLB":{"Servers":[{},{}]}}
-        });
-        let gslb = parse_resource(&gslb, CloudResourceKind::Gslb).unwrap();
-        assert!(gslb.details.contains(&("実サーバ数".into(), "2".into())));
-
         let gateway = json!({
             "ID": 40,
             "Name":"mobile",
@@ -465,5 +453,37 @@ mod tests {
             find_items(&json!({"Bridges":[{"ID":"2"}]}), "bridge").len(),
             1
         );
+        assert_eq!(
+            find_items(&json!({"Archives":[{"ID":"3"}]}), "archive").len(),
+            1
+        );
+        assert_eq!(
+            find_items(&json!({"CDROMs":[{"ID":"4"}]}), "cdrom").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn parses_archive_and_iso_image_details() {
+        let archive = json!({
+            "ID": "50", "Name": "base-image", "SizeMB": 20480, "Scope": "shared",
+            "Storage": {"Name": "archive-storage"}, "Plan": {"Name": "ssd"},
+            "SourceDisk": {"ID": "40"}, "Availability": "available"
+        });
+        let item = parse_resource(&archive, CloudResourceKind::Archive).unwrap();
+        assert_eq!(item.connection, "archive-storage");
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("容量(MB)".into(), "20480".into()))
+        );
+
+        let iso = json!({
+            "ID": 60, "Name": "installer.iso", "SizeMB": 1024, "Scope": "user",
+            "Storage": {"ID": "storage-1"}, "Availability": "available"
+        });
+        let item = parse_resource(&iso, CloudResourceKind::IsoImage).unwrap();
+        assert_eq!(item.connection, "user");
+        assert!(item.searchable().contains("storage-1"));
     }
 }

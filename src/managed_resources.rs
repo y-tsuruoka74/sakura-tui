@@ -16,6 +16,8 @@ const OBJECT_STORAGE_SUFFIX: &str = "api/objectstorage/1.0";
 const WEBACCEL_API_ZONE: &str = "is1a";
 const WEBACCEL_SUFFIX: &str = "api/webaccel/1.0";
 const WORKFLOWS_SUFFIX: &str = "api/workflow/1.0";
+const KMS_API_ZONE: &str = "is1a";
+const KMS_SUFFIX: &str = "api/cloud/1.1/kms";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedResourceKind {
@@ -25,6 +27,11 @@ pub enum ManagedResourceKind {
     EventBus,
     Workflows,
     WebAccel,
+    EnhancedLoadBalancer,
+    LocalRouter,
+    Gslb,
+    Kms,
+    SimpleNotification,
     AutoScale,
     EnhancedDb,
 }
@@ -38,6 +45,11 @@ impl ManagedResourceKind {
             Self::EventBus => "イベントバス",
             Self::Workflows => "ワークフロー",
             Self::WebAccel => "ウェブアクセラレータ",
+            Self::EnhancedLoadBalancer => "エンハンスドロードバランサ",
+            Self::LocalRouter => "ローカルルータ",
+            Self::Gslb => "GSLB",
+            Self::Kms => "KMS",
+            Self::SimpleNotification => "シンプル通知",
             Self::AutoScale => "オートスケール",
             Self::EnhancedDb => "エンハンスドデータベース",
         }
@@ -60,14 +72,22 @@ pub struct ManagedResource {
 
 impl ManagedResource {
     pub fn searchable(&self) -> String {
+        let details = self
+            .details
+            .iter()
+            .map(|(label, value)| format!("{label} {value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         format!(
-            "{} {} {} {} {} {}",
+            "{} {} {} {} {} {} {} {}",
             self.name,
             self.description,
             self.tags.join(" "),
             self.resource_type,
             self.status,
-            self.plan
+            self.plan,
+            self.id,
+            details,
         )
     }
 }
@@ -86,6 +106,15 @@ impl SacloudClient {
             ManagedResourceKind::EventBus => self.list_eventbus_resources().await,
             ManagedResourceKind::Workflows => self.list_workflows().await,
             ManagedResourceKind::WebAccel => self.list_webaccel_sites().await,
+            ManagedResourceKind::EnhancedLoadBalancer => {
+                self.list_common_service("proxylb", kind).await
+            }
+            ManagedResourceKind::LocalRouter => self.list_common_service("localrouter", kind).await,
+            ManagedResourceKind::Gslb => self.list_common_service("gslb", kind).await,
+            ManagedResourceKind::Kms => self.list_kms_keys().await,
+            ManagedResourceKind::SimpleNotification => {
+                self.list_simple_notification_resources().await
+            }
             ManagedResourceKind::AutoScale => self.list_common_service("autoscale", kind).await,
             ManagedResourceKind::EnhancedDb => self.list_common_service("enhanceddb", kind).await,
         }
@@ -145,6 +174,52 @@ impl SacloudClient {
             a.name
                 .cmp(&b.name)
                 .then(a.resource_type.cmp(&b.resource_type))
+        });
+        Ok(out)
+    }
+
+    async fn list_kms_keys(&self) -> Result<Vec<ManagedResource>> {
+        let mut out = Vec::new();
+        let mut from = 0usize;
+        for _ in 0..MAX_PAGES {
+            let value: Value = self
+                .request_with_suffix(
+                    KMS_API_ZONE,
+                    KMS_SUFFIX,
+                    Method::GET,
+                    "keys",
+                    Some(json!({"From": from, "Count": PAGE_SIZE, "Sort": ["Name"]})),
+                )
+                .await?;
+            let total = value.get("Total").and_then(value_usize).unwrap_or(0);
+            let items = first_array(&value, &["/Keys", "/keys"]);
+            let received = items.len();
+            out.extend(
+                items
+                    .iter()
+                    .map(parse_kms_key)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            if received == 0 || from + received >= total {
+                break;
+            }
+            from += received;
+        }
+        Ok(out)
+    }
+
+    async fn list_simple_notification_resources(&self) -> Result<Vec<ManagedResource>> {
+        let mut out = Vec::new();
+        for class in ["saknoticedestination", "saknoticegroup", "saknoticerouting"] {
+            out.extend(
+                self.list_common_service(class, ManagedResourceKind::SimpleNotification)
+                    .await?,
+            );
+        }
+        out.sort_by(|a, b| {
+            a.resource_type
+                .cmp(&b.resource_type)
+                .then(a.name.cmp(&b.name))
         });
         Ok(out)
     }
@@ -308,6 +383,12 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
         "eventbusprocessconfiguration" => "処理設定",
         "autoscale" => "スケール設定",
         "enhanceddb" => "データベース",
+        "proxylb" => "ロードバランサ",
+        "localrouter" => "ルータ",
+        "gslb" => "GSLB",
+        "saknoticedestination" => "通知先",
+        "saknoticegroup" => "通知先グループ",
+        "saknoticerouting" => "ルーティング",
         _ => class.as_str(),
     }
     .to_string();
@@ -378,6 +459,137 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
             add_detail(&mut details, "ホスト", string_at(value, "/Status/hostname"));
             add_detail(&mut details, "ポート", string_at(value, "/Status/port"));
         }
+        ManagedResourceKind::EnhancedLoadBalancer => {
+            add_detail(
+                &mut details,
+                "プラン",
+                string_at(value, "/Settings/ProxyLB/Plan"),
+            );
+            add_detail(&mut details, "FQDN", string_at(value, "/Status/FQDN"));
+            add_detail(
+                &mut details,
+                "仮想IPアドレス",
+                string_at(value, "/Status/VirtualIPAddress"),
+            );
+            add_detail(
+                &mut details,
+                "リージョン",
+                string_at(value, "/Status/Region"),
+            );
+            add_array_count(
+                &mut details,
+                "待受ポート数",
+                value,
+                "/Settings/ProxyLB/BindPorts",
+            );
+            add_array_count(
+                &mut details,
+                "実サーバ数",
+                value,
+                "/Settings/ProxyLB/Servers",
+            );
+            add_array_count(&mut details, "ルール数", value, "/Settings/ProxyLB/Rules");
+        }
+        ManagedResourceKind::LocalRouter => {
+            add_detail(
+                &mut details,
+                "接続スイッチ",
+                first_non_empty(
+                    value,
+                    &[
+                        "/Settings/LocalRouter/Switch/Name",
+                        "/Settings/LocalRouter/Switch/Code",
+                    ],
+                ),
+            );
+            add_detail(
+                &mut details,
+                "仮想IPアドレス",
+                string_at(value, "/Settings/LocalRouter/Interface/VirtualIPAddress"),
+            );
+            add_detail(
+                &mut details,
+                "ネットワーク",
+                string_at(value, "/Settings/LocalRouter/Interface/NetworkMaskLen"),
+            );
+            add_array_count(&mut details, "ピア数", value, "/Settings/LocalRouter/Peers");
+            add_array_count(
+                &mut details,
+                "スタティックルート数",
+                value,
+                "/Settings/LocalRouter/StaticRoutes",
+            );
+        }
+        ManagedResourceKind::Gslb => {
+            add_detail(
+                &mut details,
+                "FQDN",
+                first_non_empty(value, &["/Status/FQDN", "/Status/Hostname"]),
+            );
+            add_detail(
+                &mut details,
+                "監視方法",
+                first_non_empty(
+                    value,
+                    &[
+                        "/Settings/GSLB/HealthCheck/Protocol",
+                        "/Settings/HealthCheck/Protocol",
+                    ],
+                ),
+            );
+            add_detail(
+                &mut details,
+                "ポート",
+                first_non_empty(
+                    value,
+                    &[
+                        "/Settings/GSLB/HealthCheck/Port",
+                        "/Settings/HealthCheck/Port",
+                    ],
+                ),
+            );
+            add_first_array_count(
+                &mut details,
+                "実サーバ数",
+                value,
+                &["/Settings/GSLB/Servers", "/Settings/Servers"],
+            );
+        }
+        ManagedResourceKind::SimpleNotification => match class.as_str() {
+            "saknoticedestination" => {
+                add_detail(&mut details, "通知方法", string_at(value, "/Settings/Type"));
+                add_detail(&mut details, "通知先", string_at(value, "/Settings/Value"));
+                add_detail(&mut details, "無効", string_at(value, "/Settings/Disabled"));
+                add_detail(
+                    &mut details,
+                    "確認状態",
+                    first_non_empty(value, &["/Status/Verified", "/Status/Status"]),
+                );
+            }
+            "saknoticegroup" => {
+                add_array_count(&mut details, "通知先数", value, "/Settings/Destinations");
+                add_detail(&mut details, "無効", string_at(value, "/Settings/Disabled"));
+            }
+            "saknoticerouting" => {
+                add_detail(
+                    &mut details,
+                    "通知元ID",
+                    string_at(value, "/Settings/SourceID"),
+                );
+                add_detail(
+                    &mut details,
+                    "通知先グループID",
+                    string_at(value, "/Settings/TargetGroupID"),
+                );
+                add_detail(
+                    &mut details,
+                    "優先順位",
+                    string_at(value, "/Settings/PriorityRank"),
+                );
+                add_array_count(&mut details, "ラベル条件数", value, "/Settings/MatchLabels");
+            }
+            _ => {}
+        },
         _ => {
             add_detail(
                 &mut details,
@@ -461,6 +673,57 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
         status,
         plan,
         created_at: string_at(value, "/CreatedAt"),
+        details,
+    })
+}
+
+fn parse_kms_key(value: &Value) -> Result<ManagedResource> {
+    let id = first_non_empty(
+        value,
+        &["/resource_id", "/resourceId", "/ResourceID", "/id", "/ID"],
+    );
+    anyhow::ensure!(!id.is_empty(), "KMSキーのリソースIDがありません");
+    let name = first_non_empty(value, &["/name", "/Name"]);
+    let description = first_non_empty(value, &["/description", "/Description"]);
+    let status = first_non_empty(value, &["/status", "/Status"]);
+    let service_class = first_non_empty(value, &["/ServiceClass", "/service_class"]);
+    let key_origin = first_non_empty(value, &["/KeyOrigin", "/key_origin"]);
+    let created_at = first_non_empty(value, &["/created_at", "/createdAt", "/CreatedAt"]);
+    let tags = string_array_at(value, "/Tags");
+    let mut details = Vec::new();
+    add_detail(&mut details, "リソースID", id.clone());
+    add_detail(&mut details, "状態", status.clone());
+    add_detail(&mut details, "サービスクラス", service_class.clone());
+    add_detail(&mut details, "鍵の由来", key_origin.clone());
+    add_detail(
+        &mut details,
+        "最新バージョン",
+        first_non_empty(value, &["/LatestVersion", "/latest_version"]),
+    );
+    add_detail(
+        &mut details,
+        "削除予定日時",
+        first_non_empty(
+            value,
+            &["/destruction_scheduled_at", "/destructionScheduledAt"],
+        ),
+    );
+    add_detail(&mut details, "作成日時", created_at.clone());
+    add_detail(
+        &mut details,
+        "更新日時",
+        first_non_empty(value, &["/ModifiedAt", "/modified_at"]),
+    );
+    add_detail(&mut details, "タグ", tags.join(", "));
+    Ok(ManagedResource {
+        id,
+        name,
+        description,
+        tags,
+        resource_type: key_origin,
+        status,
+        plan: service_class,
+        created_at,
         details,
     })
 }
@@ -572,6 +835,37 @@ fn add_detail(details: &mut Vec<(String, String)>, label: &str, value: String) {
     if !value.is_empty() {
         details.push((label.to_string(), value));
     }
+}
+
+fn add_array_count(details: &mut Vec<(String, String)>, label: &str, value: &Value, pointer: &str) {
+    if let Some(count) = value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+    {
+        add_detail(details, label, count.to_string());
+    }
+}
+
+fn add_first_array_count(
+    details: &mut Vec<(String, String)>,
+    label: &str,
+    value: &Value,
+    pointers: &[&str],
+) {
+    if let Some(count) = pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer)?.as_array().map(Vec::len))
+    {
+        add_detail(details, label, count.to_string());
+    }
+}
+
+fn first_array(value: &Value, pointers: &[&str]) -> Vec<Value> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer)?.as_array().cloned())
+        .unwrap_or_default()
 }
 
 fn first_non_empty(value: &Value, pointers: &[&str]) -> String {
@@ -710,5 +1004,114 @@ mod tests {
                 .iter()
                 .any(|(label, value)| { label == "ホスト" && value == "db.example" })
         );
+    }
+
+    #[test]
+    fn parses_enhanced_load_balancer_details() {
+        let value = json!({
+            "ID": "10", "Name": "public-lb", "Availability": "available",
+            "Provider": {"Class": "proxylb", "ServiceClass": "cloud/proxylb/100"},
+            "Settings": {"ProxyLB": {
+                "Plan": 100,
+                "BindPorts": [{"ProxyMode": "http"}, {"ProxyMode": "https"}],
+                "Servers": [{"IPAddress": "192.0.2.10"}],
+                "Rules": [{"Action": "forward"}]
+            }},
+            "Status": {"FQDN": "example.sakura.ne.jp", "VirtualIPAddress": "198.51.100.10", "Region": "is1"}
+        });
+        let item = parse_common_service(&value, ManagedResourceKind::EnhancedLoadBalancer).unwrap();
+        assert_eq!(item.resource_type, "ロードバランサ");
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("実サーバ数".into(), "1".into()))
+        );
+        assert!(item.searchable().contains("198.51.100.10"));
+    }
+
+    #[test]
+    fn parses_local_router_and_nested_gslb_details() {
+        let router = json!({
+            "ID": "20", "Name": "inter-zone", "Provider": {"Class": "localrouter"},
+            "Settings": {"LocalRouter": {
+                "Switch": {"Name": "private"},
+                "Interface": {"VirtualIPAddress": "192.0.2.1", "NetworkMaskLen": 24},
+                "Peers": [{"SecretKey": "hidden"}],
+                "StaticRoutes": [{"Prefix": "10.0.0.0/8"}]
+            }}
+        });
+        let item = parse_common_service(&router, ManagedResourceKind::LocalRouter).unwrap();
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("接続スイッチ".into(), "private".into()))
+        );
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("ピア数".into(), "1".into()))
+        );
+
+        let gslb = json!({
+            "ID": "30", "Name": "global", "Provider": {"Class": "gslb"},
+            "Status": {"FQDN": "global.gslb.example"},
+            "Settings": {"GSLB": {
+                "HealthCheck": {"Protocol": "https", "Port": 443},
+                "Servers": [{"IPAddress": "192.0.2.10"}, {"IPAddress": "192.0.2.11"}]
+            }}
+        });
+        let item = parse_common_service(&gslb, ManagedResourceKind::Gslb).unwrap();
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("監視方法".into(), "https".into()))
+        );
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("実サーバ数".into(), "2".into()))
+        );
+    }
+
+    #[test]
+    fn parses_simple_notification_resources() {
+        let destination = json!({
+            "ID": "dest-1", "Name": "operations", "Provider": {"Class": "saknoticedestination"},
+            "Settings": {"Type": "email", "Value": "ops@example.com", "Disabled": false},
+            "Status": {"Verified": true}
+        });
+        let item =
+            parse_common_service(&destination, ManagedResourceKind::SimpleNotification).unwrap();
+        assert_eq!(item.resource_type, "通知先");
+        assert!(item.searchable().contains("ops@example.com"));
+
+        let routing = json!({
+            "ID": "route-1", "Name": "critical", "Provider": {"Class": "saknoticerouting"},
+            "Settings": {"SourceID": "source-1", "TargetGroupID": "group-1", "PriorityRank": 10,
+                "MatchLabels": [{"Key": "severity", "Value": "critical"}]}
+        });
+        let item = parse_common_service(&routing, ManagedResourceKind::SimpleNotification).unwrap();
+        assert_eq!(item.resource_type, "ルーティング");
+        assert!(item.searchable().contains("group-1"));
+    }
+
+    #[test]
+    fn parses_kms_key_details() {
+        let value = json!({
+            "ID": "key-1", "Name": "database", "Description": "database encryption",
+            "ServiceClass": "cloud/kms/standard", "KeyOrigin": "sakura",
+            "LatestVersion": 3, "Status": "available", "Tags": ["prod"],
+            "CreatedAt": "2026-08-01T00:00:00Z", "ModifiedAt": "2026-08-02T00:00:00Z"
+        });
+        let item = parse_kms_key(&value).unwrap();
+        assert_eq!(item.id, "key-1");
+        assert_eq!(item.plan, "cloud/kms/standard");
+        assert_eq!(item.status, "available");
+        assert!(
+            item.details
+                .iter()
+                .any(|v| v == &("最新バージョン".into(), "3".into()))
+        );
+        assert!(item.searchable().contains("prod"));
     }
 }

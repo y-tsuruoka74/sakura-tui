@@ -246,21 +246,27 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
         Service::Disk
+        | Service::Archive
+        | Service::IsoImage
         | Service::Internet
         | Service::PacketFilter
         | Service::Bridge
         | Service::LoadBalancer
         | Service::VpcRouter
-        | Service::Gslb
         | Service::MobileGateway
         | Service::Database
         | Service::Nfs => cloud_resources::draw(frame, area, app),
         Service::ObjectStorage
         | Service::AiEngine
         | Service::SimpleMq
+        | Service::SimpleNotification
         | Service::EventBus
         | Service::Workflows
         | Service::WebAccel
+        | Service::EnhancedLoadBalancer
+        | Service::LocalRouter
+        | Service::Gslb
+        | Service::Kms
         | Service::AutoScale
         | Service::EnhancedDb => managed_resources::draw(frame, area, app),
         Service::Dns => observability::draw_dns(frame, area, app),
@@ -537,21 +543,27 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
         Service::Disk
+        | Service::Archive
+        | Service::IsoImage
         | Service::Internet
         | Service::PacketFilter
         | Service::Bridge
         | Service::LoadBalancer
         | Service::VpcRouter
-        | Service::Gslb
         | Service::MobileGateway
         | Service::Database
         | Service::Nfs => hints.push("z ゾーン"),
         Service::ObjectStorage
         | Service::AiEngine
         | Service::SimpleMq
+        | Service::SimpleNotification
         | Service::EventBus
         | Service::Workflows
         | Service::WebAccel
+        | Service::EnhancedLoadBalancer
+        | Service::LocalRouter
+        | Service::Gslb
+        | Service::Kms
         | Service::AutoScale
         | Service::EnhancedDb => {
             if app.service == Service::AiEngine {
