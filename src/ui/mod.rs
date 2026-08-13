@@ -1,6 +1,7 @@
 //! 画面描画。
 
 mod apprun;
+mod billing;
 mod dedicated;
 mod detail;
 mod observability;
@@ -95,6 +96,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::Cyan),
         ));
     }
+    // 本番以外に繋いでいるときは、それが分かるようにする。
+    if app.api_root != crate::config::DEFAULT_API_ROOT {
+        spans.push(separator());
+        spans.push(Span::styled(
+            format!(" {} ", environment_label(&app.api_root)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     spans.push(separator());
     spans.extend(credential_badge(
         &app.credential_source,
@@ -105,7 +117,38 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::styled(" (p)", Style::default().fg(DIM)));
     spans.push(Span::raw("  "));
     spans.push(Span::styled(spinner, Style::default().fg(accent())));
+
+    // 分類を添えて、今どのあたりを見ているのかが分かるようにする。
+    // ただしプロファイル名やモードの方が大事なので、幅が足りなければ落とす。
+    let category = Span::styled(
+        format!("{} / ", app.service.category().title()),
+        Style::default().fg(DIM),
+    );
+    if width(&spans) + width(std::slice::from_ref(&category)) <= area.width as usize {
+        // サービス名の直前（"sakura-tui" と区切りの後ろ）に差し込む。
+        spans.insert(2, category);
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// 並べたときの表示セル数。
+fn width(spans: &[Span]) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    spans.iter().map(|s| s.content.width()).sum()
+}
+
+/// 接続先の短い呼び名。本番以外に繋いでいることが一目で分かるようにする。
+fn environment_label(api_root: &str) -> String {
+    if api_root == crate::config::TEST_API_ROOT {
+        return "cloud-test".to_string();
+    }
+    // `https://host/xxx/zone` の `xxx` を環境名とみなす。
+    api_root
+        .trim_end_matches("/zone")
+        .rsplit('/')
+        .next()
+        .unwrap_or(api_root)
+        .to_string()
 }
 
 /// ヘッダーの項目を区切る。
@@ -180,6 +223,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
         Service::Secrets => observability::draw_secrets(frame, area, app),
         Service::Monitoring => observability::draw_monitoring(frame, area, app),
+        Service::Billing => billing::draw(frame, area, app),
     }
 }
 
@@ -296,6 +340,16 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Service::Dns | Service::SimpleMonitor => {}
         Service::Secrets => hints.extend(["z ゾーン", "u 値を表示"]),
         Service::Monitoring => hints.extend(["z ゾーン", "Tab タブ"]),
+        Service::Billing => {
+            // 月一覧では ↑↓ が月、明細に入ると ↑↓ が明細になる。
+            hints.extend(["↑↓ 月", "←→ 年"]);
+            hints.push(if app.billing.focus == crate::app::BillingFocus::Bills {
+                "Enter 明細へ"
+            } else {
+                "Esc 月一覧へ"
+            });
+            hints.push("Tab タブ");
+        }
         Service::Server => {
             hints.push("z ゾーン");
             if app.mode == Mode::Write {

@@ -15,11 +15,11 @@ const PAGE_SIZE: usize = 100;
 /// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
 const MAX_PAGES: usize = 100;
 
-/// API から取得できないときに使うゾーン一覧。
+/// 本番環境のゾーン。
 ///
 /// 認証情報を作る前はゾーン一覧を引けないため、既知のものを並べておく。
 /// （sacloud/iaas-api-go の `types::ZoneNames` と同じ並び）
-pub const KNOWN_ZONES: [(&str, &str); 6] = [
+const PRODUCTION_ZONES: [(&str, &str); 6] = [
     ("tk1a", "東京第1"),
     ("tk1b", "東京第2"),
     ("is1a", "石狩第1"),
@@ -28,15 +28,33 @@ pub const KNOWN_ZONES: [(&str, &str); 6] = [
     ("tk1v", "サンドボックス"),
 ];
 
-/// 既知のゾーンを `Zone` として返す。
-pub fn known_zones() -> Vec<Zone> {
-    KNOWN_ZONES
+/// 社内テスト環境（cloud-test）のゾーン。本番とは名前が全く違う。
+const TEST_ZONES: [(&str, &str); 4] = [
+    ("is1x", "開発Xゾーン(Sandbox)"),
+    ("is1y", "開発Yゾーン"),
+    ("is1z", "開発Zゾーン"),
+    ("tk1s", "開発Sandbox"),
+];
+
+fn to_zones(pairs: &[(&str, &str)]) -> Vec<Zone> {
+    pairs
         .iter()
         .map(|(name, description)| Zone {
             name: name.to_string(),
             description: description.to_string(),
         })
         .collect()
+}
+
+/// 接続先に応じた既知のゾーン一覧。
+///
+/// 環境ごとにゾーン名が違うため、接続先を選び直したらこちらも入れ替える。
+pub fn known_zones_for(api_root: &str) -> Vec<Zone> {
+    if api_root == crate::config::TEST_API_ROOT {
+        to_zones(&TEST_ZONES)
+    } else {
+        to_zones(&PRODUCTION_ZONES)
+    }
 }
 
 /// ゾーン 1 件。
@@ -439,5 +457,60 @@ mod count_tests {
         let res: ServerFindResponse = serde_json::from_str(body).unwrap();
         assert_eq!(res.total, 0);
         assert!(res.servers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod zone_list_tests {
+    use super::*;
+
+    /// 環境ごとにゾーン名が違う。cloud-test は本番と重ならない。
+    #[test]
+    fn environments_have_distinct_zones() {
+        let production = known_zones_for(crate::config::DEFAULT_API_ROOT);
+        let test = known_zones_for(crate::config::TEST_API_ROOT);
+
+        assert!(production.iter().any(|z| z.name == "is1a"));
+        assert!(test.iter().any(|z| z.name == "is1x"));
+
+        // 本番のゾーンは cloud-test には存在しない（404 の原因だった）。
+        for zone in &production {
+            assert!(
+                !test.iter().any(|t| t.name == zone.name),
+                "{} が両方にある",
+                zone.name
+            );
+        }
+    }
+
+    /// 知らない接続先は本番のゾーンで代用する。
+    #[test]
+    fn unknown_root_falls_back_to_production() {
+        let zones = known_zones_for("https://example.internal/api/zone");
+        assert!(zones.iter().any(|z| z.name == "is1a"));
+    }
+
+    #[test]
+    fn test_zones_match_the_environment() {
+        let names: Vec<&str> = known_zones_for(crate::config::TEST_API_ROOT)
+            .iter()
+            .map(|z| z.name.clone())
+            .map(|n| Box::leak(n.into_boxed_str()) as &str)
+            .collect();
+        assert_eq!(names, vec!["is1x", "is1y", "is1z", "tk1s"]);
+    }
+
+    /// 説明が空でないこと（ピッカーで見分けるため）。
+    #[test]
+    fn every_zone_has_a_description() {
+        for root in [
+            crate::config::DEFAULT_API_ROOT,
+            crate::config::TEST_API_ROOT,
+        ] {
+            for zone in known_zones_for(root) {
+                assert!(!zone.description.is_empty(), "{}", zone.name);
+                assert!(zone.label().contains(&zone.name));
+            }
+        }
     }
 }

@@ -14,12 +14,11 @@ use serde_json::json;
 
 use crate::config::ApiCredentials;
 
-const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/zone";
-/// ゾーンに依存しないリソースを呼ぶときに使うゾーン。
-const GLOBAL_ZONE: &str = "is1a";
 /// プロファイルにゾーン指定が無い場合の既定ゾーン。
 const DEFAULT_ZONE: &str = "is1a";
 const API_SUFFIX: &str = "api/cloud/1.1";
+/// 課金関連のエンドポイント接尾辞。
+pub(crate) const BILLING_SUFFIX: &str = "api/system/1.0";
 /// `commonserviceitem` のうちコンテナレジストリを表す `Provider.Class`。
 const REGISTRY_CLASS: &str = "containerregistry";
 /// Find の 1 ページあたりの取得件数。
@@ -319,6 +318,8 @@ pub struct SacloudClient {
     token: String,
     secret: String,
     default_zone: String,
+    /// API のルート URL（末尾にスラッシュを含まない）。環境ごとに変わる。
+    api_root: String,
 }
 
 impl SacloudClient {
@@ -332,6 +333,7 @@ impl SacloudClient {
                 .zone
                 .clone()
                 .unwrap_or_else(|| DEFAULT_ZONE.to_string()),
+            api_root: creds.api_root().to_string(),
         })
     }
 
@@ -340,24 +342,34 @@ impl SacloudClient {
         &self.default_zone
     }
 
+    /// 接続先の API ルート。
+    pub fn api_root(&self) -> &str {
+        &self.api_root
+    }
+
     /// ゾーンに依存しないリソース向け（他モジュールから使う入口）。
+    ///
+    /// ゾーンに依存しないリソースでも URL にはゾーンが要る。どのゾーン経由でも
+    /// 同じ結果になるので、その環境に確実に存在する既定ゾーンを使う。
+    /// （本番以外の環境ではゾーン名が違うため、`is1a` の決め打ちはできない）
     pub(crate) async fn request_common<T: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        self.request_in_zone(GLOBAL_ZONE, method, path, body).await
+        self.request_in_zone(&self.default_zone, method, path, body)
+            .await
     }
 
-    /// ゾーンに依存しないリソース向け。常に `is1a` のエンドポイントを使う。
+    /// ゾーンに依存しないリソース向け。
     async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        self.request_in_zone(GLOBAL_ZONE, method, path, body).await
+        self.request_common(method, path, body).await
     }
 
     /// ゾーンを指定して呼ぶ。
@@ -368,7 +380,22 @@ impl SacloudClient {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        let base = format!("{API_ROOT}/{zone}/{API_SUFFIX}");
+        self.request_with_suffix(zone, API_SUFFIX, method, path, body)
+            .await
+    }
+
+    /// エンドポイントの接尾辞まで指定して呼ぶ。
+    ///
+    /// 課金関連は IaaS とは別の接尾辞（`api/system/1.0`）にぶら下がっている。
+    pub(crate) async fn request_with_suffix<T: DeserializeOwned>(
+        &self,
+        zone: &str,
+        suffix: &str,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<T> {
+        let base = format!("{}/{zone}/{suffix}", self.api_root);
         let mut url = reqwest::Url::parse(&format!("{base}/{path}"))
             .with_context(|| format!("URLの組み立てに失敗しました: {base}/{path}"))?;
 

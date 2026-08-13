@@ -12,17 +12,20 @@ use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod apprun;
+mod billing;
 mod dedicated;
 mod observability;
 mod server;
 
 pub use apprun::{AppRunPane, AppRunView};
+pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
 pub use observability::{DnsView, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView};
 pub use server::ServerView;
 
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
+use crate::billing::{Bill, BillDetail, BillingIdentity};
 use crate::commonservice::{DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
@@ -139,7 +142,8 @@ pub enum Message {
     /// プロファイル作成時の検証結果。検証が通ってから書き出す。
     ProfileVerified {
         form: Box<ProfileForm>,
-        result: Result<(), String>,
+        /// 成功時はその環境で使えるゾーンの一覧。
+        result: Result<Vec<Zone>, String>,
     },
     /// 認証情報の読み込み結果（キーチェーンを触るため別スレッドで実行する）。
     CredentialsLoaded {
@@ -150,6 +154,12 @@ pub enum Message {
     SavedLogin {
         host: String,
         login: Option<RegistryLogin>,
+    },
+    BillingIdentity(Box<Result<BillingIdentity, String>>),
+    Bills(Result<Vec<Bill>, String>),
+    BillDetails {
+        id: String,
+        result: Result<Vec<BillDetail>, String>,
     },
     Zones(Result<Vec<Zone>, String>),
     ZoneCount {
@@ -236,6 +246,10 @@ pub enum Pane {
     Rules,
     Histories,
     Storages,
+    // 請求
+    Bills,
+    BillDetails,
+    BillSummary,
     /// 絞り込み対象になるリストが無い（概要タブなど）。
     None,
 }
@@ -285,6 +299,50 @@ impl Tab {
     }
 }
 
+/// サービスの大分類。
+///
+/// 利用者がコントロールパネルで探すときの括りに合わせる。
+/// サービスを増やすときは、まず公式のカタログでの分類に従うこと。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Category {
+    Compute,
+    Container,
+    Network,
+    Security,
+    Ops,
+    Account,
+}
+
+impl Category {
+    /// 表示順。サービス一覧の並びもこの順に揃える。
+    pub const ALL: [Category; 6] = [
+        Category::Compute,
+        Category::Container,
+        Category::Network,
+        Category::Security,
+        Category::Ops,
+        Category::Account,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Category::Compute => "コンピュート",
+            Category::Container => "コンテナ・アプリ実行",
+            Category::Network => "ネットワーク",
+            Category::Security => "セキュリティ",
+            Category::Ops => "運用・監視",
+            Category::Account => "アカウント",
+        }
+    }
+
+    /// この分類に属するサービス。`Service::ALL` が分類順に並んでいる前提。
+    pub fn services(self) -> impl Iterator<Item = Service> {
+        Service::ALL
+            .into_iter()
+            .filter(move |svc| svc.category() == self)
+    }
+}
+
 /// TUI が扱うサービス。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Service {
@@ -297,19 +355,46 @@ pub enum Service {
     SimpleMonitor,
     Secrets,
     Monitoring,
+    Billing,
 }
 
 impl Service {
-    pub const ALL: [Service; 8] = [
+    /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
+    /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
+    pub const ALL: [Service; 9] = [
+        // コンピュート
+        Service::Server,
+        // コンテナ・アプリ実行
         Service::Registry,
         Service::AppRun,
         Service::Dedicated,
-        Service::Server,
+        // ネットワーク
         Service::Dns,
-        Service::SimpleMonitor,
+        // セキュリティ
         Service::Secrets,
+        // 運用・監視
+        Service::SimpleMonitor,
         Service::Monitoring,
+        // アカウント
+        Service::Billing,
     ];
+
+    /// このサービスが属する大分類。
+    ///
+    /// 分類は「利用者が何のために使うか」で決める。API の置き場所では決めない
+    /// （レジストリ・DNS・シンプル監視は API 上どれも `commonserviceitem` だが
+    /// 分類は別々、AppRun 共用型と専有型はエンドポイントが違うが同じ分類）。
+    /// ゾーン依存かどうかは分類とは別の軸なので [`Service::is_zoned`] を使う。
+    pub fn category(self) -> Category {
+        match self {
+            Service::Server => Category::Compute,
+            Service::Registry | Service::AppRun | Service::Dedicated => Category::Container,
+            Service::Dns => Category::Network,
+            Service::Secrets => Category::Security,
+            Service::SimpleMonitor | Service::Monitoring => Category::Ops,
+            Service::Billing => Category::Account,
+        }
+    }
 
     pub fn title(self) -> &'static str {
         match self {
@@ -321,6 +406,7 @@ impl Service {
             Service::SimpleMonitor => "シンプル監視",
             Service::Secrets => "シークレットマネージャ",
             Service::Monitoring => "モニタリングスイート",
+            Service::Billing => "請求",
         }
     }
 
@@ -335,6 +421,7 @@ impl Service {
             Service::SimpleMonitor => "monitor",
             Service::Secrets => "secrets",
             Service::Monitoring => "monitoring",
+            Service::Billing => "billing",
         }
     }
 
@@ -475,6 +562,13 @@ impl ProfileStorage {
     }
 }
 
+/// API ルートの選択肢。環境（本番 / 社内テスト）の切り替えに使う。
+#[derive(Debug, Clone)]
+pub struct ApiRootChoice {
+    pub label: &'static str,
+    pub url: String,
+}
+
 /// 資格情報の作成フォーム。
 #[derive(Debug, Clone, Default)]
 pub struct ProfileForm {
@@ -484,6 +578,8 @@ pub struct ProfileForm {
     /// 選べるゾーン。API から取れていればそれを、無ければ既知の一覧を使う。
     pub zones: Vec<Zone>,
     pub zone_index: usize,
+    pub api_roots: Vec<ApiRootChoice>,
+    pub api_root_index: usize,
     pub storage: ProfileStorage,
     pub field: usize,
     /// 検証中はキー入力を受け付けない。
@@ -491,12 +587,14 @@ pub struct ProfileForm {
 }
 
 impl ProfileForm {
-    /// 入力欄の数（末尾の 2 つは選択式）。
-    pub const FIELDS: usize = 5;
+    /// 入力欄の数（末尾の 3 つは選択式）。
+    pub const FIELDS: usize = 6;
     /// ゾーンを選ぶ欄の位置。
     pub const ZONE_FIELD: usize = 3;
+    /// API ルートを選ぶ欄の位置。
+    pub const ROOT_FIELD: usize = 4;
     /// 保存先を選ぶ欄の位置。
-    pub const STORAGE_FIELD: usize = 4;
+    pub const STORAGE_FIELD: usize = 5;
 
     pub fn label(index: usize) -> &'static str {
         match index {
@@ -504,8 +602,24 @@ impl ProfileForm {
             1 => "アクセストークン",
             2 => "シークレット",
             3 => "既定ゾーン",
+            4 => "接続先",
             _ => "保存先",
         }
+    }
+
+    /// 選択中の API ルート。
+    pub fn api_root(&self) -> &ApiRootChoice {
+        &self.api_roots[self.api_root_index.min(self.api_roots.len() - 1)]
+    }
+
+    /// 接続先を切り替える。
+    ///
+    /// 環境ごとにゾーン名が違うので、ゾーンの選択肢も合わせて入れ替える。
+    fn cycle_api_root(&mut self, delta: i32) {
+        let len = self.api_roots.len() as i32;
+        self.api_root_index = ((self.api_root_index as i32 + delta).rem_euclid(len)) as usize;
+        self.zones = crate::iaas::known_zones_for(&self.api_root().url);
+        self.zone_index = 0;
     }
 
     /// 文字入力を受け付ける欄か。
@@ -533,7 +647,7 @@ impl ProfileForm {
 
     /// 選択中のゾーン。
     pub fn zone(&self) -> &Zone {
-        &self.zones[self.zone_index.min(self.zones.len() - 1)]
+        &self.zones[self.zone_index.min(self.zones.len().saturating_sub(1))]
     }
 
     fn cycle_zone(&mut self, delta: i32) {
@@ -738,6 +852,8 @@ pub struct App {
     pub service: Service,
     /// ゾーンに属するリソース（サーバーなど）を見るときのゾーン。
     pub zone: String,
+    /// 現在の接続先（API ルート）。
+    pub api_root: String,
     pub zones: Loadable<Vec<Zone>>,
     /// `(サービス, ゾーン)` ごとのリソース件数。ゾーン選択の判断材料に出す。
     pub zone_counts: HashMap<(Service, String), Loadable<usize>>,
@@ -756,6 +872,8 @@ pub struct App {
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
     pub monitoring: MonitoringView,
+    /// 請求画面の状態。
+    pub billing: BillingView,
 
     /// ペインごとの絞り込み。
     pub filters: Filters,
@@ -763,6 +881,8 @@ pub struct App {
     pub filtering: bool,
 
     pub overlay: Option<Overlay>,
+    /// メッセージダイアログを閉じたあとに戻すフォーム。
+    pending_form: Option<Box<ProfileForm>>,
     pub status: Option<(String, StatusKind)>,
 }
 
@@ -774,6 +894,7 @@ impl App {
         credential_source: CredentialSource,
     ) -> Self {
         let default_zone = clients.sacloud.default_zone().to_string();
+        let api_root_url = clients.sacloud.api_root().to_string();
         let mut app = Self {
             sacloud: clients.sacloud,
             apprun_client: clients.apprun,
@@ -790,6 +911,7 @@ impl App {
             tick: 0,
             service: Service::Registry,
             zone: default_zone,
+            api_root: api_root_url,
             zones: Loadable::Idle,
             zone_counts: HashMap::new(),
             pending_zone_picker: false,
@@ -801,9 +923,11 @@ impl App {
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
             monitoring: MonitoringView::default(),
+            billing: BillingView::default(),
             filters: Filters::default(),
             filtering: false,
             overlay: None,
+            pending_form: None,
             status: None,
         };
         app.load_registries();
@@ -953,6 +1077,7 @@ impl App {
                     Pane::Vaults
                 }
             }
+            Service::Billing => self.billing_active_pane(),
             Service::Monitoring => match self.monitoring.tab {
                 MonitoringTab::Rules => Pane::Rules,
                 MonitoringTab::Histories => Pane::Histories,
@@ -1065,6 +1190,7 @@ impl App {
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
             Service::Monitoring => self.monitoring_ensure_loaded(),
+            Service::Billing => self.billing_ensure_loaded(),
         }
     }
 
@@ -1476,15 +1602,39 @@ impl App {
                 self.ensure_loaded();
             }
             Message::ProfileVerified { form, result } => match result {
-                Ok(()) => self.save_verified_profile(*form),
+                Ok(zones) => {
+                    // 環境ごとにゾーン名が違うので、取れた一覧に差し替える。
+                    if !zones.is_empty() {
+                        self.zones = Loadable::Ready(zones);
+                        self.zone_counts.clear();
+                    }
+                    self.save_verified_profile(*form)
+                }
                 Err(err) => {
                     let mut form = *form;
                     form.verifying = false;
-                    self.set_status(
-                        format!("トークンを検証できませんでした: {err}"),
-                        StatusKind::Error,
+                    // 入力し直せるようフォームは残し、理由は読める形で出す。
+                    self.pending_form = Some(Box::new(form));
+                    self.show_error(
+                        "トークンを検証できませんでした",
+                        {
+                            // 404 は認証以前に URL が違う。
+                            let hint = if err.contains("404") {
+                                "接続先の URL か、ゾーン名が違う可能性が高いです。\n\
+                                 環境によってゾーン名は異なります（本番は is1a など、\n\
+                                 社内テスト環境では is1x のように別の名前になります）。\n\
+                                 「既定ゾーン」「接続先」でそれぞれ「手入力」を選び、\n\
+                                 正しい値を入れてください。"
+                            } else {
+                                "入力したトークンとシークレットを確かめてください。\n\
+                                 貼り付けが途中で切れていることもあります（Ctrl+V / ⌘V に対応しています）。"
+                            };
+                            format!(
+                                "{err}\n\n{hint}\n\n\
+                                 閉じると入力内容を残したままフォームに戻ります。"
+                            )
+                        },
                     );
-                    self.overlay = Some(Overlay::ProfileForm(form));
                 }
             },
             Message::ZoneCount {
@@ -1530,6 +1680,28 @@ impl App {
                     );
                 }
             },
+            Message::BillingIdentity(result) => {
+                self.billing.identity = match *result {
+                    Ok(identity) => Loadable::Ready(identity),
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        Loadable::Failed(err)
+                    }
+                };
+                self.ensure_loaded();
+            }
+            Message::Bills(result) => {
+                self.billing.bills = self.store_result(result);
+                self.billing.bill_state.select(None);
+                self.ensure_loaded();
+            }
+            Message::BillDetails { id, result } => {
+                let loadable = self.store_result(result);
+                self.billing.details.insert(id, loadable);
+                self.billing.detail_state.select(None);
+                self.billing.summary_state.select(None);
+                self.ensure_loaded();
+            }
             Message::Zones(Ok(zones)) => {
                 self.zones = Loadable::Ready(zones);
                 // ゾーン一覧が揃ってから件数を数えに行く。
@@ -1674,6 +1846,56 @@ impl App {
 
     // --- キー入力 ---
 
+    /// 貼り付けを、いま入力中の欄に差し込む。
+    ///
+    /// 改行やタブが混ざっていても欄が壊れないよう空白に潰す。
+    pub fn on_paste(&mut self, text: &str) {
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        match &mut self.overlay {
+            Some(Overlay::ProfileForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::UserForm(form)) => match form.field {
+                0 if form.mode == UserFormMode::Add => form.username.push_str(text),
+                1 => form.password.push_str(text),
+                _ => {}
+            },
+            Some(Overlay::Login(form)) => match form.field {
+                0 => form.username.push_str(text),
+                1 => form.password.push_str(text),
+                _ => {}
+            },
+            Some(Overlay::RegistryForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::Confirm { verify, typed, .. }) if verify.is_some() => {
+                typed.push_str(text)
+            }
+            // 絞り込み中は検索語として受け取る。
+            _ if self.filtering => {
+                let pane = self.active_pane();
+                if let Some(filter) = self.filters.get_mut(pane) {
+                    filter.push_str(text);
+                }
+                self.clamp_selection(pane);
+            }
+            _ => {}
+        }
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
@@ -1703,6 +1925,7 @@ impl App {
             Service::Server => self.on_key_server(key),
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
+            Service::Billing => self.on_key_billing(key),
             // DNS とシンプル監視は共通キーだけで足りる。
             Service::Dns | Service::SimpleMonitor => {}
         }
@@ -2012,6 +2235,9 @@ impl App {
             Pane::Rules => self.visible_rules().ready().map_or(0, Vec::len),
             Pane::Histories => self.visible_histories().ready().map_or(0, Vec::len),
             Pane::Storages => self.visible_storages().ready().map_or(0, Vec::len),
+            Pane::Bills => self.visible_bills().len(),
+            Pane::BillDetails => self.visible_bill_details().ready().map_or(0, Vec::len),
+            Pane::BillSummary => self.current_summary().len(),
             Pane::None => 0,
         }
     }
@@ -2038,6 +2264,9 @@ impl App {
             Pane::Rules => Some(&mut self.monitoring.rule_state),
             Pane::Histories => Some(&mut self.monitoring.history_state),
             Pane::Storages => Some(&mut self.monitoring.storage_state),
+            Pane::Bills => Some(&mut self.billing.bill_state),
+            Pane::BillDetails => Some(&mut self.billing.detail_state),
+            Pane::BillSummary => Some(&mut self.billing.summary_state),
             Pane::None => None,
         }
     }
@@ -2093,6 +2322,7 @@ impl App {
             Pane::Secrets => self.selected_secret().map(|s| s.name),
             Pane::Projects => self.selected_project().map(|p| p.name),
             Pane::Rules | Pane::Histories | Pane::Storages => None,
+            Pane::Bills | Pane::BillDetails | Pane::BillSummary => None,
             Pane::Clusters => self.selected_cluster().map(|c| c.id.clone()),
             Pane::DedicatedApplications => {
                 self.visible_dedicated_applications()
@@ -2170,16 +2400,40 @@ impl App {
 
     /// 資格情報の作成フォームを開く。
     fn open_profile_form(&mut self) {
-        // API から取れていればそれを、まだなら既知の一覧を使う。
+        // 接続先は本番と社内テストから選ぶ。他の環境は --api-root で指定する。
+        let current = self.api_root.clone();
+        let mut api_roots = vec![
+            ApiRootChoice {
+                label: "本番 (cloud)",
+                url: crate::config::DEFAULT_API_ROOT.to_string(),
+            },
+            ApiRootChoice {
+                label: "テスト (cloud-test)",
+                url: crate::config::TEST_API_ROOT.to_string(),
+            },
+        ];
+        // 起動時に別の接続先を指定していれば、それも選べるようにする。
+        if !api_roots.iter().any(|r| r.url == current) {
+            api_roots.push(ApiRootChoice {
+                label: "起動時の指定",
+                url: current.clone(),
+            });
+        }
+        let api_root_index = api_roots.iter().position(|r| r.url == current).unwrap_or(0);
+
+        // ゾーンは接続先に対応するものを出す。
+        // 既に API から取れていればそちらを優先する（環境の実態に一番近い）。
         let zones = match self.zones.ready() {
             Some(zones) if !zones.is_empty() => zones.clone(),
-            _ => crate::iaas::known_zones(),
+            _ => crate::iaas::known_zones_for(&current),
         };
-        // 既定は今見ているゾーンに合わせる。
         let zone_index = zones.iter().position(|z| z.name == self.zone).unwrap_or(0);
+
         self.overlay = Some(Overlay::ProfileForm(ProfileForm {
             zones,
             zone_index,
+            api_roots,
+            api_root_index,
             ..ProfileForm::default()
         }));
     }
@@ -2194,7 +2448,10 @@ impl App {
             self.overlay = Some(Overlay::ProfileForm(form));
             return;
         }
-        if form.token.trim().is_empty() || form.secret.trim().is_empty() {
+        // 見えない文字が混ざっていると 401 になるので、ここで落としてから使う。
+        form.token = crate::config::clean_secret(&form.token);
+        form.secret = crate::config::clean_secret(&form.secret);
+        if form.token.is_empty() || form.secret.is_empty() {
             self.set_status(
                 "アクセストークンとシークレットを入力してください",
                 StatusKind::Error,
@@ -2204,10 +2461,11 @@ impl App {
         }
 
         let credentials = crate::config::ApiCredentials {
-            token: form.token.trim().to_string(),
-            secret: form.secret.trim().to_string(),
+            token: form.token.clone(),
+            secret: form.secret.clone(),
             source: CredentialSource::Env,
             zone: Some(form.zone().name.clone()),
+            api_root: Some(form.api_root().url.clone()),
         };
         let client = match SacloudClient::new(&credentials) {
             Ok(client) => client,
@@ -2224,8 +2482,15 @@ impl App {
         self.set_status("トークンを検証しています…", StatusKind::Info);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            // ゾーン一覧はどのアカウントでも読める、最も軽い読み取り。
-            let result = client.list_zones().await.map(|_| ()).map_err(fmt_error);
+            // 「自分が誰か」を返すだけの auth-status で確かめる。
+            // ゾーン一覧やリソース一覧は権限設定によっては読めないため、
+            // 有効なキーでも失敗してしまう。
+            let result = match client.billing_identity().await {
+                // 認証が通ったら、その環境に実在するゾーンも拾っておく。
+                // 環境ごとにゾーン名が違うため、以降はこれを使う。
+                Ok(_) => Ok(client.list_zones().await.unwrap_or_default()),
+                Err(err) => Err(fmt_error(err)),
+            };
             let _ = tx.send(Message::ProfileVerified {
                 form: Box::new(form),
                 result,
@@ -2241,12 +2506,14 @@ impl App {
                 &form.token,
                 &form.secret,
                 &form.zone().name,
+                &form.api_root().url,
             ),
             ProfileStorage::Keychain => crate::config::create_keychain_credential(
                 &form.name,
                 &form.token,
                 &form.secret,
                 &form.zone().name,
+                &form.api_root().url,
             ),
         };
         match saved {
@@ -2356,26 +2623,37 @@ impl App {
             }
         };
 
+        self.api_root = credentials.api_root().to_string();
+        // ゾーン名は環境ごとに違う（本番の is1a は cloud-test には無い）。
+        // 切り替え先の既定ゾーンに合わせないと、ゾーン依存のサービスが全て 404 になる。
+        self.zone = sacloud.default_zone().to_string();
+
         self.sacloud = Arc::new(sacloud);
         self.apprun_client = Arc::new(apprun);
         self.dedicated_client = Arc::new(dedicated);
         self.monitoring_client = Arc::new(monitoring);
         self.credential_source = source;
-        // 契約が変われば取得済みのゾーンや件数も当てにならない。
+
+        // 契約が変われば、取得済みのものは全て別アカウントのもの。
+        // どれか一つでも残すと、切り替えたのに前の内容が見える。
         self.zones = Loadable::Idle;
         self.zone_counts.clear();
-        // ユーザーはレジストリIDに紐づくので、契約が変われば無効。
-        self.registry.users.clear();
-        self.registry.registry_state.select(None);
-        self.registry.user_state.select(None);
-        self.registry.repository_state.select(None);
-        self.registry.tag_state.select(None);
+        self.invalidate_all();
+        self.registry.registries = Loadable::Idle;
+        self.registry_clients = RegistryClients::default();
         self.filters = Filters::default();
+
         self.set_status(
-            format!("{} に切り替えました", self.credential_source.label()),
+            format!(
+                "{} に切り替えました（ゾーン {}）",
+                self.credential_source.label(),
+                self.zone
+            ),
             StatusKind::Info,
         );
-        self.load_registries();
+        // 表示中のサービスを読み直す。レジストリだけ読むと、他のサービスに
+        // 移ったときに前のアカウントの内容が残って見える。
+        self.ensure_loaded();
     }
 
     /// 現在のビューのキャッシュを捨てて読み直す。
@@ -2399,6 +2677,7 @@ impl App {
                 self.secrets.secrets.clear();
                 self.secrets_ensure_loaded();
             }
+            Service::Billing => self.billing_refresh(),
             Service::Monitoring => {
                 self.monitoring.projects.remove(&self.zone);
                 self.monitoring.rules.clear();
@@ -2438,10 +2717,16 @@ impl App {
         self.registry.repositories.clear();
         self.registry.tags.clear();
         self.registry.tag_details.clear();
+        self.registry.auto_login_tried.clear();
+        self.registry.registry_state.select(None);
+        self.registry.user_state.select(None);
+        self.registry.repository_state.select(None);
+        self.registry.tag_state.select(None);
         self.apprun_invalidate();
         self.dedicated_invalidate();
         self.server_invalidate();
         self.observability_invalidate();
+        self.billing_invalidate();
     }
 
     fn set_tab(&mut self, tab: Tab) {
@@ -2528,6 +2813,10 @@ impl App {
         }
         if pane == Pane::Vaults {
             self.secrets.secret_state.select(None);
+        }
+        if pane == Pane::Bills {
+            self.billing.detail_state.select(None);
+            self.billing.summary_state.select(None);
         }
         if pane == Pane::Projects {
             self.monitoring.rule_state.select(None);
@@ -3044,7 +3333,12 @@ impl App {
                 kind,
                 mut scroll,
             } => match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {}
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    // 入力途中のフォームがあれば書き直せるように戻す。
+                    if let Some(form) = self.pending_form.take() {
+                        self.overlay = Some(Overlay::ProfileForm(*form));
+                    }
+                }
                 code => {
                     let lines = body.lines().count() as u16;
                     scroll = match code {
@@ -3292,6 +3586,10 @@ fn edit_profile_form(form: &mut ProfileForm, key: KeyEvent) {
         KeyCode::Right | KeyCode::Char(' ') if form.field == ProfileForm::ZONE_FIELD => {
             form.cycle_zone(1)
         }
+        KeyCode::Left if form.field == ProfileForm::ROOT_FIELD => form.cycle_api_root(-1),
+        KeyCode::Right | KeyCode::Char(' ') if form.field == ProfileForm::ROOT_FIELD => {
+            form.cycle_api_root(1)
+        }
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
             if form.field == ProfileForm::STORAGE_FIELD =>
         {
@@ -3375,5 +3673,121 @@ mod tests {
     fn filter_matches_any_field() {
         // 名前が外れてもホスト側で拾えること。
         assert!(matches("sakuracr", &["example", "example.sakuracr.jp"]));
+    }
+
+    /// サービスを追加したときに分類を書き忘れないための番人。
+    ///
+    /// `category()` は網羅マッチなので分類漏れはコンパイルで落ちるが、
+    /// 並びが分類順から外れるとピッカーの見出しが分裂するので、そこを見る。
+    #[test]
+    fn services_are_ordered_by_category() {
+        let mut seen: Vec<Category> = Vec::new();
+        for service in Service::ALL {
+            let category = service.category();
+            if seen.last() != Some(&category) {
+                assert!(
+                    !seen.contains(&category),
+                    "{} の分類 {} が並びの中で分裂している",
+                    service.title(),
+                    category.title()
+                );
+                seen.push(category);
+            }
+        }
+    }
+
+    /// 空の分類を残さないこと（該当サービスを実装したときに追加する方針）。
+    #[test]
+    fn every_category_has_a_service() {
+        for category in Category::ALL {
+            assert!(
+                category.services().next().is_some(),
+                "{} に属するサービスが無い",
+                category.title()
+            );
+        }
+    }
+
+    /// 分類の並びと `Category::ALL` の並びが一致すること。
+    #[test]
+    fn category_order_matches_service_order() {
+        let from_services: Vec<Category> = Category::ALL
+            .into_iter()
+            .filter(|c| c.services().next().is_some())
+            .collect();
+        let mut seen: Vec<Category> = Vec::new();
+        for service in Service::ALL {
+            if seen.last() != Some(&service.category()) {
+                seen.push(service.category());
+            }
+        }
+        assert_eq!(seen, from_services);
+    }
+
+    /// `--service` に渡す名前が重複していないこと。
+    #[test]
+    fn arg_names_are_unique() {
+        let mut names: Vec<&str> = Service::ALL.iter().map(|s| s.arg_name()).collect();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count);
+    }
+
+    /// ゾーン依存は分類とは別の軸であること。
+    ///
+    /// 同じ分類でもゾーン依存が分かれる（レジストリと AppRun は
+    /// どちらもコンテナ分類だが、どちらもゾーンに依存しない）。
+    #[test]
+    fn zone_scope_is_independent_from_category() {
+        assert_eq!(Service::Server.category(), Category::Compute);
+        assert!(Service::Server.is_zoned());
+        assert_eq!(Service::Secrets.category(), Category::Security);
+        assert!(Service::Secrets.is_zoned());
+        // 分類が同じでもゾーン依存ではないもの。
+        assert_eq!(Service::Registry.category(), Category::Container);
+        assert!(!Service::Registry.is_zoned());
+        assert!(!Service::Dns.is_zoned());
+        assert!(!Service::Billing.is_zoned());
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    /// 貼り付けた文字列から制御文字を除く処理。
+    ///
+    /// `on_paste` は `App` を要するため、ここでは正規化だけを検証する。
+    fn sanitize(text: &str) -> String {
+        let text: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        text.trim().to_string()
+    }
+
+    #[test]
+    fn strips_surrounding_whitespace() {
+        assert_eq!(sanitize("  abc123  "), "abc123");
+        assert_eq!(sanitize("\ntoken\n"), "token");
+    }
+
+    /// 改行やタブが混ざっても欄が壊れないこと。
+    #[test]
+    fn replaces_control_characters() {
+        assert_eq!(sanitize("aaa\nbbb"), "aaa bbb");
+        assert_eq!(sanitize("aaa\tbbb"), "aaa bbb");
+    }
+
+    #[test]
+    fn empty_paste_is_ignored() {
+        assert!(sanitize("").is_empty());
+        assert!(sanitize("   \n  ").is_empty());
+    }
+
+    /// トークンに使われる文字はそのまま残ること。
+    #[test]
+    fn keeps_token_characters() {
+        let token = "abcDEF012-_3456789";
+        assert_eq!(sanitize(token), token);
     }
 }

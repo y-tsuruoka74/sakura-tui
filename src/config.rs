@@ -10,6 +10,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
+/// 本番環境の API ルート。
+pub const DEFAULT_API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/zone";
+/// 社内テスト環境の API ルート。
+pub const TEST_API_ROOT: &str = "https://secure.sakura.ad.jp/cloud-test/zone";
+
 /// 認証情報の出どころ。TUI 内で切り替えるための識別子でもある。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialSource {
@@ -80,6 +85,19 @@ pub struct ApiCredentials {
     pub source: CredentialSource,
     /// プロファイルに書かれた既定ゾーン。
     pub zone: Option<String>,
+    /// API のルート URL。環境（本番 / cloud-test など）を切り替えるのに使う。
+    /// 未設定なら本番。
+    pub api_root: Option<String>,
+}
+
+impl ApiCredentials {
+    /// 実際に使う API ルート（末尾にスラッシュを含まない）。
+    pub fn api_root(&self) -> &str {
+        self.api_root
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .unwrap_or(DEFAULT_API_ROOT)
+    }
 }
 
 fn env_multi(names: &[&str]) -> Option<String> {
@@ -100,6 +118,7 @@ fn credentials_from_env() -> Option<ApiCredentials> {
         secret,
         source: CredentialSource::Env,
         zone: env_multi(&["SAKURA_ZONE", "SAKURACLOUD_ZONE"]),
+        api_root: env_multi(&["SAKURA_API_ROOT_URL", "SAKURACLOUD_API_ROOT_URL"]),
     })
 }
 
@@ -149,6 +168,7 @@ fn load_keychain_credentials(name: &str) -> Result<ApiCredentials> {
         secret,
         source: CredentialSource::Keychain(name.to_string()),
         zone: entry.zone.clone(),
+        api_root: entry.api_root.clone(),
     })
 }
 
@@ -221,6 +241,8 @@ fn load_usacloud_profile(name: Option<&str>) -> Result<ApiCredentials> {
         access_token_secret: String,
         #[serde(rename = "Zone", default)]
         zone: String,
+        #[serde(rename = "APIRootURL", default)]
+        api_root_url: String,
     }
 
     let dir = usacloud_config_dir()?;
@@ -251,6 +273,9 @@ fn load_usacloud_profile(name: Option<&str>) -> Result<ApiCredentials> {
         secret: config.access_token_secret,
         source: CredentialSource::Profile(name),
         zone: Some(config.zone).filter(|z| !z.is_empty()),
+        // 明示指定（--api-root / 環境変数）があればプロファイルより優先する。
+        api_root: env_multi(&["SAKURA_API_ROOT_URL", "SAKURACLOUD_API_ROOT_URL"])
+            .or(Some(config.api_root_url).filter(|r| !r.is_empty())),
     })
 }
 
@@ -309,7 +334,7 @@ struct UsacloudProfileFile {
 }
 
 impl UsacloudProfileFile {
-    fn new(token: &str, secret: &str, zone: &str) -> Self {
+    fn new(token: &str, secret: &str, zone: &str, api_root: &str) -> Self {
         Self {
             access_token: token.to_string(),
             access_token_secret: secret.to_string(),
@@ -324,7 +349,7 @@ impl UsacloudProfileFile {
             state_polling_interval: 0,
             http_request_timeout: 0,
             http_request_rate_limit: 0,
-            api_root_url: String::new(),
+            api_root_url: api_root.to_string(),
             default_zone: String::new(),
             trace_mode: String::new(),
             fake_mode: false,
@@ -336,6 +361,30 @@ impl UsacloudProfileFile {
             default_query_driver: String::new(),
         }
     }
+}
+
+/// トークンやシークレットから、見えない文字を取り除く。
+///
+/// Web ページからコピーすると、ノーブレークスペース（U+00A0）やゼロ幅
+/// スペース（U+200B）が紛れ込むことがある。見た目では気づけないのに
+/// 認証は 401 で弾かれるため、ここで落とす。
+/// トークンは英数字とハイフンだけなので、空白・制御・書式文字は消してよい。
+pub fn clean_secret(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control() && !is_format_char(*c))
+        .collect()
+}
+
+/// 表示幅を持たない書式用の文字か（ゼロ幅スペースなど）。
+fn is_format_char(c: char) -> bool {
+    matches!(c,
+        '\u{00ad}'           // soft hyphen
+        | '\u{200b}'..='\u{200f}' // zero width space 〜 RLM
+        | '\u{2028}'..='\u{202e}' // line/paragraph separator, 方向制御
+        | '\u{2060}'..='\u{2064}' // word joiner など
+        | '\u{feff}'          // BOM
+    )
 }
 
 /// プロファイル名として使える文字列か検証する。
@@ -371,10 +420,12 @@ pub fn create_keychain_credential(
     token: &str,
     secret: &str,
     zone: &str,
+    api_root: &str,
 ) -> Result<PathBuf> {
     validate_profile_name(name)?;
     let name = name.trim();
-    if token.trim().is_empty() || secret.trim().is_empty() {
+    let (token, secret) = (clean_secret(token), clean_secret(secret));
+    if token.is_empty() || secret.is_empty() {
         bail!("アクセストークンとシークレットを入力してください");
     }
 
@@ -382,11 +433,14 @@ pub fn create_keychain_credential(
     if config.credentials.contains_key(name) {
         bail!("同じ名前の資格情報が既にあります: {name}");
     }
-    crate::keychain::set_api_credentials(name, token.trim(), secret.trim())?;
+    crate::keychain::set_api_credentials(name, &token, &secret)?;
     config.credentials.insert(
         name.to_string(),
         KeychainCredential {
             zone: Some(zone.trim().to_string()).filter(|z| !z.is_empty()),
+            // 本番なら書かない（既定なので）。
+            api_root: Some(api_root.trim().to_string())
+                .filter(|r| !r.is_empty() && r != DEFAULT_API_ROOT),
         },
     );
     config.save()
@@ -413,10 +467,12 @@ pub fn create_usacloud_profile(
     token: &str,
     secret: &str,
     zone: &str,
+    api_root: &str,
 ) -> Result<PathBuf> {
     validate_profile_name(name)?;
     let name = name.trim();
-    if token.trim().is_empty() || secret.trim().is_empty() {
+    let (token, secret) = (clean_secret(token), clean_secret(secret));
+    if token.is_empty() || secret.is_empty() {
         bail!("アクセストークンとシークレットを入力してください");
     }
 
@@ -430,7 +486,13 @@ pub fn create_usacloud_profile(
         .with_context(|| format!("{} を作成できませんでした", dir.display()))?;
     restrict_dir_permissions(&dir)?;
 
-    let profile = UsacloudProfileFile::new(token.trim(), secret.trim(), zone.trim());
+    // usacloud も同じ `APIRootURL` を見るので、そのまま書けば共用できる。
+    let api_root = if api_root.trim() == DEFAULT_API_ROOT {
+        ""
+    } else {
+        api_root.trim()
+    };
+    let profile = UsacloudProfileFile::new(&token, &secret, zone.trim(), api_root);
     let body = serde_json::to_string_pretty(&profile)
         .context("プロファイルのシリアライズに失敗しました")?;
     std::fs::write(&path, body)
@@ -477,6 +539,9 @@ pub struct KeychainCredential {
     /// 既定ゾーン。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
+    /// API ルート URL。未設定なら本番。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_root: Option<String>,
 }
 
 /// `~/.config/sakura-tui/config.toml` の内容。
@@ -781,7 +846,7 @@ mod profile_creation_tests {
     /// usacloud が読むキーを揃えて書き出すこと。
     #[test]
     fn writes_usacloud_compatible_json() {
-        let profile = UsacloudProfileFile::new("tok", "sec", "is1a");
+        let profile = UsacloudProfileFile::new("tok", "sec", "is1a", "");
         let text = serde_json::to_string_pretty(&profile).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
 
@@ -808,6 +873,7 @@ mod profile_creation_tests {
             "myaccount".to_string(),
             KeychainCredential {
                 zone: Some("tk1b".to_string()),
+                api_root: None,
             },
         );
         let text = toml::to_string_pretty(&config).unwrap();
@@ -826,5 +892,101 @@ mod profile_creation_tests {
         assert_eq!(usacloud.label(), keychain.label());
         assert_eq!(usacloud.kind_label(), "usacloud");
         assert_eq!(keychain.kind_label(), "キーチェーン");
+    }
+}
+
+#[cfg(test)]
+mod secret_cleaning_tests {
+    use super::*;
+
+    /// 正しいトークンはそのまま通ること（36文字のUUID形式）。
+    #[test]
+    fn keeps_valid_tokens_intact() {
+        let token = "12345678-90ab-cdef-1234-567890abcdef";
+        assert_eq!(clean_secret(token), token);
+        assert_eq!(clean_secret(token).len(), 36);
+
+        let secret = "a".repeat(64);
+        assert_eq!(clean_secret(&secret), secret);
+    }
+
+    /// Web からコピーすると紛れ込む見えない文字を落とすこと。
+    #[test]
+    fn strips_invisible_characters() {
+        // ノーブレークスペース・ゼロ幅スペース・BOM。
+        let dirty = "\u{feff}1234\u{00a0}5678\u{200b}90ab";
+        assert_eq!(clean_secret(dirty), "1234567890ab");
+    }
+
+    #[test]
+    fn strips_surrounding_and_inner_whitespace() {
+        assert_eq!(clean_secret("  abc  def\n"), "abcdef");
+        assert_eq!(clean_secret("abc\tdef"), "abcdef");
+    }
+
+    #[test]
+    fn empty_input_stays_empty() {
+        assert!(clean_secret("").is_empty());
+        assert!(clean_secret("   \u{200b} ").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod api_root_tests {
+    use super::*;
+
+    /// 未指定なら本番に繋ぐこと。
+    #[test]
+    fn defaults_to_production() {
+        let creds = ApiCredentials {
+            token: "t".into(),
+            secret: "s".into(),
+            source: CredentialSource::Env,
+            zone: None,
+            api_root: None,
+        };
+        assert_eq!(creds.api_root(), DEFAULT_API_ROOT);
+
+        let empty = ApiCredentials {
+            api_root: Some(String::new()),
+            ..creds.clone()
+        };
+        assert_eq!(empty.api_root(), DEFAULT_API_ROOT);
+    }
+
+    #[test]
+    fn uses_configured_root() {
+        let creds = ApiCredentials {
+            token: "t".into(),
+            secret: "s".into(),
+            source: CredentialSource::Env,
+            zone: None,
+            api_root: Some(TEST_API_ROOT.to_string()),
+        };
+        assert_eq!(creds.api_root(), TEST_API_ROOT);
+        assert!(creds.api_root().contains("cloud-test"));
+    }
+
+    /// 本番と社内テストで URL の環境部分だけが変わること。
+    #[test]
+    fn roots_differ_only_in_environment_segment() {
+        assert_eq!(
+            DEFAULT_API_ROOT.replace("/cloud/", "/cloud-test/"),
+            TEST_API_ROOT
+        );
+    }
+
+    /// usacloud のプロファイルには、本番なら APIRootURL を書かないこと。
+    #[test]
+    fn production_writes_empty_api_root() {
+        let production = UsacloudProfileFile::new("t", "s", "is1a", "");
+        let text = serde_json::to_string(&production).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["APIRootURL"], "");
+
+        let test_env = UsacloudProfileFile::new("t", "s", "is1a", TEST_API_ROOT);
+        let text = serde_json::to_string(&test_env).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["APIRootURL"], TEST_API_ROOT);
     }
 }

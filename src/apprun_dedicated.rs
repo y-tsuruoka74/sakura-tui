@@ -12,7 +12,10 @@ use serde::de::DeserializeOwned;
 use crate::config::ApiCredentials;
 use crate::sacloud::null_as_default;
 
-const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/api/apprun-dedicated/1.0";
+fn api_root(creds: &ApiCredentials) -> String {
+    let base = creds.api_root().trim_end_matches("/zone");
+    format!("{base}/api/apprun-dedicated/1.0")
+}
 /// 1 ページあたりの取得件数。
 const PAGE_SIZE: usize = 100;
 /// カーソルを辿る上限。API が同じカーソルを返し続けても止まるようにする。
@@ -281,6 +284,7 @@ pub struct DedicatedClient {
     http: reqwest::Client,
     token: String,
     secret: String,
+    api_root: String,
 }
 
 impl DedicatedClient {
@@ -290,11 +294,12 @@ impl DedicatedClient {
             http,
             token: creds.token.clone(),
             secret: creds.secret.clone(),
+            api_root: api_root(creds),
         })
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
-        let url = format!("{API_ROOT}{path}");
+        let url = format!("{}{path}", self.api_root);
         let res = crate::http::send_with_retry(&self.http, || {
             Ok(self
                 .http
@@ -520,11 +525,20 @@ impl From<RawCertificate> for Certificate {
 const FORBIDDEN_HINT: &str = "\n\nAppRun専有型 API には、APIキーに専有型の権限があることと、\n\
      クラスタに紐づくサービスプリンシパルが設定されていることが必要です。";
 
+/// 401 のときに添える案内。
+///
+/// 同じ API キーで他のサービスが見えているのに AppRun だけ 401 になる場合、
+/// その環境に AppRun が無いか、AppRun 側のユーザーが未作成のことが多い。
+const UNAUTHORIZED_HINT: &str = "\n\n     同じキーで他のサービスが見えているなら、次のどちらかです:\n\
+     ・この環境に AppRun が無い（社内テスト環境では未提供のことがあります）\n\
+     ・AppRun 側のユーザーが未作成\n\
+     --trace を付けて起動すると、実際に叩いた URL を確認できます。";
+
 fn format_api_error(status: StatusCode, body: &str) -> String {
-    let hint = if status == StatusCode::FORBIDDEN {
-        FORBIDDEN_HINT
-    } else {
-        ""
+    let hint = match status {
+        StatusCode::FORBIDDEN => FORBIDDEN_HINT,
+        StatusCode::UNAUTHORIZED => UNAUTHORIZED_HINT,
+        _ => "",
     };
     let parsed = serde_json::from_str::<ApiError>(body).unwrap_or_default();
     if let Some((summary, detail)) = parsed.parts() {

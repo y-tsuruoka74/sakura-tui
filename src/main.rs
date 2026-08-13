@@ -5,6 +5,7 @@
 mod app;
 mod apprun;
 mod apprun_dedicated;
+mod billing;
 mod commonservice;
 mod config;
 mod http;
@@ -29,7 +30,32 @@ use crate::sacloud::SacloudClient;
 /// スピナーを回すための描画間隔。
 const TICK: Duration = Duration::from_millis(120);
 
+/// `--service` に渡せる名前を分類ごとに並べる。
+///
+/// 一覧を手で書くとサービスを増やしたときに書き漏れるので、
+/// `Service::ALL` から組み立てる。
+fn service_names() -> String {
+    let mut out = String::new();
+    for category in app::Category::ALL {
+        let names: Vec<&str> = category.services().map(|svc| svc.arg_name()).collect();
+        if names.is_empty() {
+            continue;
+        }
+        // 全角を含むので、文字数ではなく表示幅で揃える。
+        out.push_str(&format!(
+            "\n                         {} {}",
+            ui::pad(category.title(), 22),
+            names.join(" / ")
+        ));
+    }
+    out
+}
+
 /// `--help` に出す使い方。
+fn usage() -> String {
+    USAGE.replace("{サービス名}", &service_names())
+}
+
 const USAGE: &str = "さくらインターネットのサービスをターミナルから操作する TUI
 
 使い方:
@@ -38,9 +64,10 @@ const USAGE: &str = "さくらインターネットのサービスをターミ�
 オプション:
   -p, --profile <名前>   使う usacloud プロファイル
   -z, --zone <ゾーン>     ゾーン依存のサービスで使うゾーン (例: is1a)
-  -s, --service <名前>    起動時に開くサービス
-                         registry / apprun / dedicated / server /
-                         dns / monitor / secrets / monitoring
+  -s, --service <名前>    起動時に開くサービス{サービス名}
+      --api-root <URL>   接続先の API ルート（既定: 本番）
+                         社内テスト環境なら
+                         https://secure.sakura.ad.jp/cloud-test/zone
       --trace            APIリクエストを標準エラーに記録する
   -h, --help             このヘルプ
   -V, --version          バージョン
@@ -49,6 +76,7 @@ const USAGE: &str = "さくらインターネットのサービスをターミ�
   SAKURA_ACCESS_TOKEN / SAKURA_ACCESS_TOKEN_SECRET   APIキー
   SAKURA_PROFILE                                     usacloud プロファイル名
   SAKURA_TUI_CONFIG                                  設定ファイルのパス
+  SAKURA_API_ROOT_URL                                --api-root と同じ
   SAKURA_TUI_TRACE                                   --trace と同じ";
 
 /// コマンドライン引数。
@@ -70,7 +98,7 @@ fn parse_args() -> Result<Args> {
         };
         match arg.as_str() {
             "-h" | "--help" => {
-                println!("{USAGE}");
+                println!("{}", usage());
                 std::process::exit(0);
             }
             "-V" | "--version" => {
@@ -84,6 +112,11 @@ fn parse_args() -> Result<Args> {
                 args.service = Some(app::Service::from_arg(&name).with_context(|| {
                     format!("不明なサービス名です: {name}\n指定できる名前は --help を参照")
                 })?);
+            }
+            "--api-root" => {
+                let url = value("--api-root")?;
+                // 環境変数と同じ経路に流して、プロファイル読み込みより先に効かせる。
+                unsafe { std::env::set_var("SAKURA_API_ROOT_URL", url) };
             }
             "--trace" => unsafe { std::env::set_var("SAKURA_TUI_TRACE", "1") },
             other => bail!("不明なオプションです: {other}\n使い方は --help を参照"),
@@ -144,6 +177,10 @@ async fn main() -> Result<()> {
     }
 
     let terminal = ratatui::init();
+    // 長いトークンを貼り付けられるようにする。1 文字ずつのキー入力として
+    // 届くと取りこぼしやすいので、まとめて 1 イベントで受け取る。
+    let paste_enabled =
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste).is_ok();
     let result = run(
         terminal,
         Clients {
@@ -157,6 +194,9 @@ async fn main() -> Result<()> {
         args,
     )
     .await;
+    if paste_enabled {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
+    }
     ratatui::restore();
     result
 }
@@ -198,6 +238,10 @@ async fn run(
                 // Windows では離した瞬間にもイベントが来るので押下だけ拾う。
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     app.on_key(key);
+                    true
+                }
+                Event::Paste(text) => {
+                    app.on_paste(&text);
                     true
                 }
                 Event::Resize(_, _) => true,

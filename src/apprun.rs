@@ -10,7 +10,11 @@ use serde::de::DeserializeOwned;
 use crate::config::ApiCredentials;
 use crate::sacloud::null_as_default;
 
-const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/api/apprun/1.0/apprun/api";
+/// `.../cloud/zone` から `/zone` を落とした部分に、各サービスのパスが生える。
+fn api_root(creds: &ApiCredentials) -> String {
+    let base = creds.api_root().trim_end_matches("/zone");
+    format!("{base}/api/apprun/1.0/apprun/api")
+}
 /// 1 ページあたりの取得件数（API の上限に合わせる）。
 const PAGE_SIZE: usize = 100;
 /// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
@@ -170,6 +174,7 @@ pub struct AppRunClient {
     http: reqwest::Client,
     token: String,
     secret: String,
+    api_root: String,
 }
 
 impl AppRunClient {
@@ -179,6 +184,7 @@ impl AppRunClient {
             http,
             token: creds.token.clone(),
             secret: creds.secret.clone(),
+            api_root: api_root(creds),
         })
     }
 
@@ -189,7 +195,7 @@ impl AppRunClient {
         query: &[(&str, String)],
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        let url = format!("{API_ROOT}{path}");
+        let url = format!("{}{path}", self.api_root);
         let res = crate::http::send_with_retry(&self.http, || {
             let mut req = self
                 .http
@@ -316,11 +322,20 @@ const FORBIDDEN_HINT: &str = "\n\nAppRun API には次の2つが必要です:\n\
         curl -X POST -u \"$SAKURA_ACCESS_TOKEN:$SAKURA_ACCESS_TOKEN_SECRET\" \\\n\
           https://secure.sakura.ad.jp/cloud/api/apprun/1.0/apprun/api/user";
 
+/// 401 のときに添える案内。
+///
+/// 同じ API キーで他のサービスが見えているのに AppRun だけ 401 になる場合、
+/// その環境に AppRun が無いか、AppRun 側のユーザーが未作成のことが多い。
+const UNAUTHORIZED_HINT: &str = "\n\n     同じキーで他のサービスが見えているなら、次のどちらかです:\n\
+     ・この環境に AppRun が無い（社内テスト環境では未提供のことがあります）\n\
+     ・AppRun 側のユーザーが未作成\n\
+     --trace を付けて起動すると、実際に叩いた URL を確認できます。";
+
 fn format_api_error(status: StatusCode, body: &str) -> String {
-    let hint = if status == StatusCode::FORBIDDEN {
-        FORBIDDEN_HINT
-    } else {
-        ""
+    let hint = match status {
+        StatusCode::FORBIDDEN => FORBIDDEN_HINT,
+        StatusCode::UNAUTHORIZED => UNAUTHORIZED_HINT,
+        _ => "",
     };
     let parsed = serde_json::from_str::<ApiError>(body).unwrap_or_default();
     if let Some((summary, detail)) = parsed.parts() {

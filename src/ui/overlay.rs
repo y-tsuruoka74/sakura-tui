@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use super::{DIM, accent};
 use crate::app::{
-    App, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
+    App, Category, LoginForm, Overlay, ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode,
     StatusKind, UserForm, UserFormMode,
 };
 use crate::app::{Loadable, Service};
@@ -93,7 +93,7 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
         })
         .collect();
 
-    // ゾーンは選択式。名前だけだと分かりにくいので説明も添える。
+    // ゾーンは選択式。接続先を変えると選択肢も入れ替わる。
     let zone_names: Vec<&str> = form.zones.iter().map(|z| z.name.as_str()).collect();
     lines.push(choice_line(
         ProfileForm::label(ProfileForm::ZONE_FIELD),
@@ -105,6 +105,20 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
     lines.push(Line::from(Span::styled(
         format!("{}{}", " ".repeat(14), form.zone().label()),
         Style::default().fg(DIM),
+    )));
+
+    // 接続先（本番 / 社内テスト）。URL も添えて取り違えを防ぐ。
+    let root_labels: Vec<&str> = form.api_roots.iter().map(|r| r.label).collect();
+    lines.push(choice_line(
+        ProfileForm::label(ProfileForm::ROOT_FIELD),
+        &root_labels,
+        form.api_root().label,
+        form.field == ProfileForm::ROOT_FIELD,
+        |label| label.to_string(),
+    ));
+    lines.push(Line::from(Span::styled(
+        format!("{}{}", " ".repeat(14), form.api_root().url),
+        Style::default().fg(Color::Cyan),
     )));
 
     // 保存先も同じ見た目で選ばせる。
@@ -156,15 +170,42 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
     );
 }
 
-fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
+/// サービス一覧を分類ごとの見出し付きで組む。
+///
+/// `spacious` が偽なら分類の間の空行を省く。分類の数だけ行が増えるので、
+/// 低い端末では空行を落とさないと下のキーヒントが枠外に出てしまう。
+fn service_picker_lines(index: usize, current: Service, spacious: bool) -> Vec<Line<'static>> {
     let mut lines = vec![Line::raw("")];
+    // 分類ごとに見出しを挟む。`Service::ALL` が分類順なので、
+    // 分類が変わった行の前に見出しを入れれば並びと一致する。
+    let mut previous: Option<Category> = None;
     for (i, service) in Service::ALL.iter().enumerate() {
+        let category = service.category();
+        if previous != Some(category) {
+            if previous.is_some() && spacious {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("  {}", category.title()),
+                Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+            )));
+            previous = Some(category);
+        }
         lines.push(picker_row(i == index, *service == current, service.title()));
     }
     lines.push(Line::raw(""));
     lines.push(picker_hint("切り替え"));
+    lines
+}
 
-    let area = centered(frame, 52, dialog_height(&lines, 52));
+fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
+    const WIDTH: u16 = 52;
+    let mut lines = service_picker_lines(index, current, true);
+    if dialog_height(&lines, WIDTH) > frame.area().height {
+        lines = service_picker_lines(index, current, false);
+    }
+
+    let area = centered(frame, WIDTH, dialog_height(&lines, WIDTH));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
@@ -481,10 +522,13 @@ fn draw_help(frame: &mut Frame) {
                 ("/", "表示中のリストを絞り込み"),
                 ("y", "選択中の項目をコピー"),
                 ("p", "認証情報（プロファイル）を切替"),
-                ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("s / S", "サービスを切り替え（4種）"),
+                ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("z", "ゾーンを切り替え（サーバー）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),
+                ("← →", "請求: 表示する年を移動"),
+                ("↑ ↓", "請求: 月を選ぶ（明細に入ると明細の移動）"),
+                ("Enter / Esc", "請求: 明細に入る / 月一覧に戻る"),
                 ("b / x", "サーバーの起動 / シャットダウン"),
                 ("X / B", "サーバーの強制停止 / 強制リセット"),
             ],
@@ -787,8 +831,15 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
 
 /// 入力欄 1 行。フォーカス中はカーソルを表示する。
 fn input_line(label: &str, value: &str, focused: bool, masked: bool) -> Line<'static> {
+    let count = value.chars().count();
+    // 伏せ字だと何文字入ったか数えづらい。貼り付けが途中で切れていないか
+    // 確かめられるよう、長いものは点の代わりに文字数を出す。
     let shown = if masked {
-        "•".repeat(value.chars().count())
+        if count > 12 {
+            format!("{} ({count}文字)", "•".repeat(12))
+        } else {
+            "•".repeat(count)
+        }
     } else {
         value.to_string()
     };

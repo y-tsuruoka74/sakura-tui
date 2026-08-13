@@ -11,7 +11,6 @@ use serde::de::DeserializeOwned;
 use crate::config::ApiCredentials;
 use crate::sacloud::{flexible_number, null_as_default};
 
-const API_ROOT: &str = "https://secure.sakura.ad.jp/cloud/zone";
 const API_SUFFIX: &str = "api/monitoring/1.0";
 const PAGE_SIZE: usize = 100;
 /// ページングを辿る上限。API が実態と違う総件数を返しても止まるようにする。
@@ -194,6 +193,7 @@ pub struct MonitoringClient {
     http: reqwest::Client,
     token: String,
     secret: String,
+    api_root: String,
 }
 
 impl MonitoringClient {
@@ -203,6 +203,7 @@ impl MonitoringClient {
             http,
             token: creds.token.clone(),
             secret: creds.secret.clone(),
+            api_root: creds.api_root().to_string(),
         })
     }
 
@@ -212,7 +213,7 @@ impl MonitoringClient {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T> {
-        let url = format!("{API_ROOT}/{zone}/{API_SUFFIX}/{path}");
+        let url = format!("{}/{zone}/{API_SUFFIX}/{path}", self.api_root);
         let res = crate::http::send_with_retry(&self.http, || {
             Ok(self
                 .http
