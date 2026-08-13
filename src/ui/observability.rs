@@ -416,14 +416,28 @@ pub fn draw_secrets(frame: &mut Frame, area: Rect, app: &mut App) {
 // --- モニタリングスイート ---
 
 pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
-    // 保管先はプロジェクトに紐づかないので、一覧を全幅で出す。
+    // 保管先はプロジェクトに紐づかない。選択した保管先のアクセスキーを右に出す。
     if app.monitoring.tab == MonitoringTab::Storages {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
         draw_monitoring_tabs(frame, rows[0], app);
-        draw_storages(frame, rows[1], app);
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(rows[1]);
+        draw_storages(frame, panes[0], app);
+        draw_storage_access_keys(frame, panes[1], app);
+        return;
+    }
+    if app.monitoring.tab == MonitoringTab::LogRoutings {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .split(area);
+        draw_monitoring_tabs(frame, rows[0], app);
+        draw_log_routings(frame, rows[1], app);
         return;
     }
 
@@ -487,6 +501,10 @@ pub fn draw_monitoring(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.monitoring.tab {
         MonitoringTab::Rules => draw_rules(frame, right[1], app),
         MonitoringTab::Histories => draw_histories(frame, right[1], app),
+        MonitoringTab::NotificationTargets => draw_notification_targets(frame, right[1], app),
+        MonitoringTab::NotificationRoutings => draw_notification_routings(frame, right[1], app),
+        MonitoringTab::LogMeasureRules => draw_log_measure_rules(frame, right[1], app),
+        MonitoringTab::LogRoutings => draw_log_routings(frame, right[1], app),
         MonitoringTab::Storages => {}
     }
 }
@@ -558,7 +576,7 @@ fn draw_rules(frame: &mut Frame, area: Rect, app: &mut App) {
                 Constraint::Min(16),
                 Constraint::Length(20),
             ],
-            focused: app.monitoring.focus == ListFocus::Right,
+            focused: app.monitoring.focus == ListFocus::Left,
         },
         &rules,
         rows,
@@ -623,6 +641,213 @@ fn draw_histories(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
+fn draw_notification_targets(frame: &mut Frame, area: Rect, app: &mut App) {
+    let targets = app.visible_notification_targets();
+    let rows: Vec<Row> = targets
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|target| {
+                    let service = match target.service_type.as_str() {
+                        "SAKURA_SIMPLE_NOTICE" => "シンプル通知",
+                        "SAKURA_EVENT_BUS" => "EventBus",
+                        other => other,
+                    };
+                    Row::new(vec![
+                        Cell::from(service.to_string()),
+                        Cell::from(target.description.clone()),
+                        dim(if target.url.is_empty() {
+                            target.uid.clone()
+                        } else {
+                            target.url.clone()
+                        }),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "通知先",
+            idle: "プロジェクトを選択してください",
+            empty: "通知先がありません",
+            header: vec!["サービス", "説明", "URL / UID"],
+            widths: vec![
+                Constraint::Length(16),
+                Constraint::Min(14),
+                Constraint::Min(20),
+            ],
+            focused: app.monitoring.focus == ListFocus::Right,
+        },
+        &targets,
+        rows,
+        &mut app.monitoring.notification_target_state,
+    );
+}
+
+fn draw_log_measure_rules(frame: &mut Frame, area: Rect, app: &mut App) {
+    let rules = app.visible_log_measure_rules();
+    let rows: Vec<Row> = rules
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|rule| {
+                    let matchers = rule
+                        .rule
+                        .pointer("/query/matchers")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, Vec::len);
+                    Row::new(vec![
+                        Cell::from(rule.name.clone()),
+                        dim(rule.description.clone()),
+                        dim(format!(
+                            "{} → {}",
+                            rule.log_storage_id, rule.metrics_storage_id
+                        )),
+                        dim(format!("{matchers} 条件")),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "ログ計測ルール",
+            idle: "プロジェクトを選択してください",
+            empty: "ログ計測ルールがありません",
+            header: vec!["名前", "説明", "ログ → メトリクス", "条件"],
+            widths: vec![
+                Constraint::Min(14),
+                Constraint::Min(12),
+                Constraint::Length(29),
+                Constraint::Length(8),
+            ],
+            focused: app.monitoring.focus == ListFocus::Right,
+        },
+        &rules,
+        rows,
+        &mut app.monitoring.log_measure_rule_state,
+    );
+}
+
+fn draw_notification_routings(frame: &mut Frame, area: Rect, app: &mut App) {
+    let routings = app.visible_notification_routings();
+    let rows: Vec<Row> = routings
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|routing| {
+                    let service = match routing.target_service_type.as_str() {
+                        "SAKURA_SIMPLE_NOTICE" => "シンプル通知",
+                        "SAKURA_EVENT_BUS" => "EventBus",
+                        other => other,
+                    };
+                    let labels = routing
+                        .match_labels
+                        .iter()
+                        .map(|(name, value)| format!("{name}={value}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Row::new(vec![
+                        dim(routing.order.to_string()),
+                        Cell::from(if routing.target_description.is_empty() {
+                            service.to_string()
+                        } else {
+                            routing.target_description.clone()
+                        }),
+                        dim(routing
+                            .resend_interval_minutes
+                            .map(|minutes| format!("{minutes} 分"))
+                            .unwrap_or_else(|| "-".to_string())),
+                        dim(if labels.is_empty() {
+                            "全アラート".to_string()
+                        } else {
+                            labels
+                        }),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "通知経路",
+            idle: "プロジェクトを選択してください",
+            empty: "通知経路がありません",
+            header: vec!["順序", "通知先", "再送", "条件"],
+            widths: vec![
+                Constraint::Length(5),
+                Constraint::Min(14),
+                Constraint::Length(9),
+                Constraint::Min(18),
+            ],
+            focused: app.monitoring.focus == ListFocus::Right,
+        },
+        &routings,
+        rows,
+        &mut app.monitoring.notification_routing_state,
+    );
+}
+
+fn draw_log_routings(frame: &mut Frame, area: Rect, app: &mut App) {
+    let routings = app.visible_log_routings();
+    let rows: Vec<Row> = routings
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|routing| {
+                    Row::new(vec![
+                        Cell::from(routing.publisher_code.clone()),
+                        dim(routing.publisher_description.clone()),
+                        Cell::from(routing.variant.clone()),
+                        dim(routing
+                            .resource_id
+                            .map_or_else(|| "-".to_string(), |id| id.to_string())),
+                        dim(routing.log_storage_id.to_string()),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "ログ転送",
+            idle: "読み込み中…",
+            empty: "ログ転送設定がありません",
+            header: vec![
+                "パブリッシャー",
+                "説明",
+                "バリアント",
+                "リソースID",
+                "保管先ID",
+            ],
+            widths: vec![
+                Constraint::Min(14),
+                Constraint::Min(14),
+                Constraint::Min(10),
+                Constraint::Length(14),
+                Constraint::Length(14),
+            ],
+            focused: app.monitoring.focus == ListFocus::Right,
+        },
+        &routings,
+        rows,
+        &mut app.monitoring.log_routing_state,
+    );
+}
+
 fn draw_storages(frame: &mut Frame, area: Rect, app: &mut App) {
     let storages = app.visible_storages();
     let rows: Vec<Row> = storages
@@ -682,5 +907,54 @@ fn draw_storages(frame: &mut Frame, area: Rect, app: &mut App) {
         &storages,
         rows,
         &mut app.monitoring.storage_state,
+    );
+}
+
+fn draw_storage_access_keys(frame: &mut Frame, area: Rect, app: &mut App) {
+    let system_storage = app
+        .selected_storage()
+        .is_some_and(|storage| storage.is_system);
+    let keys = app.visible_storage_access_keys();
+    let rows: Vec<Row> = keys
+        .ready()
+        .map(|items| {
+            items
+                .iter()
+                .map(|key| {
+                    Row::new(vec![
+                        Cell::from(key.token.clone()),
+                        dim(if key.description.is_empty() {
+                            key.uid.clone()
+                        } else {
+                            key.description.clone()
+                        }),
+                        Cell::from(Span::styled("••••••", Style::default().fg(DIM))),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    table_pane(
+        frame,
+        area,
+        TableSpec {
+            title: "アクセスキー",
+            idle: "ストレージを選択してください",
+            empty: if system_storage {
+                "システム領域ではアクセスキーを利用できません"
+            } else {
+                "アクセスキーがありません"
+            },
+            header: vec!["トークン", "説明 / UID", "シークレット"],
+            widths: vec![
+                Constraint::Min(12),
+                Constraint::Min(12),
+                Constraint::Length(10),
+            ],
+            focused: app.monitoring.focus == ListFocus::Right,
+        },
+        &keys,
+        rows,
+        &mut app.monitoring.storage_key_state,
     );
 }

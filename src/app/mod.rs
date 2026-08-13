@@ -37,7 +37,9 @@ use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
 use crate::monitoring::{
-    AlertHistory, AlertProject, AlertRule, AlertRuleInput, MonitoringClient, Storage, StorageKind,
+    AlertHistory, AlertProject, AlertRule, AlertRuleInput, LogMeasureRule, LogMeasureRuleInput,
+    LogRouting, LogRoutingInput, MonitoringClient, NotificationRouting, NotificationTarget,
+    Storage, StorageAccessKey, StorageAccessKeySecret, StorageKind,
 };
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
@@ -148,14 +150,38 @@ pub enum Message {
         project: i64,
         result: Result<Vec<AlertRule>, String>,
     },
+    LogMeasureRules {
+        zone: String,
+        project: i64,
+        result: Result<Vec<LogMeasureRule>, String>,
+    },
+    LogRoutings {
+        zone: String,
+        result: Result<Vec<LogRouting>, String>,
+    },
     AlertHistories {
         zone: String,
         project: i64,
         result: Result<Vec<AlertHistory>, String>,
     },
+    NotificationTargets {
+        zone: String,
+        project: i64,
+        result: Result<Vec<NotificationTarget>, String>,
+    },
+    NotificationRoutings {
+        zone: String,
+        project: i64,
+        result: Result<Vec<NotificationRouting>, String>,
+    },
     Storages {
         zone: String,
         result: Result<Vec<Storage>, String>,
+    },
+    StorageAccessKeys {
+        zone: String,
+        storage: Storage,
+        result: Result<Vec<StorageAccessKey>, String>,
     },
     MonitoringAction {
         zone: String,
@@ -169,10 +195,39 @@ pub enum Message {
         label: String,
         result: Result<(), String>,
     },
+    LogMeasureRuleAction {
+        zone: String,
+        project: i64,
+        label: String,
+        result: Result<(), String>,
+    },
+    LogRoutingAction {
+        zone: String,
+        label: String,
+        result: Result<(), String>,
+    },
+    NotificationAction {
+        zone: String,
+        project: i64,
+        label: String,
+        result: Result<(), String>,
+    },
     StorageAction {
         zone: String,
         label: String,
         result: Result<(), String>,
+    },
+    StorageAccessKeyAction {
+        zone: String,
+        storage: Storage,
+        label: String,
+        result: Result<(), String>,
+    },
+    StorageAccessKeySecret {
+        zone: String,
+        storage: Storage,
+        title: String,
+        result: Result<StorageAccessKeySecret, String>,
     },
     /// プロファイル作成時の検証結果。検証が通ってから書き出す。
     ProfileVerified {
@@ -296,8 +351,13 @@ pub enum Pane {
     // モニタリングスイート
     Projects,
     Rules,
+    LogMeasureRules,
+    LogRoutings,
     Histories,
+    NotificationTargets,
+    NotificationRoutings,
     Storages,
+    StorageKeys,
     // 請求
     Bills,
     BillDetails,
@@ -1187,6 +1247,206 @@ pub struct AlertRuleForm {
     pub field: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogMeasureRuleFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogMeasureRuleForm {
+    pub mode: LogMeasureRuleFormMode,
+    pub project: AlertProject,
+    pub target: Option<LogMeasureRule>,
+    pub log_storage_id: String,
+    pub metrics_storage_id: String,
+    pub name: String,
+    pub description: String,
+    pub rule_json: String,
+    pub field: usize,
+}
+
+impl LogMeasureRuleForm {
+    pub const FIELDS: usize = 5;
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.log_storage_id),
+            1 => Some(&mut self.metrics_storage_id),
+            2 => Some(&mut self.name),
+            3 => Some(&mut self.description),
+            4 => Some(&mut self.rule_json),
+            _ => None,
+        }
+    }
+
+    fn input(&self) -> Result<LogMeasureRuleInput, String> {
+        let log_storage_id = self
+            .log_storage_id
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "ログストレージIDは数値で入力してください".to_string())?;
+        let metrics_storage_id = self
+            .metrics_storage_id
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "メトリクスストレージIDは数値で入力してください".to_string())?;
+        if log_storage_id <= 0 || metrics_storage_id <= 0 {
+            return Err("ログ／メトリクスストレージIDを入力してください".to_string());
+        }
+        if self.name.trim().is_empty() {
+            return Err("ルール名を入力してください".to_string());
+        }
+        let rule: serde_json::Value = serde_json::from_str(self.rule_json.trim())
+            .map_err(|err| format!("ルールJSONが不正です: {err}"))?;
+        if rule.get("version").and_then(serde_json::Value::as_str) != Some("v1") {
+            return Err("ルールJSONの version は v1 を指定してください".to_string());
+        }
+        if !rule
+            .pointer("/query/matchers")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            return Err("ルールJSONには query.matchers 配列が必要です".to_string());
+        }
+        Ok(LogMeasureRuleInput {
+            log_storage_id,
+            metrics_storage_id,
+            name: self.name.trim().to_string(),
+            description: self.description.trim().to_string(),
+            rule,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogRoutingFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogRoutingForm {
+    pub mode: LogRoutingFormMode,
+    pub target: Option<LogRouting>,
+    pub publisher_code: String,
+    pub variant: String,
+    pub resource_id: String,
+    pub log_storage_id: String,
+    pub field: usize,
+}
+
+impl LogRoutingForm {
+    pub const FIELDS: usize = 4;
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.publisher_code),
+            1 => Some(&mut self.variant),
+            2 => Some(&mut self.resource_id),
+            3 => Some(&mut self.log_storage_id),
+            _ => None,
+        }
+    }
+
+    fn input(&self) -> Result<LogRoutingInput, String> {
+        if self.publisher_code.trim().is_empty() || self.variant.trim().is_empty() {
+            return Err("パブリッシャーコードとバリアントを入力してください".to_string());
+        }
+        let resource_id = if self.resource_id.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.resource_id
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| "リソースIDは数値で入力してください".to_string())?,
+            )
+        };
+        let log_storage_id = self
+            .log_storage_id
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| "ログストレージIDは数値で入力してください".to_string())?;
+        if log_storage_id <= 0 {
+            return Err("ログストレージIDを入力してください".to_string());
+        }
+        Ok(LogRoutingInput {
+            publisher_code: self.publisher_code.trim().to_string(),
+            resource_id,
+            variant: self.variant.trim().to_string(),
+            log_storage_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationTargetFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationTargetForm {
+    pub mode: NotificationTargetFormMode,
+    pub project: AlertProject,
+    pub target: Option<NotificationTarget>,
+    pub service_type: usize,
+    pub url: String,
+    pub description: String,
+    pub field: usize,
+}
+
+impl NotificationTargetForm {
+    pub const SERVICE_TYPES: [&'static str; 2] = ["SAKURA_SIMPLE_NOTICE", "SAKURA_EVENT_BUS"];
+    pub const FIELDS: usize = 3;
+
+    pub fn service_type(&self) -> &'static str {
+        Self::SERVICE_TYPES[self.service_type]
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            1 => Some(&mut self.url),
+            2 => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationRoutingFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationRoutingForm {
+    pub mode: NotificationRoutingFormMode,
+    pub project: AlertProject,
+    pub target: Option<NotificationRouting>,
+    pub targets: Vec<NotificationTarget>,
+    pub target_index: usize,
+    pub resend_interval: String,
+    pub match_labels: String,
+    pub field: usize,
+}
+
+impl NotificationRoutingForm {
+    pub const FIELDS: usize = 3;
+
+    pub fn selected_target(&self) -> Option<&NotificationTarget> {
+        self.targets.get(self.target_index)
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            1 => Some(&mut self.resend_interval),
+            2 => Some(&mut self.match_labels),
+            _ => None,
+        }
+    }
+}
+
 impl AlertRuleForm {
     pub const FIELDS: usize = 9;
 
@@ -1264,6 +1524,26 @@ pub struct StorageForm {
     pub name: String,
     pub description: String,
     pub field: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageRetentionForm {
+    pub storage: Storage,
+    pub days: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageAccessKeyFormMode {
+    Create,
+    Edit,
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageAccessKeyForm {
+    pub mode: StorageAccessKeyFormMode,
+    pub storage: Storage,
+    pub target: Option<StorageAccessKey>,
+    pub description: String,
 }
 
 impl StorageForm {
@@ -1411,9 +1691,44 @@ pub enum ConfirmAction {
         uid: String,
         name: String,
     },
+    DeleteLogMeasureRule {
+        zone: String,
+        project: i64,
+        uid: String,
+        name: String,
+    },
+    DeleteLogRouting {
+        zone: String,
+        routing: LogRouting,
+    },
+    DeleteNotificationTarget {
+        zone: String,
+        project: i64,
+        target: NotificationTarget,
+    },
+    DeleteNotificationRouting {
+        zone: String,
+        project: i64,
+        routing: NotificationRouting,
+    },
     DeleteStorage {
         zone: String,
         storage: Storage,
+    },
+    SetStorageRetention {
+        zone: String,
+        storage: Storage,
+        days: i64,
+    },
+    DeleteStorageAccessKey {
+        zone: String,
+        storage: Storage,
+        key: StorageAccessKey,
+    },
+    RevealStorageAccessKey {
+        zone: String,
+        storage: Storage,
+        key: StorageAccessKey,
     },
     PowerAction {
         id: ResourceId,
@@ -1452,7 +1767,13 @@ pub enum Overlay {
     SecretForm(SecretForm),
     AlertProjectForm(AlertProjectForm),
     AlertRuleForm(AlertRuleForm),
+    LogMeasureRuleForm(LogMeasureRuleForm),
+    LogRoutingForm(LogRoutingForm),
+    NotificationTargetForm(NotificationTargetForm),
+    NotificationRoutingForm(NotificationRoutingForm),
     StorageForm(StorageForm),
+    StorageRetentionForm(StorageRetentionForm),
+    StorageAccessKeyForm(StorageAccessKeyForm),
     Login(LoginForm),
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
@@ -1753,11 +2074,17 @@ impl App {
             Service::Account => Pane::Account,
             Service::Billing => self.billing_active_pane(),
             Service::Monitoring => match self.monitoring.focus {
+                ListFocus::Left if self.monitoring.tab == MonitoringTab::Storages => Pane::Storages,
+                _ if self.monitoring.tab == MonitoringTab::LogRoutings => Pane::LogRoutings,
                 ListFocus::Left => Pane::Projects,
                 ListFocus::Right => match self.monitoring.tab {
                     MonitoringTab::Rules => Pane::Rules,
                     MonitoringTab::Histories => Pane::Histories,
-                    MonitoringTab::Storages => Pane::Storages,
+                    MonitoringTab::Storages => Pane::StorageKeys,
+                    MonitoringTab::NotificationTargets => Pane::NotificationTargets,
+                    MonitoringTab::NotificationRoutings => Pane::NotificationRoutings,
+                    MonitoringTab::LogMeasureRules => Pane::LogMeasureRules,
+                    MonitoringTab::LogRoutings => Pane::LogRoutings,
                 },
             },
         }
@@ -2395,6 +2722,22 @@ impl App {
                 self.monitoring.rules.insert((zone, project), loadable);
                 self.ensure_loaded();
             }
+            Message::LogMeasureRules {
+                zone,
+                project,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.monitoring
+                    .log_measure_rules
+                    .insert((zone, project), loadable);
+                self.ensure_loaded();
+            }
+            Message::LogRoutings { zone, result } => {
+                let loadable = self.store_result(result);
+                self.monitoring.log_routings.insert(zone, loadable);
+                self.ensure_loaded();
+            }
             Message::AlertHistories {
                 zone,
                 project,
@@ -2404,9 +2747,42 @@ impl App {
                 self.monitoring.histories.insert((zone, project), loadable);
                 self.ensure_loaded();
             }
+            Message::NotificationTargets {
+                zone,
+                project,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.monitoring
+                    .notification_targets
+                    .insert((zone, project), loadable);
+                self.ensure_loaded();
+            }
+            Message::NotificationRoutings {
+                zone,
+                project,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.monitoring
+                    .notification_routings
+                    .insert((zone, project), loadable);
+                self.ensure_loaded();
+            }
             Message::Storages { zone, result } => {
                 let loadable = self.store_result(result);
                 self.monitoring.storages.insert(zone, loadable);
+                self.ensure_loaded();
+            }
+            Message::StorageAccessKeys {
+                zone,
+                storage,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.monitoring
+                    .storage_keys
+                    .insert((zone, storage.kind, storage.resource_id), loadable);
                 self.ensure_loaded();
             }
             Message::MonitoringAction {
@@ -2420,7 +2796,16 @@ impl App {
                     self.monitoring.reselect_project = reselect_project;
                     self.monitoring.projects.remove(&zone);
                     self.monitoring.rules.retain(|(z, _), _| z != &zone);
+                    self.monitoring
+                        .log_measure_rules
+                        .retain(|(z, _), _| z != &zone);
                     self.monitoring.histories.retain(|(z, _), _| z != &zone);
+                    self.monitoring
+                        .notification_targets
+                        .retain(|(z, _), _| z != &zone);
+                    self.monitoring
+                        .notification_routings
+                        .retain(|(z, _), _| z != &zone);
                     self.monitoring_ensure_loaded();
                 }
                 Err(err) => {
@@ -2455,6 +2840,74 @@ impl App {
                     self.set_status(err, StatusKind::Error);
                 }
             },
+            Message::LogMeasureRuleAction {
+                zone,
+                project,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.log_measure_rules.remove(&(zone, project));
+                    self.monitoring.log_measure_rule_state.select(None);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::LogRoutingAction {
+                zone,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring.log_routings.remove(&zone);
+                    self.monitoring.log_routing_state.select(None);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::NotificationAction {
+                zone,
+                project,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    let key = (zone, project);
+                    self.monitoring.notification_targets.remove(&key);
+                    self.monitoring.notification_routings.remove(&key);
+                    self.monitoring.notification_target_state.select(None);
+                    self.monitoring.notification_routing_state.select(None);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::StorageAction {
                 zone,
                 label,
@@ -2463,12 +2916,72 @@ impl App {
                 Ok(()) => {
                     self.set_status(format!("{label}しました"), StatusKind::Success);
                     self.monitoring.storages.remove(&zone);
+                    self.monitoring
+                        .storage_keys
+                        .retain(|(z, _, _), _| z != &zone);
                     self.monitoring.storage_state.select(None);
+                    self.monitoring.storage_key_state.select(None);
                     self.monitoring_ensure_loaded();
                 }
                 Err(err) => {
                     self.overlay = Some(Overlay::Message {
                         title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::StorageAccessKeyAction {
+                zone,
+                storage,
+                label,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(format!("{label}しました"), StatusKind::Success);
+                    self.monitoring
+                        .storage_keys
+                        .remove(&(zone, storage.kind, storage.resource_id));
+                    self.monitoring.storage_key_state.select(None);
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{label}に失敗しました"),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::StorageAccessKeySecret {
+                zone,
+                storage,
+                title,
+                result,
+            } => match result {
+                Ok(key) => {
+                    self.monitoring
+                        .storage_keys
+                        .remove(&(zone, storage.kind, storage.resource_id));
+                    self.set_status(title.clone(), StatusKind::Success);
+                    self.overlay = Some(Overlay::Message {
+                        title,
+                        body: format!(
+                            "UID: {}\nトークン: {}\nシークレット: {}\n\nこの画面を閉じる前に安全な場所へ保存してください。",
+                            key.uid, key.token, key.secret
+                        ),
+                        kind: StatusKind::Success,
+                        scroll: 0,
+                    });
+                    self.monitoring_ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: format!("{title}に失敗しました"),
                         body: err.clone(),
                         kind: StatusKind::Error,
                         scroll: 0,
@@ -2862,12 +3375,38 @@ impl App {
                     value.push_str(text);
                 }
             }
+            Some(Overlay::LogMeasureRuleForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::LogRoutingForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::NotificationTargetForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
+            Some(Overlay::NotificationRoutingForm(form)) => {
+                let field = form.field;
+                if let Some(value) = form.value_mut(field) {
+                    value.push_str(text);
+                }
+            }
             Some(Overlay::StorageForm(form)) => {
                 let field = form.field;
                 if let Some(value) = form.value_mut(field) {
                     value.push_str(text);
                 }
             }
+            Some(Overlay::StorageRetentionForm(form)) => form.days.push_str(text),
+            Some(Overlay::StorageAccessKeyForm(form)) => form.description.push_str(text),
             Some(Overlay::Confirm { verify, typed, .. }) if verify.is_some() => {
                 typed.push_str(text)
             }
@@ -3333,8 +3872,22 @@ impl App {
             Pane::Secrets => self.visible_secrets().ready().map_or(0, Vec::len),
             Pane::Projects => self.visible_projects().len(),
             Pane::Rules => self.visible_rules().ready().map_or(0, Vec::len),
+            Pane::LogMeasureRules => self.visible_log_measure_rules().ready().map_or(0, Vec::len),
+            Pane::LogRoutings => self.visible_log_routings().ready().map_or(0, Vec::len),
             Pane::Histories => self.visible_histories().ready().map_or(0, Vec::len),
+            Pane::NotificationTargets => self
+                .visible_notification_targets()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::NotificationRoutings => self
+                .visible_notification_routings()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::Storages => self.visible_storages().ready().map_or(0, Vec::len),
+            Pane::StorageKeys => self
+                .visible_storage_access_keys()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::Bills => self.visible_bills().len(),
             Pane::Account => self.visible_account_rows().len(),
             Pane::BillDetails => self.visible_bill_details().ready().map_or(0, Vec::len),
@@ -3364,8 +3917,13 @@ impl App {
             Pane::Secrets => Some(&mut self.secrets.secret_state),
             Pane::Projects => Some(&mut self.monitoring.project_state),
             Pane::Rules => Some(&mut self.monitoring.rule_state),
+            Pane::LogMeasureRules => Some(&mut self.monitoring.log_measure_rule_state),
+            Pane::LogRoutings => Some(&mut self.monitoring.log_routing_state),
             Pane::Histories => Some(&mut self.monitoring.history_state),
+            Pane::NotificationTargets => Some(&mut self.monitoring.notification_target_state),
+            Pane::NotificationRoutings => Some(&mut self.monitoring.notification_routing_state),
             Pane::Storages => Some(&mut self.monitoring.storage_state),
+            Pane::StorageKeys => Some(&mut self.monitoring.storage_key_state),
             Pane::Bills => Some(&mut self.billing.bill_state),
             Pane::Account => Some(&mut self.account.state),
             Pane::BillDetails => Some(&mut self.billing.detail_state),
@@ -3424,7 +3982,15 @@ impl App {
             // 値はコピーしない。名前だけ。
             Pane::Secrets => self.selected_secret().map(|s| s.name),
             Pane::Projects => self.selected_project().map(|p| p.name),
-            Pane::Rules | Pane::Histories | Pane::Storages => None,
+            Pane::Rules
+            | Pane::LogMeasureRules
+            | Pane::LogRoutings
+            | Pane::Histories
+            | Pane::Storages
+            | Pane::NotificationTargets
+            | Pane::NotificationRoutings => None,
+            // シークレットはコピーせず、通常利用するトークンだけを対象にする。
+            Pane::StorageKeys => self.selected_storage_access_key().map(|key| key.token),
             Pane::Bills | Pane::BillDetails | Pane::BillSummary => None,
             // 値をそのままコピーできると、権限の共有や問い合わせに使える。
             Pane::Account => {
@@ -3827,8 +4393,15 @@ impl App {
             Service::Monitoring => {
                 self.monitoring.projects.remove(&self.zone);
                 self.monitoring.rules.clear();
+                self.monitoring.log_measure_rules.clear();
+                self.monitoring.log_routings.remove(&self.zone);
                 self.monitoring.histories.clear();
+                self.monitoring.notification_targets.clear();
+                self.monitoring.notification_routings.clear();
                 self.monitoring.storages.remove(&self.zone);
+                self.monitoring
+                    .storage_keys
+                    .retain(|(zone, _, _), _| zone != &self.zone);
                 self.monitoring_ensure_loaded();
             }
         }
@@ -3969,7 +4542,13 @@ impl App {
         }
         if pane == Pane::Projects {
             self.monitoring.rule_state.select(None);
+            self.monitoring.log_measure_rule_state.select(None);
             self.monitoring.history_state.select(None);
+            self.monitoring.notification_target_state.select(None);
+            self.monitoring.notification_routing_state.select(None);
+        }
+        if pane == Pane::Storages {
+            self.monitoring.storage_key_state.select(None);
         }
         if self.service != Service::Registry {
             return;
@@ -4221,8 +4800,38 @@ impl App {
                 uid,
                 name,
             } => self.run_delete_alert_rule(zone, project, uid, name),
+            ConfirmAction::DeleteLogMeasureRule {
+                zone,
+                project,
+                uid,
+                name,
+            } => self.run_delete_log_measure_rule(zone, project, uid, name),
+            ConfirmAction::DeleteLogRouting { zone, routing } => {
+                self.run_delete_log_routing(zone, routing)
+            }
+            ConfirmAction::DeleteNotificationTarget {
+                zone,
+                project,
+                target,
+            } => self.run_delete_notification_target(zone, project, target),
+            ConfirmAction::DeleteNotificationRouting {
+                zone,
+                project,
+                routing,
+            } => self.run_delete_notification_routing(zone, project, routing),
             ConfirmAction::DeleteStorage { zone, storage } => {
                 self.run_delete_storage(zone, storage)
+            }
+            ConfirmAction::SetStorageRetention {
+                zone,
+                storage,
+                days,
+            } => self.run_set_storage_retention(zone, storage, days),
+            ConfirmAction::DeleteStorageAccessKey { zone, storage, key } => {
+                self.run_delete_storage_access_key(zone, storage, key)
+            }
+            ConfirmAction::RevealStorageAccessKey { zone, storage, key } => {
+                self.run_reveal_storage_access_key(zone, storage, key)
             }
             ConfirmAction::PowerAction {
                 id,
@@ -4703,6 +5312,38 @@ impl App {
                     self.overlay = Some(Overlay::AlertRuleForm(form));
                 }
             },
+            Overlay::LogMeasureRuleForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_log_measure_rule_form(form),
+                _ => {
+                    edit_log_measure_rule_form(&mut form, key);
+                    self.overlay = Some(Overlay::LogMeasureRuleForm(form));
+                }
+            },
+            Overlay::LogRoutingForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_log_routing_form(form),
+                _ => {
+                    edit_log_routing_form(&mut form, key);
+                    self.overlay = Some(Overlay::LogRoutingForm(form));
+                }
+            },
+            Overlay::NotificationTargetForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_notification_target_form(form),
+                _ => {
+                    edit_notification_target_form(&mut form, key);
+                    self.overlay = Some(Overlay::NotificationTargetForm(form));
+                }
+            },
+            Overlay::NotificationRoutingForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_notification_routing_form(form),
+                _ => {
+                    edit_notification_routing_form(&mut form, key);
+                    self.overlay = Some(Overlay::NotificationRoutingForm(form));
+                }
+            },
             Overlay::StorageForm(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => self.submit_storage_form(form),
@@ -4710,6 +5351,32 @@ impl App {
                     edit_storage_form(&mut form, key);
                     self.overlay = Some(Overlay::StorageForm(form));
                 }
+            },
+            Overlay::StorageRetentionForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_storage_retention_form(form),
+                KeyCode::Backspace => {
+                    form.days.pop();
+                    self.overlay = Some(Overlay::StorageRetentionForm(form));
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    form.days.push(c);
+                    self.overlay = Some(Overlay::StorageRetentionForm(form));
+                }
+                _ => self.overlay = Some(Overlay::StorageRetentionForm(form)),
+            },
+            Overlay::StorageAccessKeyForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_storage_access_key_form(form),
+                KeyCode::Backspace => {
+                    form.description.pop();
+                    self.overlay = Some(Overlay::StorageAccessKeyForm(form));
+                }
+                KeyCode::Char(c) => {
+                    form.description.push(c);
+                    self.overlay = Some(Overlay::StorageAccessKeyForm(form));
+                }
+                _ => self.overlay = Some(Overlay::StorageAccessKeyForm(form)),
             },
             Overlay::ServicePicker { mut index, initial } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') if initial => self.should_quit = true,
@@ -4985,6 +5652,102 @@ fn edit_alert_rule_form(form: &mut AlertRuleForm, key: KeyEvent) {
         }
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 6 => {
             form.critical_enabled = !form.critical_enabled
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_log_measure_rule_form(form: &mut LogMeasureRuleForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % LogMeasureRuleForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + LogMeasureRuleForm::FIELDS - 1) % LogMeasureRuleForm::FIELDS
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_log_routing_form(form: &mut LogRoutingForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % LogRoutingForm::FIELDS,
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field = (form.field + LogRoutingForm::FIELDS - 1) % LogRoutingForm::FIELDS
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_notification_target_form(form: &mut NotificationTargetForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => {
+            form.field = (form.field + 1) % NotificationTargetForm::FIELDS
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field =
+                (form.field + NotificationTargetForm::FIELDS - 1) % NotificationTargetForm::FIELDS
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field == 0 => {
+            form.service_type =
+                (form.service_type + 1) % NotificationTargetForm::SERVICE_TYPES.len()
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_notification_routing_form(form: &mut NotificationRoutingForm, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => {
+            form.field = (form.field + 1) % NotificationRoutingForm::FIELDS
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            form.field =
+                (form.field + NotificationRoutingForm::FIELDS - 1) % NotificationRoutingForm::FIELDS
+        }
+        KeyCode::Left if form.field == 0 && !form.targets.is_empty() => {
+            form.target_index = (form.target_index + form.targets.len() - 1) % form.targets.len()
+        }
+        KeyCode::Right | KeyCode::Char(' ') if form.field == 0 && !form.targets.is_empty() => {
+            form.target_index = (form.target_index + 1) % form.targets.len()
         }
         KeyCode::Backspace => {
             if let Some(value) = form.value_mut(form.field) {

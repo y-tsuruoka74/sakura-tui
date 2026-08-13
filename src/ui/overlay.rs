@@ -9,9 +9,12 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use super::{DIM, accent};
 use crate::app::{
     AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, Availability,
-    Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LoginForm, Overlay,
+    Category, DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, LogMeasureRuleForm,
+    LogMeasureRuleFormMode, LogRoutingForm, LogRoutingFormMode, LoginForm, NotificationRoutingForm,
+    NotificationRoutingFormMode, NotificationTargetForm, NotificationTargetFormMode, Overlay,
     ProfileForm, ProfileStorage, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode,
-    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, StorageForm, StorageFormMode, SwitchForm,
+    SimpleMonitorForm, SimpleMonitorFormMode, StatusKind, StorageAccessKeyForm,
+    StorageAccessKeyFormMode, StorageForm, StorageFormMode, StorageRetentionForm, SwitchForm,
     SwitchFormMode, UserForm, UserFormMode, VaultForm, VaultFormMode,
 };
 use crate::app::{Loadable, Service};
@@ -48,7 +51,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::SecretForm(form) => draw_secret_form(frame, form),
         Overlay::AlertProjectForm(form) => draw_alert_project_form(frame, form),
         Overlay::AlertRuleForm(form) => draw_alert_rule_form(frame, form),
+        Overlay::LogMeasureRuleForm(form) => draw_log_measure_rule_form(frame, form),
+        Overlay::LogRoutingForm(form) => draw_log_routing_form(frame, form),
+        Overlay::NotificationTargetForm(form) => draw_notification_target_form(frame, form),
+        Overlay::NotificationRoutingForm(form) => draw_notification_routing_form(frame, form),
         Overlay::StorageForm(form) => draw_storage_form(frame, form),
+        Overlay::StorageRetentionForm(form) => draw_storage_retention_form(frame, form),
+        Overlay::StorageAccessKeyForm(form) => draw_storage_access_key_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
@@ -670,6 +679,10 @@ fn draw_help(frame: &mut Frame) {
                 ("Tab / Shift+Tab", "タブを切り替え"),
                 ("1 / 2 / 3", "概要 / ユーザー / イメージ"),
                 ("1〜4", "専有型: 概要 / アプリ / ASG / 証明書"),
+                (
+                    "1〜7",
+                    "監視: ルール / 履歴 / 保管先 / 通知先 / 通知経路 / ログ計測 / ログ転送",
+                ),
             ],
         ),
         (
@@ -700,6 +713,12 @@ fn draw_help(frame: &mut Frame) {
                 ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("z", "ゾーンを切り替え（サーバー / スイッチほか）"),
                 ("t", "トラフィック切替 / シンプル監視の有効・停止"),
+                ("t", "監視のログ／トレース保持期間を変更"),
+                (
+                    "a / e / d",
+                    "監視ストレージのアクセスキーを作成 / 編集 / 削除",
+                ),
+                ("u", "シークレット / アクセスキーの秘密情報を確認表示"),
                 (
                     "Enter / Esc",
                     "左の一覧と右の一覧を行き来（DNS・シークレット・監視）",
@@ -1322,6 +1341,181 @@ fn draw_alert_rule_form(frame: &mut Frame, form: &AlertRuleForm) {
     );
 }
 
+fn draw_log_measure_rule_form(frame: &mut Frame, form: &LogMeasureRuleForm) {
+    let title = match form.mode {
+        LogMeasureRuleFormMode::Create => "ログ計測ルールの作成",
+        LogMeasureRuleFormMode::Edit => "ログ計測ルールの編集",
+    };
+    let lines = vec![
+        input_line(
+            "ログストレージID",
+            &form.log_storage_id,
+            form.field == 0,
+            false,
+        ),
+        input_line(
+            "メトリクスID",
+            &form.metrics_storage_id,
+            form.field == 1,
+            false,
+        ),
+        input_line("名前", &form.name, form.field == 2, false),
+        input_line("説明", &form.description, form.field == 3, false),
+        input_line("ルールJSON", &form.rule_json, form.field == 4, false),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "JSONは version=v1 と query.matchers 配列を保持します。複雑なマッチャーもそのまま編集できます。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 92, dialog_height(&lines, 92));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
+fn draw_log_routing_form(frame: &mut Frame, form: &LogRoutingForm) {
+    let title = match form.mode {
+        LogRoutingFormMode::Create => "ログ転送設定の作成",
+        LogRoutingFormMode::Edit => "ログ転送設定の編集",
+    };
+    let lines = vec![
+        input_line(
+            "パブリッシャー",
+            &form.publisher_code,
+            form.field == 0,
+            false,
+        ),
+        input_line("バリアント", &form.variant, form.field == 1, false),
+        input_line("リソースID", &form.resource_id, form.field == 2, false),
+        input_line(
+            "ログストレージID",
+            &form.log_storage_id,
+            form.field == 3,
+            false,
+        ),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "パブリッシャーとバリアントは対象サービスが公開する値を指定します。リソースIDは任意です。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 82, dialog_height(&lines, 82));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
+fn draw_notification_target_form(frame: &mut Frame, form: &NotificationTargetForm) {
+    let title = match form.mode {
+        NotificationTargetFormMode::Create => "通知先の作成",
+        NotificationTargetFormMode::Edit => "通知先の編集",
+    };
+    let lines = vec![
+        choice_line(
+            "サービス",
+            &NotificationTargetForm::SERVICE_TYPES,
+            form.service_type(),
+            form.field == 0,
+            |service| match service {
+                "SAKURA_SIMPLE_NOTICE" => "シンプル通知".to_string(),
+                "SAKURA_EVENT_BUS" => "EventBus".to_string(),
+                other => other.to_string(),
+            },
+        ),
+        input_line("URL", &form.url, form.field == 1, false),
+        input_line("説明", &form.description, form.field == 2, false),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "URLはAPI上省略可能です。指定する場合は http(s) URLを入力してください。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
+fn draw_notification_routing_form(frame: &mut Frame, form: &NotificationRoutingForm) {
+    let title = match form.mode {
+        NotificationRoutingFormMode::Create => "通知経路の作成",
+        NotificationRoutingFormMode::Edit => "通知経路の編集",
+    };
+    let selected = form
+        .selected_target()
+        .map(|target| {
+            let label = match target.service_type.as_str() {
+                "SAKURA_SIMPLE_NOTICE" => "シンプル通知",
+                "SAKURA_EVENT_BUS" => "EventBus",
+                other => other,
+            };
+            if target.description.is_empty() {
+                format!("{label} ({})", target.uid)
+            } else {
+                format!("{label} ({})", target.description)
+            }
+        })
+        .unwrap_or_else(|| "通知先なし".to_string());
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{:<14}", "通知先"),
+                if form.field == 0 {
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
+            Span::raw(if form.field == 0 {
+                format!("< {selected} >")
+            } else {
+                selected
+            }),
+        ]),
+        input_line(
+            "再送間隔（分）",
+            &form.resend_interval,
+            form.field == 1,
+            false,
+        ),
+        input_line("ラベル条件", &form.match_labels, form.field == 2, false),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "条件は name=value をカンマ区切りで入力します。空欄なら全アラートが対象です。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 84, dialog_height(&lines, 84));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
 fn draw_storage_form(frame: &mut Frame, form: &StorageForm) {
     let title = match form.mode {
         StorageFormMode::Create => "ストレージの作成".to_string(),
@@ -1401,6 +1595,66 @@ fn draw_storage_form(frame: &mut Frame, form: &StorageForm) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_storage_retention_form(frame: &mut Frame, form: &StorageRetentionForm) {
+    let lines = vec![
+        Line::from(format!(
+            "{}ストレージ    {}",
+            form.storage.kind.label(),
+            form.storage.name
+        )),
+        input_line("保持期間（日）", &form.days, true, false),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "ログ／トレースだけ変更できます。41日以上は追加料金が発生します。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        form_footer(),
+    ];
+    let area = centered(frame, 72, dialog_height(&lines, 72));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("ストレージ保持期間の変更", accent())),
+        area,
+    );
+}
+
+fn draw_storage_access_key_form(frame: &mut Frame, form: &StorageAccessKeyForm) {
+    let title = match form.mode {
+        StorageAccessKeyFormMode::Create => "アクセスキーの作成",
+        StorageAccessKeyFormMode::Edit => "アクセスキーの説明編集",
+    };
+    let mut lines = vec![
+        Line::from(format!(
+            "{}ストレージ    {}",
+            form.storage.kind.label(),
+            form.storage.name
+        )),
+        input_line("説明", &form.description, true, false),
+        Line::raw(""),
+    ];
+    lines.push(Line::from(Span::styled(
+        if form.mode == StorageAccessKeyFormMode::Create {
+            "作成後にトークンとシークレットを表示します。安全な場所へ保存してください。"
+        } else {
+            "キー本体は変更せず、説明だけを更新します。"
+        },
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(form_footer());
+    let area = centered(frame, 76, dialog_height(&lines, 76));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
         area,
     );
 }

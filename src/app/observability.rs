@@ -7,12 +7,18 @@ use ratatui::widgets::TableState;
 
 use super::{
     AlertProjectForm, AlertProjectFormMode, AlertRuleForm, AlertRuleFormMode, App, ConfirmAction,
-    DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable, Message, Overlay,
-    Pane, SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode, StatusKind,
-    StorageForm, StorageFormMode, VaultForm, VaultFormMode, fmt_error, matches,
+    DnsRecordForm, DnsRecordFormMode, DnsZoneForm, DnsZoneFormMode, Loadable, LogMeasureRuleForm,
+    LogMeasureRuleFormMode, LogRoutingForm, LogRoutingFormMode, Message, NotificationRoutingForm,
+    NotificationRoutingFormMode, NotificationTargetForm, NotificationTargetFormMode, Overlay, Pane,
+    SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode, StatusKind,
+    StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm, StorageFormMode,
+    StorageRetentionForm, VaultForm, VaultFormMode, fmt_error, matches,
 };
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor, SimpleMonitorInput};
-use crate::monitoring::{AlertHistory, AlertProject, AlertRule, Storage, StorageKind};
+use crate::monitoring::{
+    AlertHistory, AlertProject, AlertRule, LogMeasureRule, LogRouting, NotificationRouting,
+    NotificationTarget, Storage, StorageAccessKey, StorageKind,
+};
 use crate::secretmanager::{Secret, Vault};
 
 /// 左右に並んだ一覧の、どちらを操作しているか。
@@ -65,13 +71,21 @@ pub enum MonitoringTab {
     Rules,
     Histories,
     Storages,
+    NotificationTargets,
+    NotificationRoutings,
+    LogMeasureRules,
+    LogRoutings,
 }
 
 impl MonitoringTab {
-    pub const ALL: [MonitoringTab; 3] = [
+    pub const ALL: [MonitoringTab; 7] = [
         MonitoringTab::Rules,
         MonitoringTab::Histories,
         MonitoringTab::Storages,
+        MonitoringTab::NotificationTargets,
+        MonitoringTab::NotificationRoutings,
+        MonitoringTab::LogMeasureRules,
+        MonitoringTab::LogRoutings,
     ];
 
     pub fn title(self) -> &'static str {
@@ -79,6 +93,10 @@ impl MonitoringTab {
             MonitoringTab::Rules => "ルール",
             MonitoringTab::Histories => "履歴",
             MonitoringTab::Storages => "保管先",
+            MonitoringTab::NotificationTargets => "通知先",
+            MonitoringTab::NotificationRoutings => "通知経路",
+            MonitoringTab::LogMeasureRules => "ログ計測",
+            MonitoringTab::LogRoutings => "ログ転送",
         }
     }
 }
@@ -93,10 +111,21 @@ pub struct MonitoringView {
     /// `(ゾーン, プロジェクトID)` をキーにしたルール・履歴。
     pub rules: HashMap<(String, i64), Loadable<Vec<AlertRule>>>,
     pub rule_state: TableState,
+    pub log_measure_rules: HashMap<(String, i64), Loadable<Vec<LogMeasureRule>>>,
+    pub log_measure_rule_state: TableState,
+    pub log_routings: HashMap<String, Loadable<Vec<LogRouting>>>,
+    pub log_routing_state: TableState,
     pub histories: HashMap<(String, i64), Loadable<Vec<AlertHistory>>>,
     pub history_state: TableState,
+    pub notification_targets: HashMap<(String, i64), Loadable<Vec<NotificationTarget>>>,
+    pub notification_target_state: TableState,
+    pub notification_routings: HashMap<(String, i64), Loadable<Vec<NotificationRouting>>>,
+    pub notification_routing_state: TableState,
     pub storages: HashMap<String, Loadable<Vec<Storage>>>,
     pub storage_state: TableState,
+    /// `(ゾーン, 種別, ストレージresource_id)` ごとのアクセスキー一覧。
+    pub storage_keys: HashMap<(String, StorageKind, i64), Loadable<Vec<StorageAccessKey>>>,
+    pub storage_key_state: TableState,
     pub reselect_project: Option<i64>,
 }
 
@@ -445,6 +474,149 @@ impl App {
         self.visible_rules().ready()?.get(index).cloned()
     }
 
+    pub fn visible_log_measure_rules(&self) -> Loadable<Vec<LogMeasureRule>> {
+        let Some(project) = self.selected_project() else {
+            return Loadable::Idle;
+        };
+        let loadable = self
+            .monitoring
+            .log_measure_rules
+            .get(&(self.zone.clone(), project.resource_id))
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|rule| {
+                    matches(
+                        self.filters.get(Pane::LogMeasureRules),
+                        &[&rule.name, &rule.description, &rule.rule.to_string()],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_log_measure_rule(&self) -> Option<LogMeasureRule> {
+        let index = self.monitoring.log_measure_rule_state.selected()?;
+        self.visible_log_measure_rules()
+            .ready()?
+            .get(index)
+            .cloned()
+    }
+
+    pub fn visible_log_routings(&self) -> Loadable<Vec<LogRouting>> {
+        let loadable = self
+            .monitoring
+            .log_routings
+            .get(&self.zone)
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|routing| {
+                    matches(
+                        self.filters.get(Pane::LogRoutings),
+                        &[
+                            &routing.publisher_code,
+                            &routing.publisher_description,
+                            &routing.variant,
+                            &routing
+                                .resource_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_default(),
+                        ],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_log_routing(&self) -> Option<LogRouting> {
+        let index = self.monitoring.log_routing_state.selected()?;
+        self.visible_log_routings().ready()?.get(index).cloned()
+    }
+
+    pub fn visible_notification_targets(&self) -> Loadable<Vec<NotificationTarget>> {
+        let Some(project) = self.selected_project() else {
+            return Loadable::Idle;
+        };
+        let loadable = self
+            .monitoring
+            .notification_targets
+            .get(&(self.zone.clone(), project.resource_id))
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|target| {
+                    matches(
+                        self.filters.get(Pane::NotificationTargets),
+                        &[&target.service_type, &target.url, &target.description],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_notification_target(&self) -> Option<NotificationTarget> {
+        let index = self.monitoring.notification_target_state.selected()?;
+        self.visible_notification_targets()
+            .ready()?
+            .get(index)
+            .cloned()
+    }
+
+    pub fn visible_notification_routings(&self) -> Loadable<Vec<NotificationRouting>> {
+        let Some(project) = self.selected_project() else {
+            return Loadable::Idle;
+        };
+        let loadable = self
+            .monitoring
+            .notification_routings
+            .get(&(self.zone.clone(), project.resource_id))
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|routing| {
+                    let labels = format_match_labels(&routing.match_labels);
+                    matches(
+                        self.filters.get(Pane::NotificationRoutings),
+                        &[
+                            &routing.target_service_type,
+                            &routing.target_description,
+                            &labels,
+                        ],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_notification_routing(&self) -> Option<NotificationRouting> {
+        let index = self.monitoring.notification_routing_state.selected()?;
+        self.visible_notification_routings()
+            .ready()?
+            .get(index)
+            .cloned()
+    }
+
     pub fn visible_storages(&self) -> Loadable<Vec<Storage>> {
         let loadable = self
             .monitoring
@@ -472,6 +644,44 @@ impl App {
     pub fn selected_storage(&self) -> Option<Storage> {
         let index = self.monitoring.storage_state.selected()?;
         self.visible_storages().ready()?.get(index).cloned()
+    }
+
+    pub fn visible_storage_access_keys(&self) -> Loadable<Vec<StorageAccessKey>> {
+        let Some(storage) = self.selected_storage() else {
+            return Loadable::Idle;
+        };
+        if !storage.supports_access_keys() {
+            return Loadable::Ready(Vec::new());
+        }
+        let cache_key = (self.zone.clone(), storage.kind, storage.resource_id);
+        let loadable = self
+            .monitoring
+            .storage_keys
+            .get(&cache_key)
+            .cloned()
+            .unwrap_or(Loadable::Idle);
+        let Loadable::Ready(items) = loadable else {
+            return loadable;
+        };
+        Loadable::Ready(
+            items
+                .into_iter()
+                .filter(|key| {
+                    matches(
+                        self.filters.get(Pane::StorageKeys),
+                        &[&key.uid, &key.token, &key.description],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn selected_storage_access_key(&self) -> Option<StorageAccessKey> {
+        let index = self.monitoring.storage_key_state.selected()?;
+        self.visible_storage_access_keys()
+            .ready()?
+            .get(index)
+            .cloned()
     }
 
     // --- 読み込み ---
@@ -557,12 +767,94 @@ impl App {
                 self.inflight += 1;
                 let client = self.monitoring_client.clone();
                 let tx = self.tx.clone();
+                let request_zone = zone.clone();
                 tokio::spawn(async move {
-                    let result = client.list_storages(&zone).await.map_err(fmt_error);
-                    let _ = tx.send(Message::Storages { zone, result });
+                    let result = client.list_storages(&request_zone).await.map_err(fmt_error);
+                    let _ = tx.send(Message::Storages {
+                        zone: request_zone,
+                        result,
+                    });
                 });
             } else {
                 self.fill_selection(Pane::Storages);
+            }
+            let Some(storage) = self.selected_storage() else {
+                return;
+            };
+            if !storage.supports_access_keys() {
+                self.monitoring.storage_key_state.select(None);
+                return;
+            }
+            let cache_key = (zone.clone(), storage.kind, storage.resource_id);
+            if self
+                .monitoring
+                .storage_keys
+                .get(&cache_key)
+                .is_none_or(Loadable::is_idle)
+            {
+                self.monitoring
+                    .storage_keys
+                    .insert(cache_key, Loadable::Loading);
+                self.inflight += 1;
+                let client = self.monitoring_client.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .list_storage_access_keys(&zone, &storage)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::StorageAccessKeys {
+                        zone,
+                        storage,
+                        result,
+                    });
+                });
+            } else {
+                self.fill_selection(Pane::StorageKeys);
+            }
+            return;
+        }
+
+        if self.monitoring.tab == MonitoringTab::LogRoutings {
+            if self
+                .monitoring
+                .storages
+                .get(&zone)
+                .is_none_or(Loadable::is_idle)
+            {
+                self.monitoring
+                    .storages
+                    .insert(zone.clone(), Loadable::Loading);
+                self.inflight += 1;
+                let client = self.monitoring_client.clone();
+                let tx = self.tx.clone();
+                let request_zone = zone.clone();
+                tokio::spawn(async move {
+                    let result = client.list_storages(&request_zone).await.map_err(fmt_error);
+                    let _ = tx.send(Message::Storages {
+                        zone: request_zone,
+                        result,
+                    });
+                });
+            }
+            if self
+                .monitoring
+                .log_routings
+                .get(&zone)
+                .is_none_or(Loadable::is_idle)
+            {
+                self.monitoring
+                    .log_routings
+                    .insert(zone.clone(), Loadable::Loading);
+                self.inflight += 1;
+                let client = self.monitoring_client.clone();
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = client.list_log_routings(&zone).await.map_err(fmt_error);
+                    let _ = tx.send(Message::LogRoutings { zone, result });
+                });
+            } else {
+                self.fill_selection(Pane::LogRoutings);
             }
             return;
         }
@@ -640,7 +932,142 @@ impl App {
                     self.fill_selection(Pane::Histories);
                 }
             }
+            MonitoringTab::NotificationTargets => {
+                if self
+                    .monitoring
+                    .notification_targets
+                    .get(&key)
+                    .is_none_or(Loadable::is_idle)
+                {
+                    self.monitoring
+                        .notification_targets
+                        .insert(key, Loadable::Loading);
+                    self.inflight += 1;
+                    let client = self.monitoring_client.clone();
+                    let tx = self.tx.clone();
+                    let id = project.resource_id;
+                    tokio::spawn(async move {
+                        let result = client
+                            .list_notification_targets(&zone, id)
+                            .await
+                            .map_err(fmt_error);
+                        let _ = tx.send(Message::NotificationTargets {
+                            zone,
+                            project: id,
+                            result,
+                        });
+                    });
+                } else {
+                    self.fill_selection(Pane::NotificationTargets);
+                }
+            }
+            MonitoringTab::NotificationRoutings => {
+                if self
+                    .monitoring
+                    .notification_targets
+                    .get(&key)
+                    .is_none_or(Loadable::is_idle)
+                {
+                    self.monitoring
+                        .notification_targets
+                        .insert(key.clone(), Loadable::Loading);
+                    self.inflight += 1;
+                    let client = self.monitoring_client.clone();
+                    let tx = self.tx.clone();
+                    let request_zone = zone.clone();
+                    let id = project.resource_id;
+                    tokio::spawn(async move {
+                        let result = client
+                            .list_notification_targets(&request_zone, id)
+                            .await
+                            .map_err(fmt_error);
+                        let _ = tx.send(Message::NotificationTargets {
+                            zone: request_zone,
+                            project: id,
+                            result,
+                        });
+                    });
+                }
+                if self
+                    .monitoring
+                    .notification_routings
+                    .get(&key)
+                    .is_none_or(Loadable::is_idle)
+                {
+                    self.monitoring
+                        .notification_routings
+                        .insert(key, Loadable::Loading);
+                    self.inflight += 1;
+                    let client = self.monitoring_client.clone();
+                    let tx = self.tx.clone();
+                    let id = project.resource_id;
+                    tokio::spawn(async move {
+                        let result = client
+                            .list_notification_routings(&zone, id)
+                            .await
+                            .map_err(fmt_error);
+                        let _ = tx.send(Message::NotificationRoutings {
+                            zone,
+                            project: id,
+                            result,
+                        });
+                    });
+                } else {
+                    self.fill_selection(Pane::NotificationRoutings);
+                }
+            }
+            MonitoringTab::LogMeasureRules => {
+                if self
+                    .monitoring
+                    .storages
+                    .get(&zone)
+                    .is_none_or(Loadable::is_idle)
+                {
+                    self.monitoring
+                        .storages
+                        .insert(zone.clone(), Loadable::Loading);
+                    self.inflight += 1;
+                    let client = self.monitoring_client.clone();
+                    let tx = self.tx.clone();
+                    let request_zone = zone.clone();
+                    tokio::spawn(async move {
+                        let result = client.list_storages(&request_zone).await.map_err(fmt_error);
+                        let _ = tx.send(Message::Storages {
+                            zone: request_zone,
+                            result,
+                        });
+                    });
+                }
+                if self
+                    .monitoring
+                    .log_measure_rules
+                    .get(&key)
+                    .is_none_or(Loadable::is_idle)
+                {
+                    self.monitoring
+                        .log_measure_rules
+                        .insert(key, Loadable::Loading);
+                    self.inflight += 1;
+                    let client = self.monitoring_client.clone();
+                    let tx = self.tx.clone();
+                    let id = project.resource_id;
+                    tokio::spawn(async move {
+                        let result = client
+                            .list_log_measure_rules(&zone, id)
+                            .await
+                            .map_err(fmt_error);
+                        let _ = tx.send(Message::LogMeasureRules {
+                            zone,
+                            project: id,
+                            result,
+                        });
+                    });
+                } else {
+                    self.fill_selection(Pane::LogMeasureRules);
+                }
+            }
             MonitoringTab::Storages => {}
+            MonitoringTab::LogRoutings => unreachable!(),
         }
     }
 
@@ -1274,21 +1701,34 @@ impl App {
             KeyCode::Char('1') => self.set_monitoring_tab(MonitoringTab::Rules),
             KeyCode::Char('2') => self.set_monitoring_tab(MonitoringTab::Histories),
             KeyCode::Char('3') => self.set_monitoring_tab(MonitoringTab::Storages),
+            KeyCode::Char('4') => self.set_monitoring_tab(MonitoringTab::NotificationTargets),
+            KeyCode::Char('5') => self.set_monitoring_tab(MonitoringTab::NotificationRoutings),
+            KeyCode::Char('6') => self.set_monitoring_tab(MonitoringTab::LogMeasureRules),
+            KeyCode::Char('7') => self.set_monitoring_tab(MonitoringTab::LogRoutings),
             KeyCode::Char('n')
                 if self.monitoring.focus == ListFocus::Left
-                    && self.monitoring.tab != MonitoringTab::Storages =>
+                    && !matches!(
+                        self.monitoring.tab,
+                        MonitoringTab::Storages | MonitoringTab::LogRoutings
+                    ) =>
             {
                 self.open_create_alert_project()
             }
             KeyCode::Char('E')
                 if self.monitoring.focus == ListFocus::Left
-                    && self.monitoring.tab != MonitoringTab::Storages =>
+                    && !matches!(
+                        self.monitoring.tab,
+                        MonitoringTab::Storages | MonitoringTab::LogRoutings
+                    ) =>
             {
                 self.open_edit_alert_project()
             }
             KeyCode::Char('D')
                 if self.monitoring.focus == ListFocus::Left
-                    && self.monitoring.tab != MonitoringTab::Storages =>
+                    && !matches!(
+                        self.monitoring.tab,
+                        MonitoringTab::Storages | MonitoringTab::LogRoutings
+                    ) =>
             {
                 self.confirm_delete_alert_project()
             }
@@ -1310,14 +1750,137 @@ impl App {
             {
                 self.confirm_delete_alert_rule()
             }
-            KeyCode::Char('n') if self.monitoring.tab == MonitoringTab::Storages => {
+            KeyCode::Char('a')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::LogMeasureRules =>
+            {
+                self.open_create_log_measure_rule()
+            }
+            KeyCode::Char('e')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::LogMeasureRules =>
+            {
+                self.open_edit_log_measure_rule()
+            }
+            KeyCode::Char('d')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::LogMeasureRules =>
+            {
+                self.confirm_delete_log_measure_rule()
+            }
+            KeyCode::Char('a')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::LogRoutings =>
+            {
+                self.open_create_log_routing()
+            }
+            KeyCode::Char('e')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::LogRoutings =>
+            {
+                self.open_edit_log_routing()
+            }
+            KeyCode::Char('d')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::LogRoutings =>
+            {
+                self.confirm_delete_log_routing()
+            }
+            KeyCode::Char('a')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationTargets =>
+            {
+                self.open_create_notification_target()
+            }
+            KeyCode::Char('e')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationTargets =>
+            {
+                self.open_edit_notification_target()
+            }
+            KeyCode::Char('d')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationTargets =>
+            {
+                self.confirm_delete_notification_target()
+            }
+            KeyCode::Char('a')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationRoutings =>
+            {
+                self.open_create_notification_routing()
+            }
+            KeyCode::Char('e')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationRoutings =>
+            {
+                self.open_edit_notification_routing()
+            }
+            KeyCode::Char('d')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationRoutings =>
+            {
+                self.confirm_delete_notification_routing()
+            }
+            KeyCode::Char('[')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationRoutings =>
+            {
+                self.move_notification_routing(-1)
+            }
+            KeyCode::Char(']')
+                if self.monitoring.focus == ListFocus::Right
+                    && self.monitoring.tab == MonitoringTab::NotificationRoutings =>
+            {
+                self.move_notification_routing(1)
+            }
+            KeyCode::Char('n')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Left =>
+            {
                 self.open_create_storage()
             }
-            KeyCode::Char('E') if self.monitoring.tab == MonitoringTab::Storages => {
+            KeyCode::Char('E')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Left =>
+            {
                 self.open_edit_storage()
             }
-            KeyCode::Char('D') if self.monitoring.tab == MonitoringTab::Storages => {
+            KeyCode::Char('D')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Left =>
+            {
                 self.confirm_delete_storage()
+            }
+            KeyCode::Char('t')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Left =>
+            {
+                self.open_storage_retention()
+            }
+            KeyCode::Char('a')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Right =>
+            {
+                self.open_create_storage_access_key()
+            }
+            KeyCode::Char('e')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Right =>
+            {
+                self.open_edit_storage_access_key()
+            }
+            KeyCode::Char('d')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Right =>
+            {
+                self.confirm_delete_storage_access_key()
+            }
+            KeyCode::Char('u')
+                if self.monitoring.tab == MonitoringTab::Storages
+                    && self.monitoring.focus == ListFocus::Right =>
+            {
+                self.confirm_reveal_storage_access_key()
             }
             _ => {}
         }
@@ -1419,6 +1982,391 @@ impl App {
         });
     }
 
+    fn open_create_log_measure_rule(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_project() else {
+            self.set_status("プロジェクトを選択してください", StatusKind::Info);
+            return;
+        };
+        let storages = self
+            .monitoring
+            .storages
+            .get(&self.zone)
+            .and_then(Loadable::ready);
+        let log_storage_id = storages
+            .and_then(|items| items.iter().find(|item| item.kind == StorageKind::Logs))
+            .map(|storage| storage.resource_id.to_string())
+            .unwrap_or_default();
+        let metrics_storage_id = storages
+            .and_then(|items| items.iter().find(|item| item.kind == StorageKind::Metrics))
+            .map(|storage| storage.resource_id.to_string())
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::LogMeasureRuleForm(LogMeasureRuleForm {
+            mode: LogMeasureRuleFormMode::Create,
+            project,
+            target: None,
+            log_storage_id,
+            metrics_storage_id,
+            name: String::new(),
+            description: String::new(),
+            rule_json: r#"{"version":"v1","query":{"matchers":[]}}"#.to_string(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_log_measure_rule(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(rule)) =
+            (self.selected_project(), self.selected_log_measure_rule())
+        else {
+            self.set_status("ログ計測ルールを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::LogMeasureRuleForm(LogMeasureRuleForm {
+            mode: LogMeasureRuleFormMode::Edit,
+            project,
+            log_storage_id: rule.log_storage_id.to_string(),
+            metrics_storage_id: rule.metrics_storage_id.to_string(),
+            name: rule.name.clone(),
+            description: rule.description.clone(),
+            rule_json: rule.rule.to_string(),
+            target: Some(rule),
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_log_measure_rule(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(rule)) =
+            (self.selected_project(), self.selected_log_measure_rule())
+        else {
+            self.set_status("ログ計測ルールを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "ログ計測ルールの削除".to_string(),
+            body: format!(
+                "ログ計測ルール「{}」を削除します。\nログからのメトリクス生成が停止します。",
+                rule.name
+            ),
+            verify: Some(rule.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteLogMeasureRule {
+                zone: self.zone.clone(),
+                project: project.resource_id,
+                uid: rule.uid,
+                name: rule.name,
+            },
+        });
+    }
+
+    fn open_create_log_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let log_storage_id = self
+            .monitoring
+            .storages
+            .get(&self.zone)
+            .and_then(Loadable::ready)
+            .and_then(|items| items.iter().find(|item| item.kind == StorageKind::Logs))
+            .map(|storage| storage.resource_id.to_string())
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::LogRoutingForm(LogRoutingForm {
+            mode: LogRoutingFormMode::Create,
+            target: None,
+            publisher_code: String::new(),
+            variant: String::new(),
+            resource_id: String::new(),
+            log_storage_id,
+            field: 0,
+        }));
+    }
+
+    fn open_edit_log_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(routing) = self.selected_log_routing() else {
+            self.set_status("ログ転送設定を選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::LogRoutingForm(LogRoutingForm {
+            mode: LogRoutingFormMode::Edit,
+            publisher_code: routing.publisher_code.clone(),
+            variant: routing.variant.clone(),
+            resource_id: routing
+                .resource_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            log_storage_id: routing.log_storage_id.to_string(),
+            target: Some(routing),
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_log_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(routing) = self.selected_log_routing() else {
+            self.set_status("ログ転送設定を選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "ログ転送設定の削除".to_string(),
+            body: format!(
+                "{} / {} のログ転送を削除します。\n対象リソースからのログ収集が停止します。",
+                routing.publisher_code, routing.variant
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteLogRouting {
+                zone: self.zone.clone(),
+                routing,
+            },
+        });
+    }
+
+    fn open_create_notification_target(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_project() else {
+            self.set_status("プロジェクトを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::NotificationTargetForm(NotificationTargetForm {
+            mode: NotificationTargetFormMode::Create,
+            project,
+            target: None,
+            service_type: 0,
+            url: String::new(),
+            description: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_notification_target(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(target)) =
+            (self.selected_project(), self.selected_notification_target())
+        else {
+            self.set_status("通知先を選択してください", StatusKind::Info);
+            return;
+        };
+        let service_type = NotificationTargetForm::SERVICE_TYPES
+            .iter()
+            .position(|value| *value == target.service_type)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::NotificationTargetForm(NotificationTargetForm {
+            mode: NotificationTargetFormMode::Edit,
+            project,
+            service_type,
+            url: target.url.clone(),
+            description: target.description.clone(),
+            target: Some(target),
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_notification_target(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(target)) =
+            (self.selected_project(), self.selected_notification_target())
+        else {
+            self.set_status("通知先を選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "通知先の削除".to_string(),
+            body: format!(
+                "通知先 {} ({}) を削除します。\nこの通知先を参照する経路がある場合、APIが削除を拒否します。",
+                notification_service_label(&target.service_type),
+                target.description
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteNotificationTarget {
+                zone: self.zone.clone(),
+                project: project.resource_id,
+                target,
+            },
+        });
+    }
+
+    fn routing_targets(&self, project: i64) -> Vec<NotificationTarget> {
+        self.monitoring
+            .notification_targets
+            .get(&(self.zone.clone(), project))
+            .and_then(Loadable::ready)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn open_create_notification_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(project) = self.selected_project() else {
+            self.set_status("プロジェクトを選択してください", StatusKind::Info);
+            return;
+        };
+        let targets = self.routing_targets(project.resource_id);
+        if targets.is_empty() {
+            self.set_status("先に通知先を作成してください", StatusKind::Info);
+            return;
+        }
+        self.overlay = Some(Overlay::NotificationRoutingForm(NotificationRoutingForm {
+            mode: NotificationRoutingFormMode::Create,
+            project,
+            target: None,
+            targets,
+            target_index: 0,
+            resend_interval: "60".to_string(),
+            match_labels: String::new(),
+            field: 0,
+        }));
+    }
+
+    fn open_edit_notification_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(routing)) = (
+            self.selected_project(),
+            self.selected_notification_routing(),
+        ) else {
+            self.set_status("通知経路を選択してください", StatusKind::Info);
+            return;
+        };
+        let targets = self.routing_targets(project.resource_id);
+        let target_index = targets
+            .iter()
+            .position(|target| target.uid == routing.target_uid)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::NotificationRoutingForm(NotificationRoutingForm {
+            mode: NotificationRoutingFormMode::Edit,
+            project,
+            target_index,
+            targets,
+            resend_interval: routing
+                .resend_interval_minutes
+                .map(|minutes| minutes.to_string())
+                .unwrap_or_default(),
+            match_labels: format_match_labels(&routing.match_labels),
+            target: Some(routing),
+            field: 0,
+        }));
+    }
+
+    fn confirm_delete_notification_routing(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let (Some(project), Some(routing)) = (
+            self.selected_project(),
+            self.selected_notification_routing(),
+        ) else {
+            self.set_status("通知経路を選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "通知経路の削除".to_string(),
+            body: format!(
+                "{} 宛ての通知経路を削除します。\n一致するアラートはこの経路から通知されなくなります。",
+                routing.target_description
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteNotificationRouting {
+                zone: self.zone.clone(),
+                project: project.resource_id,
+                routing,
+            },
+        });
+    }
+
+    fn move_notification_routing(&mut self, delta: i32) {
+        if !self.require_write() {
+            return;
+        }
+        if !self.filters.get(Pane::NotificationRoutings).is_empty() {
+            self.set_status("並べ替える前に絞り込みを解除してください", StatusKind::Info);
+            return;
+        }
+        let (Some(project), Some(selected)) = (
+            self.selected_project(),
+            self.selected_notification_routing(),
+        ) else {
+            self.set_status("通知経路を選択してください", StatusKind::Info);
+            return;
+        };
+        let cache_key = (self.zone.clone(), project.resource_id);
+        let Some(mut routings) = self
+            .monitoring
+            .notification_routings
+            .get(&cache_key)
+            .and_then(Loadable::ready)
+            .cloned()
+        else {
+            return;
+        };
+        routings.sort_by_key(|routing| routing.order);
+        let Some(index) = routings
+            .iter()
+            .position(|routing| routing.uid == selected.uid)
+        else {
+            return;
+        };
+        let next =
+            (index as i32 + delta).clamp(0, routings.len().saturating_sub(1) as i32) as usize;
+        if index == next {
+            return;
+        }
+        let mut slots = routings
+            .iter()
+            .map(|routing| routing.order)
+            .collect::<Vec<_>>();
+        if slots.windows(2).any(|pair| pair[0] >= pair[1]) {
+            slots = (0..routings.len() as i64).collect();
+        }
+        routings.swap(index, next);
+        let orders = routings
+            .into_iter()
+            .zip(slots)
+            .map(|(routing, order)| (routing.uid, order))
+            .collect::<Vec<_>>();
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let project_id = project.resource_id;
+        self.inflight += 1;
+        self.set_status("並べ替え中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .reorder_notification_routings(&zone, project_id, &orders)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::NotificationAction {
+                zone,
+                project: project_id,
+                label: "通知経路を並べ替え".to_string(),
+                result,
+            });
+        });
+    }
+
     fn open_create_storage(&mut self) {
         if !self.require_write() {
             return;
@@ -1478,6 +2426,148 @@ impl App {
             action: ConfirmAction::DeleteStorage {
                 zone: self.zone.clone(),
                 storage,
+            },
+        });
+    }
+
+    fn open_storage_retention(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(storage) = self.selected_storage() else {
+            self.set_status("ストレージを選択してください", StatusKind::Info);
+            return;
+        };
+        if storage.kind == StorageKind::Metrics {
+            self.set_status("メトリクスストレージの保持期間は固定です", StatusKind::Info);
+            return;
+        }
+        let days = storage
+            .retention_days
+            .map(|days| days.to_string())
+            .unwrap_or_else(|| "30".to_string());
+        self.overlay = Some(Overlay::StorageRetentionForm(StorageRetentionForm {
+            storage,
+            days,
+        }));
+    }
+
+    fn open_create_storage_access_key(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(storage) = self.selected_storage() else {
+            self.set_status("ストレージを選択してください", StatusKind::Info);
+            return;
+        };
+        if !storage.supports_access_keys() {
+            self.set_status(
+                "システム領域のストレージではアクセスキーを利用できません",
+                StatusKind::Info,
+            );
+            return;
+        }
+        self.overlay = Some(Overlay::StorageAccessKeyForm(StorageAccessKeyForm {
+            mode: StorageAccessKeyFormMode::Create,
+            storage,
+            target: None,
+            description: String::new(),
+        }));
+    }
+
+    fn open_edit_storage_access_key(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(storage) = self.selected_storage() else {
+            self.set_status("ストレージを選択してください", StatusKind::Info);
+            return;
+        };
+        if !storage.supports_access_keys() {
+            self.set_status(
+                "システム領域のストレージではアクセスキーを利用できません",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(key) = self.selected_storage_access_key() else {
+            self.set_status("アクセスキーを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::StorageAccessKeyForm(StorageAccessKeyForm {
+            mode: StorageAccessKeyFormMode::Edit,
+            storage,
+            description: key.description.clone(),
+            target: Some(key),
+        }));
+    }
+
+    fn confirm_delete_storage_access_key(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(storage) = self.selected_storage() else {
+            self.set_status("ストレージを選択してください", StatusKind::Info);
+            return;
+        };
+        if !storage.supports_access_keys() {
+            self.set_status(
+                "システム領域のストレージではアクセスキーを利用できません",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(key) = self.selected_storage_access_key() else {
+            self.set_status("アクセスキーを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "アクセスキーの削除".to_string(),
+            body: format!(
+                "{}ストレージ「{}」のアクセスキー {} を削除します。\nこのキーを使う送信処理は直ちに認証できなくなります。",
+                storage.kind.label(),
+                storage.name,
+                key.uid
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteStorageAccessKey {
+                zone: self.zone.clone(),
+                storage,
+                key,
+            },
+        });
+    }
+
+    fn confirm_reveal_storage_access_key(&mut self) {
+        let Some(storage) = self.selected_storage() else {
+            self.set_status("ストレージを選択してください", StatusKind::Info);
+            return;
+        };
+        if !storage.supports_access_keys() {
+            self.set_status(
+                "システム領域のストレージではアクセスキーを利用できません",
+                StatusKind::Info,
+            );
+            return;
+        }
+        let Some(key) = self.selected_storage_access_key() else {
+            self.set_status("アクセスキーを選択してください", StatusKind::Info);
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "アクセスキーのシークレットを表示".to_string(),
+            body: format!(
+                "{}ストレージ「{}」のアクセスキーの秘密情報を取得して画面に表示します。\n肩越しに覗かれていないか確認してください。",
+                storage.kind.label(),
+                storage.name
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::RevealStorageAccessKey {
+                zone: self.zone.clone(),
+                storage,
+                key,
             },
         });
     }
@@ -1690,6 +2780,349 @@ impl App {
         });
     }
 
+    pub(super) fn submit_log_measure_rule_form(&mut self, form: LogMeasureRuleForm) {
+        let input = match form.input() {
+            Ok(input) => input,
+            Err(err) => {
+                self.set_status(err, StatusKind::Error);
+                self.overlay = Some(Overlay::LogMeasureRuleForm(form));
+                return;
+            }
+        };
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let project = form.project.resource_id;
+        let name = input.name.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            LogMeasureRuleFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_log_measure_rule(&zone, project, &input)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::LogMeasureRuleAction {
+                    zone,
+                    project,
+                    label: format!("ログ計測ルール「{name}」を作成"),
+                    result,
+                });
+            }),
+            LogMeasureRuleFormMode::Edit => {
+                let Some(rule) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = client
+                        .update_log_measure_rule(&zone, project, &rule.uid, &input)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::LogMeasureRuleAction {
+                        zone,
+                        project,
+                        label: format!("ログ計測ルール「{name}」を更新"),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_log_measure_rule(
+        &mut self,
+        zone: String,
+        project: i64,
+        uid: String,
+        name: String,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_log_measure_rule(&zone, project, &uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::LogMeasureRuleAction {
+                zone,
+                project,
+                label: format!("ログ計測ルール「{name}」を削除"),
+                result,
+            });
+        });
+    }
+
+    pub(super) fn submit_log_routing_form(&mut self, form: LogRoutingForm) {
+        let input = match form.input() {
+            Ok(input) => input,
+            Err(err) => {
+                self.set_status(err, StatusKind::Error);
+                self.overlay = Some(Overlay::LogRoutingForm(form));
+                return;
+            }
+        };
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let description = format!("{} / {}", input.publisher_code, input.variant);
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            LogRoutingFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_log_routing(&zone, &input)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::LogRoutingAction {
+                    zone,
+                    label: format!("ログ転送「{description}」を作成"),
+                    result,
+                });
+            }),
+            LogRoutingFormMode::Edit => {
+                let Some(target) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = client
+                        .update_log_routing(&zone, &target.uid, &input)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::LogRoutingAction {
+                        zone,
+                        label: format!("ログ転送「{description}」を更新"),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_log_routing(&mut self, zone: String, routing: LogRouting) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let label = format!(
+            "ログ転送「{} / {}」を削除",
+            routing.publisher_code, routing.variant
+        );
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_log_routing(&zone, &routing.uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::LogRoutingAction {
+                zone,
+                label,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn submit_notification_target_form(&mut self, mut form: NotificationTargetForm) {
+        form.url = form.url.trim().to_string();
+        form.description = form.description.trim().to_string();
+        if !form.url.is_empty() {
+            let valid = reqwest::Url::parse(&form.url)
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https"));
+            if !valid {
+                self.set_status(
+                    "URLは http:// または https:// で入力してください",
+                    StatusKind::Error,
+                );
+                self.overlay = Some(Overlay::NotificationTargetForm(form));
+                return;
+            }
+        }
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let project = form.project.resource_id;
+        let service_type = form.service_type().to_string();
+        let url = form.url;
+        let description = form.description;
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            NotificationTargetFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_notification_target(&zone, project, &service_type, &url, &description)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::NotificationAction {
+                    zone,
+                    project,
+                    label: "通知先を作成".to_string(),
+                    result,
+                });
+            }),
+            NotificationTargetFormMode::Edit => {
+                let Some(target) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = client
+                        .update_notification_target(
+                            &zone,
+                            project,
+                            &target.uid,
+                            &service_type,
+                            &url,
+                            &description,
+                        )
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::NotificationAction {
+                        zone,
+                        project,
+                        label: "通知先を更新".to_string(),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn submit_notification_routing_form(&mut self, form: NotificationRoutingForm) {
+        let Some(target_uid) = form.selected_target().map(|target| target.uid.clone()) else {
+            self.set_status("通知先を選択してください", StatusKind::Error);
+            self.overlay = Some(Overlay::NotificationRoutingForm(form));
+            return;
+        };
+        let resend_interval = if form.resend_interval.trim().is_empty() {
+            None
+        } else {
+            match form.resend_interval.trim().parse::<i64>() {
+                Ok(minutes) if minutes > 0 => Some(minutes),
+                _ => {
+                    self.set_status(
+                        "再送間隔は1分以上の整数で入力してください",
+                        StatusKind::Error,
+                    );
+                    self.overlay = Some(Overlay::NotificationRoutingForm(form));
+                    return;
+                }
+            }
+        };
+        let match_labels = match parse_match_labels(&form.match_labels) {
+            Ok(labels) => labels,
+            Err(err) => {
+                self.set_status(err, StatusKind::Error);
+                self.overlay = Some(Overlay::NotificationRoutingForm(form));
+                return;
+            }
+        };
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let project = form.project.resource_id;
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            NotificationRoutingFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_notification_routing(
+                        &zone,
+                        project,
+                        &target_uid,
+                        &match_labels,
+                        resend_interval,
+                    )
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::NotificationAction {
+                    zone,
+                    project,
+                    label: "通知経路を作成".to_string(),
+                    result,
+                });
+            }),
+            NotificationRoutingFormMode::Edit => {
+                let Some(routing) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = client
+                        .update_notification_routing(
+                            &zone,
+                            project,
+                            &routing.uid,
+                            &target_uid,
+                            &match_labels,
+                            resend_interval,
+                        )
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::NotificationAction {
+                        zone,
+                        project,
+                        label: "通知経路を更新".to_string(),
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_delete_notification_target(
+        &mut self,
+        zone: String,
+        project: i64,
+        target: NotificationTarget,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_notification_target(&zone, project, &target.uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::NotificationAction {
+                zone,
+                project,
+                label: "通知先を削除".to_string(),
+                result,
+            });
+        });
+    }
+
+    pub(super) fn run_delete_notification_routing(
+        &mut self,
+        zone: String,
+        project: i64,
+        routing: NotificationRouting,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_notification_routing(&zone, project, &routing.uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::NotificationAction {
+                zone,
+                project,
+                label: "通知経路を削除".to_string(),
+                result,
+            });
+        });
+    }
+
     pub(super) fn submit_storage_form(&mut self, mut form: StorageForm) {
         form.name = form.name.trim().to_string();
         if form.name.is_empty() {
@@ -1742,6 +3175,161 @@ impl App {
         };
     }
 
+    pub(super) fn submit_storage_retention_form(&mut self, form: StorageRetentionForm) {
+        let Ok(days) = form.days.trim().parse::<i64>() else {
+            self.set_status(
+                "保持期間は1日以上の整数で入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::StorageRetentionForm(form));
+            return;
+        };
+        if days <= 0 {
+            self.set_status(
+                "保持期間は1日以上の整数で入力してください",
+                StatusKind::Error,
+            );
+            self.overlay = Some(Overlay::StorageRetentionForm(form));
+            return;
+        }
+        let extra = if days >= 41 {
+            "\n\n41日以上は追加料金が発生します。"
+        } else {
+            ""
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "ストレージ保持期間の変更".to_string(),
+            body: format!(
+                "{}ストレージ「{}」の保持期間を {} 日に変更します。{}",
+                form.storage.kind.label(),
+                form.storage.name,
+                days,
+                extra
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::SetStorageRetention {
+                zone: self.zone.clone(),
+                storage: form.storage,
+                days,
+            },
+        });
+    }
+
+    pub(super) fn submit_storage_access_key_form(&mut self, form: StorageAccessKeyForm) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let storage = form.storage;
+        let description = form.description.trim().to_string();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        match form.mode {
+            StorageAccessKeyFormMode::Create => tokio::spawn(async move {
+                let result = client
+                    .create_storage_access_key(&zone, &storage, &description)
+                    .await
+                    .map_err(fmt_error);
+                let _ = tx.send(Message::StorageAccessKeySecret {
+                    zone,
+                    storage,
+                    title: "アクセスキーを作成しました".to_string(),
+                    result,
+                });
+            }),
+            StorageAccessKeyFormMode::Edit => {
+                let Some(key) = form.target else {
+                    self.inflight = self.inflight.saturating_sub(1);
+                    self.set_status("更新対象がありません", StatusKind::Error);
+                    return;
+                };
+                tokio::spawn(async move {
+                    let label = "アクセスキーの説明を更新".to_string();
+                    let result = client
+                        .update_storage_access_key(&zone, &storage, &key.uid, &description)
+                        .await
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::StorageAccessKeyAction {
+                        zone,
+                        storage,
+                        label,
+                        result,
+                    });
+                })
+            }
+        };
+    }
+
+    pub(super) fn run_set_storage_retention(&mut self, zone: String, storage: Storage, days: i64) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        let label = format!(
+            "{}ストレージの保持期間を {days} 日に変更",
+            storage.kind.label()
+        );
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .set_storage_retention(&zone, &storage, days)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::StorageAction {
+                zone,
+                label,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn run_delete_storage_access_key(
+        &mut self,
+        zone: String,
+        storage: Storage,
+        key: StorageAccessKey,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("送信中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .delete_storage_access_key(&zone, &storage, &key.uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::StorageAccessKeyAction {
+                zone,
+                storage,
+                label: "アクセスキーを削除".to_string(),
+                result,
+            });
+        });
+    }
+
+    pub(super) fn run_reveal_storage_access_key(
+        &mut self,
+        zone: String,
+        storage: Storage,
+        key: StorageAccessKey,
+    ) {
+        let client = self.monitoring_client.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        self.set_status("取得中…", StatusKind::Info);
+        tokio::spawn(async move {
+            let result = client
+                .read_storage_access_key_secret(&zone, &storage, &key.uid)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::StorageAccessKeySecret {
+                zone,
+                storage,
+                title: "アクセスキーの秘密情報".to_string(),
+                result,
+            });
+        });
+    }
+
     pub(super) fn run_delete_storage(&mut self, zone: String, storage: Storage) {
         let client = self.monitoring_client.clone();
         let tx = self.tx.clone();
@@ -1768,7 +3356,11 @@ impl App {
     /// タブを選んだらその中身を操作したいはずなので、右に移る。
     fn set_monitoring_tab(&mut self, tab: MonitoringTab) {
         self.monitoring.tab = tab;
-        self.monitoring.focus = ListFocus::Right;
+        self.monitoring.focus = if tab == MonitoringTab::Storages {
+            ListFocus::Left
+        } else {
+            ListFocus::Right
+        };
     }
 
     fn cycle_monitoring_tab(&mut self, delta: i32) {
@@ -1778,7 +3370,11 @@ impl App {
             .unwrap_or(0) as i32;
         let len = MonitoringTab::ALL.len() as i32;
         self.monitoring.tab = MonitoringTab::ALL[(current + delta).rem_euclid(len) as usize];
-        self.monitoring.focus = ListFocus::Right;
+        self.monitoring.focus = if self.monitoring.tab == MonitoringTab::Storages {
+            ListFocus::Left
+        } else {
+            ListFocus::Right
+        };
     }
 
     pub(super) fn observability_invalidate(&mut self) {
@@ -1819,6 +3415,41 @@ fn dns_record_from_form(form: &DnsRecordForm) -> Result<DnsRecord, &'static str>
         data: data.to_string(),
         ttl,
     })
+}
+
+fn notification_service_label(service_type: &str) -> &str {
+    match service_type {
+        "SAKURA_SIMPLE_NOTICE" => "シンプル通知",
+        "SAKURA_EVENT_BUS" => "EventBus",
+        other => other,
+    }
+}
+
+fn format_match_labels(labels: &[(String, String)]) -> String {
+    labels
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parse_match_labels(input: &str) -> Result<Vec<(String, String)>, &'static str> {
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    input
+        .split(',')
+        .map(|item| {
+            let Some((name, value)) = item.trim().split_once('=') else {
+                return Err("ラベル条件は name=value をカンマ区切りで入力してください");
+            };
+            let (name, value) = (name.trim(), value.trim());
+            if name.is_empty() || value.is_empty() {
+                return Err("ラベル条件の名前と値は空にできません");
+            }
+            Ok((name.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 fn validate_dns_zone_form(form: &DnsZoneForm) -> Result<String, &'static str> {
@@ -2059,5 +3690,47 @@ mod tests {
             simple_monitor_input(&form),
             Err("監視間隔は60秒単位の整数で入力してください")
         );
+    }
+
+    #[test]
+    fn parses_notification_match_labels() {
+        assert_eq!(
+            parse_match_labels("severity=critical, instance=web-01"),
+            Ok(vec![
+                ("severity".to_string(), "critical".to_string()),
+                ("instance".to_string(), "web-01".to_string()),
+            ])
+        );
+        assert_eq!(parse_match_labels(""), Ok(Vec::new()));
+        assert!(parse_match_labels("severity").is_err());
+        assert!(parse_match_labels("=critical").is_err());
+    }
+
+    #[test]
+    fn validates_log_measure_rule_json_without_narrowing_matcher_types() {
+        let form = LogMeasureRuleForm {
+            mode: LogMeasureRuleFormMode::Create,
+            project: AlertProject {
+                id: 1,
+                resource_id: 1,
+                name: "alerts".to_string(),
+                description: String::new(),
+                tags: Vec::new(),
+                created_at: None,
+            },
+            target: None,
+            log_storage_id: "101".to_string(),
+            metrics_storage_id: "202".to_string(),
+            name: "errors".to_string(),
+            description: String::new(),
+            rule_json: r#"{"version":"v1","query":{"matchers":[{"type":"map-key-exists","field":"attributes","key":"error"}]}}"#.to_string(),
+            field: 0,
+        };
+        let input = form.input().expect("valid v1 rule");
+        assert_eq!(input.rule["query"]["matchers"][0]["type"], "map-key-exists");
+
+        let mut invalid = form;
+        invalid.rule_json = r#"{"version":"v2","query":{"matchers":[]}}"#.to_string();
+        assert!(invalid.input().is_err());
     }
 }

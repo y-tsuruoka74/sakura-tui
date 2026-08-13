@@ -400,13 +400,20 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             hints.push("z ゾーン");
             hints.push(if app.monitoring.focus == crate::app::ListFocus::Left {
                 "Enter 中身へ"
+            } else if app.monitoring.tab == crate::app::MonitoringTab::Storages {
+                "Esc ストレージへ"
+            } else if app.monitoring.tab == crate::app::MonitoringTab::LogRoutings {
+                "Esc"
             } else {
                 "Esc プロジェクトへ"
             });
             hints.push("Tab タブ");
             if app.mode == Mode::Write
                 && app.monitoring.focus == crate::app::ListFocus::Left
-                && app.monitoring.tab != crate::app::MonitoringTab::Storages
+                && !matches!(
+                    app.monitoring.tab,
+                    crate::app::MonitoringTab::Storages | crate::app::MonitoringTab::LogRoutings
+                )
             {
                 hints.extend(["n プロジェクト作成", "E 編集", "D 削除"]);
             } else if app.mode == Mode::Write
@@ -414,9 +421,36 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             {
                 hints.extend(["a ルール作成", "e 編集", "d 削除"]);
             } else if app.mode == Mode::Write
-                && app.monitoring.tab == crate::app::MonitoringTab::Storages
+                && app.monitoring.tab == crate::app::MonitoringTab::LogMeasureRules
             {
-                hints.extend(["n ストレージ作成", "E 編集", "D 削除"]);
+                hints.extend(["a ログ計測作成", "e 編集", "d 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::LogRoutings
+            {
+                hints.extend(["a ログ転送作成", "e 編集", "d 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::NotificationTargets
+            {
+                hints.extend(["a 通知先作成", "e 編集", "d 削除"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::NotificationRoutings
+            {
+                hints.extend(["a 通知経路作成", "e 編集", "d 削除", "[ ] 並べ替え"]);
+            } else if app.mode == Mode::Write
+                && app.monitoring.tab == crate::app::MonitoringTab::Storages
+                && app.monitoring.focus == crate::app::ListFocus::Left
+            {
+                hints.extend(["n ストレージ作成", "E 編集", "D 削除", "t 保持期間"]);
+            } else if app.monitoring.tab == crate::app::MonitoringTab::Storages
+                && app.monitoring.focus == crate::app::ListFocus::Right
+                && app
+                    .selected_storage()
+                    .is_some_and(|storage| storage.supports_access_keys())
+            {
+                hints.push("u シークレット表示");
+                if app.mode == Mode::Write {
+                    hints.extend(["a キー作成", "e 説明編集", "d 削除"]);
+                }
             }
         }
         Service::Billing => {
