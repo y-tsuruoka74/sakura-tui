@@ -1,5 +1,6 @@
 //! 画面描画。
 
+mod account;
 mod apprun;
 mod billing;
 mod dedicated;
@@ -132,7 +133,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// 並べたときの表示セル数。
-fn width(spans: &[Span]) -> usize {
+pub fn width(spans: &[Span]) -> usize {
     use unicode_width::UnicodeWidthStr;
     spans.iter().map(|s| s.content.width()).sum()
 }
@@ -223,6 +224,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
         Service::Secrets => observability::draw_secrets(frame, area, app),
         Service::Monitoring => observability::draw_monitoring(frame, area, app),
+        Service::Account => account::draw(frame, area, app),
         Service::Billing => billing::draw(frame, area, app),
     }
 }
@@ -337,7 +339,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         }
         // 以下はすべて閲覧のみなので書き込み系のヒントは無い。
         Service::Dedicated => hints.push("Tab タブ"),
-        Service::Dns | Service::SimpleMonitor => {}
+        Service::Dns | Service::SimpleMonitor | Service::Account => {}
         Service::Secrets => hints.extend(["z ゾーン", "u 値を表示"]),
         Service::Monitoring => hints.extend(["z ゾーン", "Tab タブ"]),
         Service::Billing => {

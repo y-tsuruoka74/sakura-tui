@@ -42,7 +42,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_profile_picker(frame, app, sources, *index)
         }
         Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, app, zones, *index),
-        Overlay::ServicePicker { index } => draw_service_picker(frame, *index, app.service),
+        Overlay::ServicePicker { index } => draw_service_picker(frame, app, *index, app.service),
         Overlay::ProfileForm(form) => draw_profile_form(frame, form),
     }
 }
@@ -174,8 +174,16 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
 ///
 /// `spacious` が偽なら分類の間の空行を省く。分類の数だけ行が増えるので、
 /// 低い端末では空行を落とさないと下のキーヒントが枠外に出てしまう。
-fn service_picker_lines(index: usize, current: Service, spacious: bool) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::raw("")];
+fn service_picker_lines(
+    app: &App,
+    index: usize,
+    current: Service,
+    spacious: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "  @ の付いた件数は現在のゾーンのものです",
+        Style::default().fg(DIM),
+    ))];
     // 分類ごとに見出しを挟む。`Service::ALL` が分類順なので、
     // 分類が変わった行の前に見出しを入れれば並びと一致する。
     let mut previous: Option<Category> = None;
@@ -191,18 +199,68 @@ fn service_picker_lines(index: usize, current: Service, spacious: bool) -> Vec<L
             )));
             previous = Some(category);
         }
-        lines.push(picker_row(i == index, *service == current, service.title()));
+        let selected = i == index;
+        let is_current = *service == current;
+        let mut spans = vec![
+            Span::styled(
+                if selected { "▌ " } else { "  " },
+                Style::default().fg(accent()),
+            ),
+            Span::styled(
+                format!("{} {}", if is_current { "●" } else { "○" }, service.title()),
+                if selected {
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ];
+        // どのサービスにどれだけあるかを、そのサービスに行かずに見せる。
+        // 件数は桁を揃えたいので、先に空白で埋めてから置く。
+        if let Some(label) = service.count_label() {
+            let used = super::width(&spans);
+            spans.push(Span::raw(" ".repeat(COUNT_COLUMN.saturating_sub(used))));
+            spans.push(service_count_span(app, *service, label));
+        }
+        if is_current {
+            spans.push(Span::styled("  (現在)", Style::default().fg(DIM)));
+        }
+        lines.push(Line::from(spans));
     }
     lines.push(Line::raw(""));
     lines.push(picker_hint("切り替え"));
     lines
 }
 
-fn draw_service_picker(frame: &mut Frame, index: usize, current: Service) {
-    const WIDTH: u16 = 52;
-    let mut lines = service_picker_lines(index, current, true);
+/// 件数を書き始める桁。サービス名で一番長いものより後ろに置く。
+const COUNT_COLUMN: usize = 28;
+
+/// サービスごとのリソース数。0 件は薄く、取得中は「…」で出す。
+fn service_count_span(app: &App, service: Service, label: &str) -> Span<'static> {
+    // ゾーン依存のサービスは、どのゾーンの数なのかを添える。
+    let suffix = if service.is_zoned() {
+        format!(" @{}", app.zone)
+    } else {
+        String::new()
+    };
+    match app.service_counts.get(&service) {
+        Some(Loadable::Ready(0)) => Span::styled(format!("なし{suffix}"), Style::default().fg(DIM)),
+        Some(Loadable::Ready(count)) => Span::styled(
+            format!("{count} {label}{suffix}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(Loadable::Failed(_)) => Span::styled("取得できず", Style::default().fg(Color::Red)),
+        _ => Span::styled("…", Style::default().fg(DIM)),
+    }
+}
+
+fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, current: Service) {
+    const WIDTH: u16 = 62;
+    let mut lines = service_picker_lines(app, index, current, true);
     if dialog_height(&lines, WIDTH) > frame.area().height {
-        lines = service_picker_lines(index, current, false);
+        lines = service_picker_lines(app, index, current, false);
     }
 
     let area = centered(frame, WIDTH, dialog_height(&lines, WIDTH));
@@ -283,29 +341,6 @@ fn zone_count_span(app: &App, zone: &str, label: &str) -> Span<'static> {
         Some(Loadable::Failed(_)) => Span::styled("取得できず", Style::default().fg(Color::Red)),
         _ => Span::styled("…", Style::default().fg(DIM)),
     }
-}
-
-/// ピッカーの 1 行（選択中は ▌、現在値は ●）。
-fn picker_row(selected: bool, is_current: bool, label: &str) -> Line<'static> {
-    let style = if selected {
-        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    let mut spans = vec![
-        Span::styled(
-            if selected { "▌ " } else { "  " },
-            Style::default().fg(accent()),
-        ),
-        Span::styled(
-            format!("{} {label}", if is_current { "●" } else { "○" }),
-            style,
-        ),
-    ];
-    if is_current {
-        spans.push(Span::styled(" (現在)", Style::default().fg(DIM)));
-    }
-    Line::from(spans)
 }
 
 fn picker_hint(action: &str) -> Line<'static> {
@@ -522,7 +557,7 @@ fn draw_help(frame: &mut Frame) {
                 ("/", "表示中のリストを絞り込み"),
                 ("y", "選択中の項目をコピー"),
                 ("p", "認証情報（プロファイル）を切替"),
-                ("s / S", "サービスを切り替え（4種）"),
+                ("s / S", "サービスを切り替え（分類ごとに一覧）"),
                 ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("z", "ゾーンを切り替え（サーバー）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),

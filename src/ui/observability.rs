@@ -106,7 +106,7 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
             title: "DNSゾーン",
             idle: "読み込み中…",
             empty: "DNSゾーンがありません",
-            header: vec!["ゾーン", "レコード"],
+            header: vec!["DNSゾーン", "レコード"],
             widths: vec![Constraint::Min(12), Constraint::Length(9)],
             focused: !focus_records,
         },
@@ -150,7 +150,7 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
         right[0],
         TableSpec {
             title: "レコード",
-            idle: "ゾーンを選択してください",
+            idle: "DNSゾーンを選択してください",
             empty: "レコードがありません",
             header: vec!["名前", "種別", "値", "TTL"],
             widths: vec![
@@ -168,7 +168,7 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // 委任先のネームサーバーは設定時に必ず要るので、常に見える位置に出す。
     let block = Block::bordered()
-        .title(" ゾーン情報 ")
+        .title(" DNSゾーン情報 ")
         .border_style(border_style(false))
         .padding(ratatui::widgets::Padding::horizontal(1));
     let lines = match app.selected_dns_zone() {
@@ -196,7 +196,7 @@ pub fn draw_dns(frame: &mut Frame, area: Rect, app: &mut App) {
             lines
         }
         None => vec![Line::from(Span::styled(
-            "ゾーンを選択してください",
+            "DNSゾーンを選択してください",
             Style::default().fg(DIM),
         ))],
     };

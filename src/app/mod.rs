@@ -11,18 +11,21 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
+mod account;
 mod apprun;
 mod billing;
 mod dedicated;
 mod observability;
 mod server;
 
+pub use account::AccountView;
 pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
 pub use observability::{DnsView, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView};
 pub use server::ServerView;
 
+use crate::account::AuthStatus;
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
@@ -167,6 +170,12 @@ pub enum Message {
         zone: String,
         result: Result<usize, String>,
     },
+    AuthStatus(Box<Result<AuthStatus, String>>),
+    /// サービス一覧に出す、サービスごとのリソース数。
+    ServiceCount {
+        service: Service,
+        result: Result<usize, String>,
+    },
     Servers {
         zone: String,
         result: Result<Vec<Server>, String>,
@@ -250,6 +259,8 @@ pub enum Pane {
     Bills,
     BillDetails,
     BillSummary,
+    // 権限
+    Account,
     /// 絞り込み対象になるリストが無い（概要タブなど）。
     None,
 }
@@ -355,13 +366,14 @@ pub enum Service {
     SimpleMonitor,
     Secrets,
     Monitoring,
+    Account,
     Billing,
 }
 
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 9] = [
+    pub const ALL: [Service; 10] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -376,6 +388,7 @@ impl Service {
         Service::SimpleMonitor,
         Service::Monitoring,
         // アカウント
+        Service::Account,
         Service::Billing,
     ];
 
@@ -392,7 +405,7 @@ impl Service {
             Service::Dns => Category::Network,
             Service::Secrets => Category::Security,
             Service::SimpleMonitor | Service::Monitoring => Category::Ops,
-            Service::Billing => Category::Account,
+            Service::Account | Service::Billing => Category::Account,
         }
     }
 
@@ -406,6 +419,7 @@ impl Service {
             Service::SimpleMonitor => "シンプル監視",
             Service::Secrets => "シークレットマネージャ",
             Service::Monitoring => "モニタリングスイート",
+            Service::Account => "権限",
             Service::Billing => "請求",
         }
     }
@@ -421,6 +435,7 @@ impl Service {
             Service::SimpleMonitor => "monitor",
             Service::Secrets => "secrets",
             Service::Monitoring => "monitoring",
+            Service::Account => "account",
             Service::Billing => "billing",
         }
     }
@@ -440,6 +455,25 @@ impl Service {
             Service::Secrets => Some("Vault"),
             Service::Monitoring => Some("プロジェクト"),
             _ => None,
+        }
+    }
+
+    /// サービス一覧に出す件数の呼び名。数えられないサービスは `None`。
+    ///
+    /// ゾーン依存のサービスは現在のゾーンだけを数える。
+    pub fn count_label(self) -> Option<&'static str> {
+        match self {
+            Service::Server => Some("台"),
+            Service::Registry => Some("件"),
+            Service::AppRun => Some("アプリ"),
+            Service::Dedicated => Some("クラスタ"),
+            // 「ゾーン」だけだとクラウドのゾーン（リージョン）と紛らわしい。
+            Service::Dns => Some("DNSゾーン"),
+            Service::Secrets => Some("Vault"),
+            Service::SimpleMonitor => Some("件"),
+            Service::Monitoring => Some("プロジェクト"),
+            // 請求と権限はリソースの数を持たない。
+            Service::Account | Service::Billing => None,
         }
     }
 
@@ -856,7 +890,10 @@ pub struct App {
     pub api_root: String,
     pub zones: Loadable<Vec<Zone>>,
     /// `(サービス, ゾーン)` ごとのリソース件数。ゾーン選択の判断材料に出す。
+    pub account: AccountView,
     pub zone_counts: HashMap<(Service, String), Loadable<usize>>,
+    /// サービスごとのリソース数。ゾーン依存のものは現在のゾーンの数。
+    pub service_counts: HashMap<Service, Loadable<usize>>,
     /// ゾーン一覧の取得を待ってピッカーを開くかどうか。
     pending_zone_picker: bool,
 
@@ -913,7 +950,9 @@ impl App {
             zone: default_zone,
             api_root: api_root_url,
             zones: Loadable::Idle,
+            account: AccountView::default(),
             zone_counts: HashMap::new(),
+            service_counts: HashMap::new(),
             pending_zone_picker: false,
             registry: RegistryView::default(),
             apprun: AppRunView::default(),
@@ -1077,6 +1116,7 @@ impl App {
                     Pane::Vaults
                 }
             }
+            Service::Account => Pane::Account,
             Service::Billing => self.billing_active_pane(),
             Service::Monitoring => match self.monitoring.tab {
                 MonitoringTab::Rules => Pane::Rules,
@@ -1190,6 +1230,7 @@ impl App {
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
             Service::Monitoring => self.monitoring_ensure_loaded(),
+            Service::Account => self.account_ensure_loaded(),
             Service::Billing => self.billing_ensure_loaded(),
         }
     }
@@ -1649,6 +1690,21 @@ impl App {
                 };
                 self.zone_counts.insert((service, zone), loadable);
             }
+            Message::AuthStatus(result) => {
+                self.account.status = match *result {
+                    Ok(status) => Loadable::Ready(status),
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.fill_selection(Pane::Account);
+            }
+            Message::ServiceCount { service, result } => {
+                let loadable = match result {
+                    Ok(count) => Loadable::Ready(count),
+                    // 未契約や権限不足で数えられないサービスもあるので静かに落とす。
+                    Err(err) => Loadable::Failed(err),
+                };
+                self.service_counts.insert(service, loadable);
+            }
             Message::CredentialsLoaded { source, result } => match *result {
                 Ok(credentials) => self.apply_credentials(*source, credentials),
                 Err(err) => {
@@ -1925,6 +1981,8 @@ impl App {
             Service::Server => self.on_key_server(key),
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
+            // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
+            Service::Account => {}
             Service::Billing => self.on_key_billing(key),
             // DNS とシンプル監視は共通キーだけで足りる。
             Service::Dns | Service::SimpleMonitor => {}
@@ -1999,6 +2057,8 @@ impl App {
             .iter()
             .position(|svc| *svc == self.service)
             .unwrap_or(0);
+        // どのサービスにどれだけリソースがあるかを、行かなくても分かるようにする。
+        self.load_service_counts();
         self.overlay = Some(Overlay::ServicePicker { index });
     }
 
@@ -2103,11 +2163,78 @@ impl App {
         }
     }
 
+    /// サービス一覧に出す件数を集める。
+    ///
+    /// すでに画面を開いて取得済みのものはその数を使い、API は呼ばない。
+    fn load_service_counts(&mut self) {
+        for service in Service::ALL {
+            if service.count_label().is_none() {
+                continue;
+            }
+            // 取得済み・取得中は触らない。
+            if !self
+                .service_counts
+                .get(&service)
+                .is_none_or(Loadable::is_idle)
+            {
+                continue;
+            }
+            if let Some(count) = self.loaded_service_count(service) {
+                self.service_counts.insert(service, Loadable::Ready(count));
+                continue;
+            }
+            self.service_counts.insert(service, Loadable::Loading);
+            self.inflight += 1;
+            let sacloud = self.sacloud.clone();
+            let apprun = self.apprun_client.clone();
+            let dedicated = self.dedicated_client.clone();
+            let monitoring = self.monitoring_client.clone();
+            let tx = self.tx.clone();
+            let zone = self.zone.clone();
+            tokio::spawn(async move {
+                let result = match service {
+                    Service::Server => sacloud.count_servers(&zone).await,
+                    Service::Secrets => sacloud.count_vaults(&zone).await,
+                    Service::Monitoring => monitoring.count_projects(&zone).await,
+                    // 件数専用の API が無いものは一覧を引いて数える。
+                    Service::Registry => sacloud.list_registries().await.map(|v| v.len()),
+                    Service::Dns => sacloud.list_dns_zones().await.map(|v| v.len()),
+                    Service::SimpleMonitor => sacloud.list_simple_monitors().await.map(|v| v.len()),
+                    Service::AppRun => apprun.list_applications().await.map(|v| v.len()),
+                    Service::Dedicated => dedicated.list_clusters().await.map(|v| v.len()),
+                    Service::Account | Service::Billing => Ok(0),
+                };
+                let _ = tx.send(Message::ServiceCount {
+                    service,
+                    result: result.map_err(fmt_error),
+                });
+            });
+        }
+    }
+
+    /// すでに画面で読み込んでいる件数。無ければ `None`。
+    fn loaded_service_count(&self, service: Service) -> Option<usize> {
+        let len = match service {
+            Service::Registry => self.registry.registries.ready()?.len(),
+            Service::AppRun => self.apprun.applications.ready()?.len(),
+            Service::Dedicated => self.dedicated.clusters.ready()?.len(),
+            Service::Dns => self.dns.zones.ready()?.len(),
+            Service::SimpleMonitor => self.simple_monitor.monitors.ready()?.len(),
+            Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
+            Service::Secrets => self.secrets.vaults.get(&self.zone)?.ready()?.len(),
+            Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::Account | Service::Billing => return None,
+        };
+        Some(len)
+    }
+
     fn switch_zone(&mut self, zone: String) {
         if zone == self.zone {
             return;
         }
         self.zone = zone;
+        // ゾーン依存の件数は数え直す（ゾーンに依存しないものはそのまま使える）。
+        self.service_counts.retain(|service, _| !service.is_zoned());
         self.server.server_state.select(None);
         self.set_status(
             format!("ゾーンを {} に切り替えました", self.zone),
@@ -2236,6 +2363,7 @@ impl App {
             Pane::Histories => self.visible_histories().ready().map_or(0, Vec::len),
             Pane::Storages => self.visible_storages().ready().map_or(0, Vec::len),
             Pane::Bills => self.visible_bills().len(),
+            Pane::Account => self.visible_account_rows().len(),
             Pane::BillDetails => self.visible_bill_details().ready().map_or(0, Vec::len),
             Pane::BillSummary => self.current_summary().len(),
             Pane::None => 0,
@@ -2265,6 +2393,7 @@ impl App {
             Pane::Histories => Some(&mut self.monitoring.history_state),
             Pane::Storages => Some(&mut self.monitoring.storage_state),
             Pane::Bills => Some(&mut self.billing.bill_state),
+            Pane::Account => Some(&mut self.account.state),
             Pane::BillDetails => Some(&mut self.billing.detail_state),
             Pane::BillSummary => Some(&mut self.billing.summary_state),
             Pane::None => None,
@@ -2323,6 +2452,12 @@ impl App {
             Pane::Projects => self.selected_project().map(|p| p.name),
             Pane::Rules | Pane::Histories | Pane::Storages => None,
             Pane::Bills | Pane::BillDetails | Pane::BillSummary => None,
+            // 値をそのままコピーできると、権限の共有や問い合わせに使える。
+            Pane::Account => {
+                let index = self.account.state.selected()?;
+                let row = self.visible_account_rows().into_iter().nth(index)?;
+                Some(format!("{}: {}", row.label, row.value))
+            }
             Pane::Clusters => self.selected_cluster().map(|c| c.id.clone()),
             Pane::DedicatedApplications => {
                 self.visible_dedicated_applications()
@@ -2638,6 +2773,7 @@ impl App {
         // どれか一つでも残すと、切り替えたのに前の内容が見える。
         self.zones = Loadable::Idle;
         self.zone_counts.clear();
+        self.service_counts.clear();
         self.invalidate_all();
         self.registry.registries = Loadable::Idle;
         self.registry_clients = RegistryClients::default();
@@ -2677,6 +2813,7 @@ impl App {
                 self.secrets.secrets.clear();
                 self.secrets_ensure_loaded();
             }
+            Service::Account => self.account_refresh(),
             Service::Billing => self.billing_refresh(),
             Service::Monitoring => {
                 self.monitoring.projects.remove(&self.zone);
@@ -2713,6 +2850,7 @@ impl App {
     }
 
     fn invalidate_all(&mut self) {
+        self.service_counts.clear();
         self.registry.users.clear();
         self.registry.repositories.clear();
         self.registry.tags.clear();
@@ -2727,6 +2865,7 @@ impl App {
         self.server_invalidate();
         self.observability_invalidate();
         self.billing_invalidate();
+        self.account_invalidate();
     }
 
     fn set_tab(&mut self, tab: Tab) {

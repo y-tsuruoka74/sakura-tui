@@ -2,6 +2,7 @@
 //!
 //! 現時点ではさくらのクラウドのコンテナレジストリに対応している。
 
+mod account;
 mod app;
 mod apprun;
 mod apprun_dedicated;
