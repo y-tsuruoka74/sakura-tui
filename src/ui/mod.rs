@@ -17,7 +17,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Tabs};
 
-use crate::app::{App, Focus, Mode, Service, StatusKind, Tab};
+use crate::app::{App, Focus, Mode, Overlay, Service, StatusKind, Tab};
 use crate::config::CredentialSource;
 
 /// 既定のアクセント色（さくらのピンク）。
@@ -69,6 +69,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let choosing_service = matches!(
+        app.overlay,
+        Some(Overlay::ServicePicker { initial: true, .. })
+    );
     let spinner = if app.inflight > 0 {
         SPINNER[(app.tick as usize) % SPINNER.len()]
     } else {
@@ -83,7 +87,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ),
         separator(),
         Span::styled(
-            app.service.title(),
+            if choosing_service {
+                "サービスを選択"
+            } else {
+                app.service.title()
+            },
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" (s)", Style::default().fg(DIM)),
@@ -91,7 +99,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         mode_badge(app.mode),
     ];
     // ゾーンはゾーン依存のサービスのときだけ出す。
-    if app.service.is_zoned() {
+    if !choosing_service && app.service.is_zoned() {
         spans.push(separator());
         spans.push(Span::styled(
             format!("ゾーン {}", app.zone),
@@ -110,25 +118,37 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     spans.push(separator());
-    spans.extend(credential_badge(
-        &app.credential_source,
-        app.config
-            .profile_color(&app.credential_source)
-            .and_then(parse_color),
-    ));
-    spans.push(Span::styled(" (p)", Style::default().fg(DIM)));
+    if app.has_credentials {
+        spans.extend(credential_badge(
+            &app.credential_source,
+            app.config
+                .profile_color(&app.credential_source)
+                .and_then(parse_color),
+        ));
+        spans.push(Span::styled(" (p)", Style::default().fg(DIM)));
+    } else {
+        spans.push(Span::styled(
+            " 認証情報未設定 ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     spans.push(Span::raw("  "));
     spans.push(Span::styled(spinner, Style::default().fg(accent())));
 
     // 分類を添えて、今どのあたりを見ているのかが分かるようにする。
     // ただしプロファイル名やモードの方が大事なので、幅が足りなければ落とす。
-    let category = Span::styled(
-        format!("{} / ", app.service.category().title()),
-        Style::default().fg(DIM),
-    );
-    if width(&spans) + width(std::slice::from_ref(&category)) <= area.width as usize {
-        // サービス名の直前（"sakura-tui" と区切りの後ろ）に差し込む。
-        spans.insert(2, category);
+    if !choosing_service {
+        let category = Span::styled(
+            format!("{} / ", app.service.category().title()),
+            Style::default().fg(DIM),
+        );
+        if width(&spans) + width(std::slice::from_ref(&category)) <= area.width as usize {
+            // サービス名の直前（"sakura-tui" と区切りの後ろ）に差し込む。
+            spans.insert(2, category);
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -1018,6 +1018,8 @@ pub enum Overlay {
     /// サービスの切り替え。
     ServicePicker {
         index: usize,
+        /// 起動直後で、まだ表示するサービスを選んでいない。
+        initial: bool,
     },
     /// usacloud プロファイルの新規作成。
     ProfileForm(ProfileForm),
@@ -1054,6 +1056,8 @@ pub struct App {
     pub config: Config,
     pub registry_clients: RegistryClients,
     pub credential_source: CredentialSource,
+    /// 有効なクラウドAPI認証情報が設定済みか。
+    pub has_credentials: bool,
 
     pub mode: Mode,
     pub should_quit: bool,
@@ -1112,10 +1116,11 @@ impl App {
         tx: Tx,
         config: Config,
         credential_source: CredentialSource,
+        has_credentials: bool,
     ) -> Self {
         let default_zone = clients.sacloud.default_zone().to_string();
         let api_root_url = clients.sacloud.api_root().to_string();
-        let mut app = Self {
+        Self {
             sacloud: clients.sacloud,
             apprun_client: clients.apprun,
             dedicated_client: clients.dedicated,
@@ -1124,6 +1129,7 @@ impl App {
             config,
             registry_clients: RegistryClients::default(),
             credential_source,
+            has_credentials,
             // 事故を防ぐため、既定は読み取り専用。
             mode: Mode::ReadOnly,
             should_quit: false,
@@ -1153,9 +1159,7 @@ impl App {
             overlay: None,
             pending_form: None,
             status: None,
-        };
-        app.load_registries();
-        app
+        }
     }
 
     // --- 表示中の要素（絞り込み適用後） ---
@@ -1403,6 +1407,9 @@ impl App {
 
     /// 現在表示中のビューに必要なデータをまだ読んでいなければ読む。
     pub fn ensure_loaded(&mut self) {
+        if !self.has_credentials || matches!(self.overlay, Some(Overlay::ServicePicker { .. })) {
+            return;
+        }
         match self.service {
             Service::Registry => self.registry_ensure_loaded(),
             Service::AppRun => self.apprun_ensure_loaded(),
@@ -1900,7 +1907,9 @@ impl App {
                 self.service_counts.insert(service, loadable);
             }
             Message::CredentialsLoaded { source, result } => match *result {
-                Ok(credentials) => self.apply_credentials(*source, credentials),
+                Ok(credentials) => {
+                    self.apply_credentials(*source, credentials);
+                }
                 Err(err) => {
                     self.show_error(format!("{} に切り替えられません", source.label()), err)
                 }
@@ -2302,13 +2311,22 @@ impl App {
             .unwrap_or(0);
         // どのサービスにどれだけリソースがあるかを、行かなくても分かるようにする。
         self.load_service_counts();
-        self.overlay = Some(Overlay::ServicePicker { index });
+        self.overlay = Some(Overlay::ServicePicker {
+            index,
+            initial: false,
+        });
+    }
+
+    /// 起動時は特定サービスを既定にせず、一覧の先頭から選んでもらう。
+    pub fn open_initial_service_picker(&mut self) {
+        self.load_service_counts();
+        self.overlay = Some(Overlay::ServicePicker {
+            index: 0,
+            initial: true,
+        });
     }
 
     fn switch_service(&mut self, service: Service) {
-        if service == self.service {
-            return;
-        }
         self.service = service;
         self.filtering = false;
         self.set_status(service.title(), StatusKind::Info);
@@ -2764,13 +2782,6 @@ impl App {
 
     fn open_profile_picker(&mut self) {
         let sources = crate::config::available_credential_sources();
-        if sources.len() < 2 {
-            self.set_status(
-                "切り替え先の認証情報がありません（usacloud のプロファイルは1つだけです）",
-                StatusKind::Info,
-            );
-            return;
-        }
         let index = sources
             .iter()
             .position(|s| *s == self.credential_source)
@@ -2783,6 +2794,15 @@ impl App {
             })
             .collect();
         self.overlay = Some(Overlay::ProfilePicker { sources, index });
+    }
+
+    /// 認証情報が無い初回起動を、既存のプロファイル作成フォームへつなぐ。
+    pub fn start_credential_setup(&mut self) {
+        self.set_status(
+            "認証情報が見つかりません。アプリ内で新しいプロファイルを作成してください",
+            StatusKind::Info,
+        );
+        self.open_profile_form();
     }
 
     /// キーチェーンに預けた資格情報の削除を確認する。
@@ -2936,21 +2956,43 @@ impl App {
                 {
                     self.config = config;
                 }
-                self.set_status(
-                    format!(
-                        "{} を作成しました（{}）: {}",
-                        form.name,
-                        form.storage.title(),
-                        path.display()
-                    ),
-                    StatusKind::Success,
+                let created_message = format!(
+                    "{} を作成しました（{}）: {}",
+                    form.name,
+                    form.storage.title(),
+                    path.display()
                 );
-                self.open_profile_picker();
+                if !self.has_credentials {
+                    let source = match form.storage {
+                        ProfileStorage::Usacloud => CredentialSource::Profile(form.name.clone()),
+                        ProfileStorage::Keychain => CredentialSource::Keychain(form.name.clone()),
+                    };
+                    let zone = form.zone().name.clone();
+                    let api_root = form.api_root().url.clone();
+                    let credentials = ApiCredentials {
+                        token: form.token,
+                        secret: form.secret,
+                        source: source.clone(),
+                        zone: Some(zone),
+                        api_root: Some(api_root),
+                    };
+                    if self.apply_credentials(source, credentials) {
+                        self.set_status(created_message, StatusKind::Success);
+                        self.open_initial_service_picker();
+                    }
+                } else {
+                    self.set_status(created_message, StatusKind::Success);
+                    self.open_profile_picker();
+                }
             }
             Err(err) => {
+                self.pending_form = Some(Box::new(form));
                 self.overlay = Some(Overlay::Message {
                     title: "作成に失敗しました".to_string(),
-                    body: fmt_error(err),
+                    body: format!(
+                        "{}\n\n閉じると入力内容を残したままフォームに戻ります。",
+                        fmt_error(err)
+                    ),
                     kind: StatusKind::Error,
                     scroll: 0,
                 });
@@ -3016,7 +3058,8 @@ impl App {
     /// 読み込めた認証情報に切り替え、クラウド API 側のキャッシュを捨てて読み直す。
     ///
     /// レジストリへのログインはホスト単位でクラウドの契約とは独立なので保持する。
-    fn apply_credentials(&mut self, source: CredentialSource, credentials: ApiCredentials) {
+    fn apply_credentials(&mut self, source: CredentialSource, credentials: ApiCredentials) -> bool {
+        let was_configured = self.has_credentials;
         // 世代を進める。前の資格情報で投げた通信の結果は、
         // これ以降に届いても画面に入らない。
         self.epoch += 1;
@@ -3035,7 +3078,7 @@ impl App {
                     "クライアントを初期化できませんでした",
                     format!("{} への切り替えを中止しました", source.label()),
                 );
-                return;
+                return false;
             }
         };
 
@@ -3049,6 +3092,7 @@ impl App {
         self.dedicated_client = Arc::new(dedicated);
         self.monitoring_client = Arc::new(monitoring);
         self.credential_source = source;
+        self.has_credentials = true;
 
         // 契約が変われば、取得済みのものは全て別アカウントのもの。
         // どれか一つでも残すと、切り替えたのに前の内容が見える。
@@ -3070,7 +3114,10 @@ impl App {
         );
         // 表示中のサービスを読み直す。レジストリだけ読むと、他のサービスに
         // 移ったときに前のアカウントの内容が残って見える。
-        self.ensure_loaded();
+        if was_configured {
+            self.ensure_loaded();
+        }
+        true
     }
 
     /// 現在のビューのキャッシュを捨てて読み直す。
@@ -3843,6 +3890,7 @@ impl App {
             Overlay::ProfileForm(mut form) => match key.code {
                 // 検証中は結果を待つ。
                 _ if form.verifying => self.overlay = Some(Overlay::ProfileForm(form)),
+                KeyCode::Esc if !self.has_credentials => self.should_quit = true,
                 KeyCode::Esc => self.open_profile_picker(),
                 KeyCode::Enter => self.submit_profile_form(form),
                 _ => {
@@ -3896,18 +3944,36 @@ impl App {
                     self.overlay = Some(Overlay::SwitchForm(form));
                 }
             },
-            Overlay::ServicePicker { mut index } => match key.code {
+            Overlay::ServicePicker { mut index, initial } => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') if initial => self.should_quit = true,
                 KeyCode::Esc | KeyCode::Char('q') => {}
                 KeyCode::Enter => self.switch_service(Service::ALL[index]),
                 KeyCode::Down | KeyCode::Char('j') => {
                     index = (index + 1) % Service::ALL.len();
-                    self.overlay = Some(Overlay::ServicePicker { index });
+                    self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     index = (index + Service::ALL.len() - 1) % Service::ALL.len();
-                    self.overlay = Some(Overlay::ServicePicker { index });
+                    self.overlay = Some(Overlay::ServicePicker { index, initial });
                 }
-                _ => self.overlay = Some(Overlay::ServicePicker { index }),
+                KeyCode::PageDown => {
+                    index = (index + 5).min(Service::ALL.len() - 1);
+                    self.overlay = Some(Overlay::ServicePicker { index, initial });
+                }
+                KeyCode::PageUp => {
+                    index = index.saturating_sub(5);
+                    self.overlay = Some(Overlay::ServicePicker { index, initial });
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    self.overlay = Some(Overlay::ServicePicker { index: 0, initial });
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    self.overlay = Some(Overlay::ServicePicker {
+                        index: Service::ALL.len() - 1,
+                        initial,
+                    });
+                }
+                _ => self.overlay = Some(Overlay::ServicePicker { index, initial }),
             },
             Overlay::ZonePicker { zones, mut index } => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {}

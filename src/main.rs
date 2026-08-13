@@ -27,6 +27,7 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 
 use crate::app::App;
+use crate::config::{ApiCredentials, CredentialSource};
 use crate::sacloud::SacloudClient;
 
 /// スピナーを回すための描画間隔。
@@ -141,18 +142,23 @@ async fn main() -> Result<()> {
         unsafe { std::env::set_var("SAKURA_PROFILE", profile) };
     }
 
-    // 認証情報の不足は TUI に入る前にプレーンなエラーとして出す。
-    let credentials = match config::load_api_credentials(args.profile.is_some()) {
-        Ok(credentials) => credentials,
-        Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
+    // 認証情報が無くても TUI を起動し、アプリ内の作成フォームへ案内する。
+    // 空の認証情報で作ったクライアントはオンボーディング中には通信へ使わない。
+    let (credentials, has_credentials) = match config::load_api_credentials(args.profile.is_some())
+    {
+        Ok(credentials) => (credentials, true),
+        Err(_) => (
+            ApiCredentials {
+                token: String::new(),
+                secret: String::new(),
+                source: CredentialSource::Env,
+                zone: args.zone.clone(),
+                api_root: std::env::var("SAKURA_API_ROOT_URL").ok(),
+            },
+            false,
+        ),
     };
-    let sacloud = Arc::new(SacloudClient::new(&credentials)?);
-    let apprun_client = Arc::new(apprun::AppRunClient::new(&credentials)?);
-    let dedicated_client = Arc::new(apprun_dedicated::DedicatedClient::new(&credentials)?);
-    let monitoring_client = Arc::new(monitoring::MonitoringClient::new(&credentials)?);
+    let clients = Clients::new(&credentials)?;
     let mut settings = match config::Config::load() {
         Ok(settings) => settings,
         Err(err) => {
@@ -185,14 +191,10 @@ async fn main() -> Result<()> {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste).is_ok();
     let result = run(
         terminal,
-        Clients {
-            sacloud,
-            apprun: apprun_client,
-            dedicated: dedicated_client,
-            monitoring: monitoring_client,
-        },
+        clients,
         settings,
         credentials.source,
+        has_credentials,
         args,
     )
     .await;
@@ -211,22 +213,47 @@ pub struct Clients {
     pub monitoring: Arc<monitoring::MonitoringClient>,
 }
 
+impl Clients {
+    fn new(credentials: &ApiCredentials) -> Result<Self> {
+        Ok(Self {
+            sacloud: Arc::new(SacloudClient::new(credentials)?),
+            apprun: Arc::new(apprun::AppRunClient::new(credentials)?),
+            dedicated: Arc::new(apprun_dedicated::DedicatedClient::new(credentials)?),
+            monitoring: Arc::new(monitoring::MonitoringClient::new(credentials)?),
+        })
+    }
+}
+
 async fn run(
     mut terminal: ratatui::DefaultTerminal,
     clients: Clients,
     settings: config::Config,
     credential_source: config::CredentialSource,
+    has_credentials: bool,
     args: Args,
 ) -> Result<()> {
     let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(clients, app::Tx::new(sender), settings, credential_source);
+    let mut app = App::new(
+        clients,
+        app::Tx::new(sender),
+        settings,
+        credential_source,
+        has_credentials,
+    );
     if let Some(zone) = args.zone {
         app.zone = zone;
     }
     if let Some(service) = args.service {
         app.service = service;
+        if has_credentials {
+            app.ensure_loaded();
+        }
+    } else if has_credentials {
+        app.open_initial_service_picker();
     }
-    app.ensure_loaded();
+    if !has_credentials {
+        app.start_credential_setup();
+    }
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

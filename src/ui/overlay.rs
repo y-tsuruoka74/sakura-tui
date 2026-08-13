@@ -43,8 +43,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_profile_picker(frame, app, sources, *index)
         }
         Overlay::ZonePicker { zones, index } => draw_zone_picker(frame, app, zones, *index),
-        Overlay::ServicePicker { index } => draw_service_picker(frame, app, *index, app.service),
-        Overlay::ProfileForm(form) => draw_profile_form(frame, form),
+        Overlay::ServicePicker { index, initial } => {
+            draw_service_picker(frame, app, *index, *initial)
+        }
+        Overlay::ProfileForm(form) => draw_profile_form(frame, app, form),
     }
 }
 
@@ -82,17 +84,23 @@ fn choice_line<T: Copy + PartialEq>(
     Line::from(spans)
 }
 
-fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
-    let mut lines: Vec<Line> = (0..ProfileForm::ZONE_FIELD)
-        .map(|i| {
-            input_line(
-                ProfileForm::label(i),
-                form.value(i),
-                form.field == i,
-                ProfileForm::is_secret(i),
-            )
-        })
-        .collect();
+fn draw_profile_form(frame: &mut Frame, app: &App, form: &ProfileForm) {
+    let mut lines = Vec::new();
+    if !app.has_credentials {
+        lines.push(Line::from(Span::styled(
+            "利用を始めるため、さくらのクラウドAPI認証情報を設定します。",
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::raw(""));
+    }
+    lines.extend((0..ProfileForm::ZONE_FIELD).map(|i| {
+        input_line(
+            ProfileForm::label(i),
+            form.value(i),
+            form.field == i,
+            ProfileForm::is_secret(i),
+        )
+    }));
 
     // ゾーンは選択式。接続先を変えると選択肢も入れ替わる。
     let zone_names: Vec<&str> = form.zones.iter().map(|z| z.name.as_str()).collect();
@@ -157,7 +165,11 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
             ),
             Span::raw(" 作成   "),
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" 戻る"),
+            Span::raw(if app.has_credentials {
+                " 戻る"
+            } else {
+                " 終了"
+            }),
         ]));
     }
 
@@ -166,7 +178,14 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("資格情報の新規作成", accent())),
+            .block(dialog(
+                if app.has_credentials {
+                    "資格情報の新規作成"
+                } else {
+                    "初期設定 — API認証情報"
+                },
+                accent(),
+            )),
         area,
     );
 }
@@ -178,13 +197,11 @@ fn draw_profile_form(frame: &mut Frame, form: &ProfileForm) {
 fn service_picker_lines(
     app: &App,
     index: usize,
-    current: Service,
+    current: Option<Service>,
     spacious: bool,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        "  @ の付いた件数は現在のゾーンのものです",
-        Style::default().fg(DIM),
-    ))];
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines = Vec::new();
+    let mut selected_line = 0;
     // 分類ごとに見出しを挟む。`Service::ALL` が分類順なので、
     // 分類が変わった行の前に見出しを入れれば並びと一致する。
     let mut previous: Option<Category> = None;
@@ -201,7 +218,10 @@ fn service_picker_lines(
             previous = Some(category);
         }
         let selected = i == index;
-        let is_current = *service == current;
+        if selected {
+            selected_line = lines.len();
+        }
+        let is_current = current == Some(*service);
         let availability = app.service_availability(*service);
         let unusable = matches!(availability, Availability::Unusable(_));
         // 使えないサービスは印を変えて、名前も沈める。
@@ -247,9 +267,7 @@ fn service_picker_lines(
         }
         lines.push(Line::from(spans));
     }
-    lines.push(Line::raw(""));
-    lines.push(picker_hint("切り替え"));
-    lines
+    (lines, selected_line)
 }
 
 /// 件数を書き始める桁。サービス名で一番長いものより後ろに置く。
@@ -277,21 +295,109 @@ fn service_count_span(app: &App, service: Service, label: &str) -> Span<'static>
     }
 }
 
-fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, current: Service) {
+fn draw_service_picker(frame: &mut Frame, app: &App, index: usize, initial: bool) {
     const WIDTH: u16 = 62;
-    let mut lines = service_picker_lines(app, index, current, true);
-    if dialog_height(&lines, WIDTH) > frame.area().height {
-        lines = service_picker_lines(app, index, current, false);
+    const MAX_HEIGHT: u16 = 28;
+    let current = (!initial).then_some(app.service);
+    let max_height = frame.area().height.saturating_sub(2).clamp(1, MAX_HEIGHT);
+    // 枠2行、説明・空行・位置表示・キーヒントの4行を除いた高さを一覧に使う。
+    let list_height = max_height.saturating_sub(6).max(1) as usize;
+    let (spacious, spacious_selected) = service_picker_lines(app, index, current, true);
+    let (items, selected_line) = if spacious.len() <= list_height {
+        (spacious, spacious_selected)
+    } else {
+        service_picker_lines(app, index, current, false)
+    };
+    let item_count = items.len();
+    let (start, end) = viewport_bounds(item_count, selected_line, list_height);
+    let mut visible = Vec::new();
+    if start > 0 && list_height >= 3 {
+        visible.push(continuation_line("↑", "上に続きます"));
     }
+    visible.extend(items.into_iter().skip(start).take(end - start));
+    if end < item_count && list_height >= 3 {
+        visible.push(continuation_line("↓", "下に続きます"));
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "  @ の付いた件数は現在のゾーンのものです",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+    ];
+    lines.append(&mut visible);
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  {}/{}", index + 1, Service::ALL.len()),
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}", Service::ALL[index].category().title()),
+            Style::default().fg(DIM),
+        ),
+    ]));
+    lines.push(service_picker_hint(if initial {
+        "開く"
+    } else {
+        "切り替え"
+    }));
 
     let area = centered(frame, WIDTH, dialog_height(&lines, WIDTH));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(dialog("サービスの切り替え", accent())),
+            .block(dialog(
+                if initial {
+                    "表示するサービスを選択"
+                } else {
+                    "サービスの切り替え"
+                },
+                accent(),
+            )),
         area,
     );
+}
+
+/// 選択行が必ず見えるように、一覧から切り出す範囲を返す。
+fn viewport_bounds(total: usize, selected: usize, height: usize) -> (usize, usize) {
+    if total <= height {
+        return (0, total);
+    }
+    if height < 3 {
+        let start = selected.min(total.saturating_sub(1));
+        return (start, (start + 1).min(total));
+    }
+    // 上下の継続表示に1行ずつ確保し、選択行を中央寄りに置く。
+    let content_height = height - 2;
+    let start = selected
+        .saturating_sub(content_height / 2)
+        .min(total - content_height);
+    (start, start + content_height)
+}
+
+fn continuation_line(arrow: &'static str, label: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {arrow} {label}"),
+        Style::default().fg(DIM),
+    ))
+}
+
+fn service_picker_hint(action: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 移動  "),
+        Span::styled("PgUp/PgDn", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" ページ  "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" {action}  ")),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ])
 }
 
 fn draw_zone_picker(frame: &mut Frame, app: &App, zones: &[Zone], index: usize) {
@@ -579,6 +685,7 @@ fn draw_help(frame: &mut Frame) {
                 ("y", "選択中の項目をコピー"),
                 ("p", "認証情報（プロファイル）を切替"),
                 ("s / S", "サービスを切り替え（分類ごとに一覧）"),
+                ("", "  サービス選択内: PgUp/PgDn 5件移動 / g/G 先頭・末尾"),
                 ("", "  ピッカー内: n 新規作成 / c 色 / d 削除"),
                 ("z", "ゾーンを切り替え（サーバー / スイッチほか）"),
                 ("t", "トラフィックを切替（AppRun共用型）"),
@@ -985,4 +1092,23 @@ fn permission_line(selected: usize, focused: bool) -> Line<'static> {
         spans.push(Span::styled(format!(" {} ", permission.as_str()), style));
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewport_bounds;
+
+    #[test]
+    fn service_picker_viewport_keeps_selection_visible() {
+        for selected in 0..40 {
+            let (start, end) = viewport_bounds(40, selected, 10);
+            assert!(start <= selected && selected < end, "{start}..{end}");
+            assert!(end - start <= 8); // 上下の継続表示に2行を残す。
+        }
+    }
+
+    #[test]
+    fn service_picker_viewport_uses_full_list_when_it_fits() {
+        assert_eq!(viewport_bounds(6, 3, 10), (0, 6));
+    }
 }
