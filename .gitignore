@@ -1,1 +1,8 @@
 /target
+
+# Graphify machine-local runtime and temporary files
+/graphify-out/.venv/
+/graphify-out/.graphify_python
+/graphify-out/.graphify_chunk_*.json
+/graphify-out/.needs_update
+/graphify-out/cache/
