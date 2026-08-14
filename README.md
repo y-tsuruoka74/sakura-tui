@@ -2,7 +2,7 @@
 
 さくらインターネットのサービスをターミナルから操作する TUI（[ratatui](https://ratatui.rs) 製）。
 
-`s` キーでサービスを切り替えて使います（36 種類）。
+`s` キーでサービスを切り替えて使います（37 種類）。
 
 ### コンテナレジストリ
 - レジストリの一覧・詳細・作成・編集・削除
@@ -63,6 +63,12 @@
 - ワークフロー一覧（公開状態、ログ設定、同時実行モード、タグ）
 - シンプル通知の通知先、通知先グループ、ルーティング
 - いずれも絞り込み、更新、リソースIDのコピーに対応
+
+### APIゲートウェイ（閲覧のみ）
+- 契約、サービス、ルート、ユーザー、グループ、ドメイン、証明書、OIDCをタブで表示
+- 選択中サービスのルートと、選択中ユーザーの認証方式を必要なときだけ取得
+- Basic / JWT / HMAC の設定概要を表示し、パスワード・秘密鍵・シークレットは取得結果から表示しません
+- 絞り込み、更新、リソースIDのコピーに対応
 
 ### AI Engine
 - アカウントトークンごとに利用可能なモデル一覧を表示
@@ -160,7 +166,8 @@ cargo build --release
                          gslb / mobile-gateway / local-router /
                          database / nfs / object-storage / simplemq /
                          simple-notification / kms / iam /
-                         enhanced-db / ai-engine / eventbus / workflows / webaccel /
+                         enhanced-db / ai-engine / eventbus / workflows / api-gateway /
+                         webaccel /
                          autoscale / dns / secrets / monitor / monitoring /
                          account / billing
       --trace            APIリクエストを標準エラーに記録する
@@ -381,6 +388,7 @@ username = "your-registry-user"
 | `src/managed_resources.rs` | AI Engineモデルやオブジェクトストレージなどの共通一覧・詳細モデル |
 | `src/apprun.rs` | AppRun 共用型 API クライアント |
 | `src/apprun_dedicated.rs` | AppRun 専有型 API クライアント（閲覧のみ、カーソル方式のページング） |
+| `src/api_gateway.rs` | APIゲートウェイの契約、サービス、ルート、認証関連リソースの閲覧クライアント |
 | `src/commonservice.rs` | DNS とシンプル監視（コンテナレジストリと同じ commonserviceitem） |
 | `src/secretmanager.rs` | シークレットマネージャ（値の取得は明示操作のときだけ） |
 | `src/monitoring.rs` | モニタリングスイート（アラート・保管先） |
@@ -402,6 +410,7 @@ API 呼び出しは全て `tokio::spawn` して結果をチャネルで受け取
 - タグの詳細（サイズ・レイヤ数など）は選択中のタグの分だけ取得します。
 - AppRun（共用型）はアプリの作成・削除・デプロイには未対応です（閲覧とトラフィック切替のみ）。
 - AppRun（専有型）は閲覧のみです。ロードバランサとサービスクラスの一覧は未対応です。
+- APIゲートウェイは閲覧のみです。パスワード、秘密鍵、JWT／HMACシークレット、証明書秘密鍵は表示しません。
 - AI Engineのモデル一覧はOpenAI互換の `/v1/models` を利用します。トークンの発行・失効APIは公開されていないため、サービス側の管理はコントロールパネルで行います。
 - DNSゾーン名はサービス仕様上、作成後に変更できません。編集できるのは説明のみです。
 - シンプル監視の編集フォームは ping / TCP / HTTP / HTTPS に対応します。その他の方式は閲覧・有効／停止・削除のみ対応します。

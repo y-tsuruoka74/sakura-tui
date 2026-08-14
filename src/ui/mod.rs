@@ -1,6 +1,7 @@
 //! 画面描画。
 
 mod account;
+mod api_gateway;
 mod apprun;
 mod billing;
 mod cloud_resources;
@@ -242,6 +243,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.service {
         Service::Registry => draw_registry(frame, area, app),
         Service::AppRun => apprun::draw(frame, area, app),
+        Service::ApiGateway => api_gateway::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
@@ -412,6 +414,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
         Service::Dedicated => hints.push("Tab タブ"),
+        Service::ApiGateway => hints.push("←→/hl タブ"),
         Service::Dns => {
             hints.push(if app.dns.focus == crate::app::ListFocus::Left {
                 "Enter レコードへ"

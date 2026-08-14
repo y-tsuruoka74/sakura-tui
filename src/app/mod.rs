@@ -12,6 +12,7 @@ use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod account;
+mod api_gateway;
 mod apprun;
 mod billing;
 mod dedicated;
@@ -20,6 +21,7 @@ mod server;
 mod switch;
 
 pub use account::AccountView;
+pub use api_gateway::{ApiGatewayTab, ApiGatewayView};
 pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
@@ -31,6 +33,10 @@ pub use switch::SwitchView;
 
 use crate::account::AuthStatus;
 use crate::ai_engine::AiEngineClient;
+use crate::api_gateway::{
+    ApiGatewayClient, ApiGatewayGroup, ApiGatewayService, ApiGatewayUser, Certificate, Domain,
+    Oidc, Route, Subscription, UserAuthentication,
+};
 use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Version};
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
@@ -60,6 +66,35 @@ pub enum Message {
     ManagedResources {
         kind: ManagedResourceKind,
         result: Result<Vec<ManagedResource>, String>,
+    },
+    ApiGatewaySubscriptions {
+        result: Result<Vec<Subscription>, String>,
+    },
+    ApiGatewayServices {
+        result: Result<Vec<ApiGatewayService>, String>,
+    },
+    ApiGatewayRoutes {
+        service_id: String,
+        result: Result<Vec<Route>, String>,
+    },
+    ApiGatewayUsers {
+        result: Result<Vec<ApiGatewayUser>, String>,
+    },
+    ApiGatewayUserAuthentication {
+        user_id: String,
+        result: Result<UserAuthentication, String>,
+    },
+    ApiGatewayGroups {
+        result: Result<Vec<ApiGatewayGroup>, String>,
+    },
+    ApiGatewayDomains {
+        result: Result<Vec<Domain>, String>,
+    },
+    ApiGatewayCertificates {
+        result: Result<Vec<Certificate>, String>,
+    },
+    ApiGatewayOidcs {
+        result: Result<Vec<Oidc>, String>,
     },
     IamAction {
         label: String,
@@ -394,6 +429,15 @@ pub enum Pane {
     Switches,
     CloudResources,
     ManagedResources,
+    // API Gateway
+    ApiGatewaySubscriptions,
+    ApiGatewayServices,
+    ApiGatewayRoutes,
+    ApiGatewayUsers,
+    ApiGatewayGroups,
+    ApiGatewayDomains,
+    ApiGatewayCertificates,
+    ApiGatewayOidcs,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -630,6 +674,7 @@ pub enum Service {
     SimpleNotification,
     EventBus,
     Workflows,
+    ApiGateway,
     AutoScale,
     Server,
     Switch,
@@ -673,7 +718,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 36] = [
+    pub const ALL: [Service; 37] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -687,6 +732,7 @@ impl Service {
         Service::SimpleNotification,
         Service::EventBus,
         Service::Workflows,
+        Service::ApiGateway,
         // ネットワーク
         Service::Switch,
         Service::Internet,
@@ -795,6 +841,14 @@ impl Service {
                 arg_name: "workflows",
                 countable_label: None,
                 count_label: Some("件"),
+                zoned: false,
+            },
+            Service::ApiGateway => ServiceMeta {
+                category: Category::Integration,
+                title: "APIゲートウェイ",
+                arg_name: "api-gateway",
+                countable_label: None,
+                count_label: Some("サービス"),
                 zoned: false,
             },
             Service::AutoScale => ServiceMeta {
@@ -2543,6 +2597,7 @@ pub struct App {
     apprun_client: Arc<AppRunClient>,
     dedicated_client: Arc<DedicatedClient>,
     monitoring_client: Arc<MonitoringClient>,
+    api_gateway_client: Arc<ApiGatewayClient>,
     ai_engine_client: Option<Arc<AiEngineClient>>,
     tx: Tx,
     pub config: Config,
@@ -2586,6 +2641,7 @@ pub struct App {
     pub switch: SwitchView,
     pub cloud_resources: CloudResourcesView,
     pub managed_resources: ManagedResourcesView,
+    pub api_gateway: ApiGatewayView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2619,6 +2675,7 @@ impl App {
             apprun_client: clients.apprun,
             dedicated_client: clients.dedicated,
             monitoring_client: clients.monitoring,
+            api_gateway_client: clients.api_gateway,
             ai_engine_client: None,
             tx,
             config,
@@ -2646,6 +2703,7 @@ impl App {
             switch: SwitchView::default(),
             cloud_resources: CloudResourcesView::default(),
             managed_resources: ManagedResourcesView::default(),
+            api_gateway: ApiGatewayView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -2913,6 +2971,16 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => Pane::ManagedResources,
+            Service::ApiGateway => match self.api_gateway.tab {
+                ApiGatewayTab::Subscriptions => Pane::ApiGatewaySubscriptions,
+                ApiGatewayTab::Services => Pane::ApiGatewayServices,
+                ApiGatewayTab::Routes => Pane::ApiGatewayRoutes,
+                ApiGatewayTab::Users => Pane::ApiGatewayUsers,
+                ApiGatewayTab::Groups => Pane::ApiGatewayGroups,
+                ApiGatewayTab::Domains => Pane::ApiGatewayDomains,
+                ApiGatewayTab::Certificates => Pane::ApiGatewayCertificates,
+                ApiGatewayTab::Oidc => Pane::ApiGatewayOidcs,
+            },
             Service::Dns => match self.dns.focus {
                 ListFocus::Left => Pane::DnsZones,
                 ListFocus::Right => Pane::DnsRecords,
@@ -3074,6 +3142,7 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
+            Service::ApiGateway => self.api_gateway_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
             Service::Secrets => self.secrets_ensure_loaded(),
@@ -3203,6 +3272,52 @@ impl App {
                 let loadable = self.store_result(result);
                 self.managed_resources.items.insert(kind, loadable);
                 self.fill_selection(Pane::ManagedResources);
+            }
+            Message::ApiGatewaySubscriptions { result } => {
+                self.api_gateway.subscriptions = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewaySubscriptions);
+            }
+            Message::ApiGatewayServices { result } => {
+                self.api_gateway.services = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewayServices);
+                self.api_gateway.route_state.select(None);
+                self.api_gateway_ensure_loaded();
+            }
+            Message::ApiGatewayRoutes { service_id, result } => {
+                let loadable = self.store_result(result);
+                self.api_gateway.routes.insert(service_id, loadable);
+                self.fill_selection(Pane::ApiGatewayRoutes);
+            }
+            Message::ApiGatewayUsers { result } => {
+                self.api_gateway.users = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewayUsers);
+                self.api_gateway_ensure_loaded();
+            }
+            Message::ApiGatewayUserAuthentication { user_id, result } => {
+                let loadable = match result {
+                    Ok(item) => Loadable::Ready(item),
+                    Err(err) => {
+                        self.set_status(err.clone(), StatusKind::Error);
+                        Loadable::Failed(err)
+                    }
+                };
+                self.api_gateway.authentications.insert(user_id, loadable);
+            }
+            Message::ApiGatewayGroups { result } => {
+                self.api_gateway.groups = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewayGroups);
+            }
+            Message::ApiGatewayDomains { result } => {
+                self.api_gateway.domains = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewayDomains);
+            }
+            Message::ApiGatewayCertificates { result } => {
+                self.api_gateway.certificates = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewayCertificates);
+            }
+            Message::ApiGatewayOidcs { result } => {
+                self.api_gateway.oidcs = self.store_result(result);
+                self.fill_selection(Pane::ApiGatewayOidcs);
             }
             Message::IamAction { label, result } => match result {
                 Ok(()) => {
@@ -4582,6 +4697,7 @@ impl App {
             | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {}
+            Service::ApiGateway => self.on_key_api_gateway(key),
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
             // 権限画面は一覧を見るだけなので、共通のキーだけで足りる。
@@ -5156,6 +5272,7 @@ impl App {
                     }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&name).await,
+                    Service::ApiGateway => Ok(0),
                     _ => Ok(0),
                 };
                 let _ = tx.send(Message::ZoneCount {
@@ -5193,6 +5310,7 @@ impl App {
             let apprun = self.apprun_client.clone();
             let dedicated = self.dedicated_client.clone();
             let monitoring = self.monitoring_client.clone();
+            let api_gateway = self.api_gateway_client.clone();
             let tx = self.tx.clone();
             let zone = self.zone.clone();
             let year = billing::current_year();
@@ -5257,6 +5375,7 @@ impl App {
                     }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
+                    Service::ApiGateway => api_gateway.list_services().await.map(|v| v.len()),
                     // 件数専用の API が無いものは一覧を引いて数える。
                     Service::Registry => sacloud.list_registries().await.map(|v| v.len()),
                     Service::Dns => sacloud.list_dns_zones().await.map(|v| v.len()),
@@ -5390,6 +5509,7 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::ApiGateway => self.api_gateway.services.ready()?.len(),
             Service::ObjectStorage
             | Service::AiEngine
             | Service::SimpleMq
@@ -5521,16 +5641,8 @@ impl App {
             (None, _) => state.select(Some(0)),
             _ => {}
         }
-        // 絞り込みでレジストリやリポジトリが変わると下位の選択も無効になる。
-        match pane {
-            Pane::Registries => {
-                self.registry.user_state.select(None);
-                self.registry.repository_state.select(None);
-                self.registry.tag_state.select(None);
-            }
-            Pane::Repositories => self.registry.tag_state.select(None),
-            _ => {}
-        }
+        // 同じ行番号でも絞り込み後は別の親項目を指し得るため、子の選択を更新する。
+        self.after_selection_change(pane);
     }
 
     /// 読み込み済みなのに未選択なら先頭を選ぶ。
@@ -5556,6 +5668,32 @@ impl App {
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
             Pane::CloudResources => self.visible_cloud_resources().ready().map_or(0, Vec::len),
             Pane::ManagedResources => self.visible_managed_resources().ready().map_or(0, Vec::len),
+            Pane::ApiGatewaySubscriptions => self
+                .visible_api_gateway_subscriptions()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::ApiGatewayServices => self
+                .visible_api_gateway_services()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::ApiGatewayRoutes => self
+                .visible_api_gateway_routes()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::ApiGatewayUsers => self.visible_api_gateway_users().ready().map_or(0, Vec::len),
+            Pane::ApiGatewayGroups => self
+                .visible_api_gateway_groups()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::ApiGatewayDomains => self
+                .visible_api_gateway_domains()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::ApiGatewayCertificates => self
+                .visible_api_gateway_certificates()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::ApiGatewayOidcs => self.visible_api_gateway_oidcs().ready().map_or(0, Vec::len),
             Pane::Clusters => self.visible_clusters().len(),
             Pane::DedicatedApplications => self
                 .visible_dedicated_applications()
@@ -5611,6 +5749,14 @@ impl App {
             Pane::Switches => Some(&mut self.switch.switch_state),
             Pane::CloudResources => Some(&mut self.cloud_resources.state),
             Pane::ManagedResources => Some(&mut self.managed_resources.state),
+            Pane::ApiGatewaySubscriptions => Some(&mut self.api_gateway.subscription_state),
+            Pane::ApiGatewayServices => Some(&mut self.api_gateway.service_state),
+            Pane::ApiGatewayRoutes => Some(&mut self.api_gateway.route_state),
+            Pane::ApiGatewayUsers => Some(&mut self.api_gateway.user_state),
+            Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
+            Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
+            Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::ApiGatewayOidcs => Some(&mut self.api_gateway.oidc_state),
             Pane::Clusters => Some(&mut self.dedicated.cluster_state),
             Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
             Pane::ScalingGroups => Some(&mut self.dedicated.scaling_group_state),
@@ -5734,6 +5880,26 @@ impl App {
                 .selected_cloud_resource()
                 .map(|resource| resource.id.to_string()),
             Pane::ManagedResources => self.selected_managed_resource().map(|resource| resource.id),
+            Pane::ApiGatewaySubscriptions => self
+                .selected_api_gateway_subscription()
+                .map(|resource| resource.id),
+            Pane::ApiGatewayServices => self
+                .selected_api_gateway_service()
+                .map(|resource| resource.id),
+            Pane::ApiGatewayRoutes => self
+                .selected_api_gateway_route()
+                .map(|resource| resource.id),
+            Pane::ApiGatewayUsers => self.selected_api_gateway_user().map(|resource| resource.id),
+            Pane::ApiGatewayGroups => self
+                .selected_api_gateway_group()
+                .map(|resource| resource.id),
+            Pane::ApiGatewayDomains => self
+                .selected_api_gateway_domain()
+                .map(|resource| resource.id),
+            Pane::ApiGatewayCertificates => self
+                .selected_api_gateway_certificate()
+                .map(|resource| resource.id),
+            Pane::ApiGatewayOidcs => self.selected_api_gateway_oidc().map(|resource| resource.id),
         }
     }
 
@@ -6149,9 +6315,10 @@ impl App {
             AppRunClient::new(&credentials),
             DedicatedClient::new(&credentials),
             MonitoringClient::new(&credentials),
+            ApiGatewayClient::new(&credentials),
         );
-        let (sacloud, apprun, dedicated, monitoring) = match clients {
-            (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+        let (sacloud, apprun, dedicated, monitoring, api_gateway) = match clients {
+            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e)) => (a, b, c, d, e),
             _ => {
                 self.show_error(
                     "クライアントを初期化できませんでした",
@@ -6170,6 +6337,7 @@ impl App {
         self.apprun_client = Arc::new(apprun);
         self.dedicated_client = Arc::new(dedicated);
         self.monitoring_client = Arc::new(monitoring);
+        self.api_gateway_client = Arc::new(api_gateway);
         self.ai_engine_client = None;
         self.credential_source = source;
         self.has_credentials = true;
@@ -6245,6 +6413,7 @@ impl App {
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::ApiGateway => self.api_gateway_refresh(),
             // 複数ペインのサービスは、該当キャッシュを捨てて読み直す。
             Service::Dns => {
                 self.dns.zones = Loadable::Idle;
@@ -6423,6 +6592,7 @@ impl App {
         self.cloud_resources.state.select(None);
         self.managed_resources.items.clear();
         self.managed_resources.state.select(None);
+        self.api_gateway = ApiGatewayView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -6527,6 +6697,13 @@ impl App {
         if pane == Pane::Storages {
             self.monitoring.storage_key_state.select(None);
         }
+        if pane == Pane::ApiGatewayServices {
+            self.api_gateway.route_state.select(None);
+            self.api_gateway_ensure_loaded();
+        }
+        if pane == Pane::ApiGatewayUsers {
+            self.api_gateway_ensure_loaded();
+        }
         if self.service != Service::Registry {
             return;
         }
@@ -6554,10 +6731,13 @@ impl App {
         if !self.require_write() {
             return;
         }
-        let Some((id, name, host)) = self
-            .selected_registry()
-            .map(|registry| (registry.id, registry.name.clone(), registry.host().to_string()))
-        else {
+        let Some((id, name, host)) = self.selected_registry().map(|registry| {
+            (
+                registry.id,
+                registry.name.clone(),
+                registry.host().to_string(),
+            )
+        }) else {
             return;
         };
         self.registry.tab = Tab::Users;
@@ -6584,7 +6764,11 @@ impl App {
         let Some(registry) = self.selected_registry() else {
             return;
         };
-        let (id, name, host) = (registry.id, registry.name.clone(), registry.host().to_string());
+        let (id, name, host) = (
+            registry.id,
+            registry.name.clone(),
+            registry.host().to_string(),
+        );
         let Some(user) = self.selected_user() else {
             self.set_status("編集するユーザーを選択してください", StatusKind::Info);
             return;
@@ -6683,8 +6867,8 @@ impl App {
                         .await
                         .map_err(fmt_error);
                     // パスワードを変更したときだけ、ログイン情報の更新を提案する。
-                    let save_login =
-                        password_for_save.map(|password| (host, RegistryLogin { username, password }));
+                    let save_login = password_for_save
+                        .map(|password| (host, RegistryLogin { username, password }));
                     let _ = tx.send(Message::UserAction {
                         id,
                         label,
@@ -8618,6 +8802,55 @@ mod tests {
             Service::ALL[move_service_category(server, -1)],
             Service::Account
         );
+    }
+
+    #[test]
+    fn api_gateway_is_resolvable_from_service_arg() {
+        assert_eq!(Service::from_arg("api-gateway"), Some(Service::ApiGateway));
+    }
+
+    #[test]
+    fn integration_category_lists_api_gateway_after_workflows() {
+        let names: Vec<&str> = Category::Integration
+            .services()
+            .map(Service::arg_name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "simplemq",
+                "simple-notification",
+                "eventbus",
+                "workflows",
+                "api-gateway"
+            ]
+        );
+    }
+
+    #[test]
+    fn api_gateway_tab_navigation_and_selection_use_hjkl() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        assert_eq!(ApiGatewayTab::ALL[0], ApiGatewayTab::Subscriptions);
+        assert_eq!(ApiGatewayTab::ALL[1], ApiGatewayTab::Services);
+        assert_eq!(ApiGatewayTab::ALL[2], ApiGatewayTab::Routes);
+        assert_eq!(ApiGatewayTab::ALL[3], ApiGatewayTab::Users);
+        assert_eq!(ApiGatewayTab::ALL[4], ApiGatewayTab::Groups);
+        assert_eq!(ApiGatewayTab::ALL[5], ApiGatewayTab::Domains);
+        assert_eq!(ApiGatewayTab::ALL[6], ApiGatewayTab::Certificates);
+        assert_eq!(ApiGatewayTab::ALL[7], ApiGatewayTab::Oidc);
+
+        let mut tab = ApiGatewayTab::Subscriptions;
+        tab = tab.cycled(1);
+        assert_eq!(tab, ApiGatewayTab::Services);
+        tab = tab.cycled(-1);
+        assert_eq!(tab, ApiGatewayTab::Subscriptions);
+        tab = tab.cycled(-1);
+        assert_eq!(tab, ApiGatewayTab::Oidc);
+
+        let right = KeyEvent::from(KeyCode::Char('l'));
+        let left = KeyEvent::from(KeyCode::Char('h'));
+        assert!(matches!(right.code, KeyCode::Char('l')));
+        assert!(matches!(left.code, KeyCode::Char('h')));
     }
 }
 
