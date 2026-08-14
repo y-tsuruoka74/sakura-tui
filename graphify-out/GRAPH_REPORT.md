@@ -1,220 +1,333 @@
-# Graph Report - .  (2026-08-13)
+# Graph Report - sakura-tui  (2026-08-14)
 
 ## Corpus Check
-- Corpus is ~43,048 words - fits in a single context window. You may not need a graph.
+- 44 files · ~80,849 words
+- Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1258 nodes · 3465 edges · 32 communities (29 shown, 3 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 135 edges (avg confidence: 0.8)
+- 1907 nodes · 5928 edges · 57 communities (51 shown, 6 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 210 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
-- Dedicated AppRun Resources
-- Reusable UI Components
-- Container Registry API
-- Shared AppRun Services
-- Sacloud API Models
-- Credential Configuration
-- IaaS Server Control
-- Billing Data Views
-- Account Permissions
+- Configuration and Credentials
+- Managed Resource Operations
+- Sacloud API Client
+- Container Registry Client
+- AppRun Application Flow
+- Overlay UI Components
+- Billing and Summaries
+- Account Authentication Status
+- IaaS Server Management
 - Common Service Resources
-- Application Navigation
-- Architecture and Clients
-- Overlay Dialog Rendering
-- HTTP Retry Runtime
-- Secret Manager
-- Monitoring Data Models
-- Root TUI Layout
-- Credential State Transitions
-- Server UI Workflow
-- Keychain Storage
-- Registry Async Operations
-- Pane Navigation
-- Registry Selection State
-- Loadable View State
-- Profile Form State
-- Registry User Actions
-- Monitoring Client API
-- Monitoring Interactions
-- Registry Form Editing
-- Registry Detail Navigation
-- Rust TUI Dependencies
+- Global Key Routing
+- Dedicated AppRun Resources
+- Application Command Coordination
+- HTTP and Runtime Bootstrap
+- Switch Management
+- Resource Form Models
+- Monitoring Domain Models
+- Observability Resource Selection
+- Keychain Credential Storage
+- Monitoring Key Handlers
+- Monitoring API Operations
+- Secret Manager Resources
+- Registry and IAM Editing
+- Main TUI Rendering
+- Observability Application State
+- Service Catalog Navigation
+- Cloud Resource Parsing
+- Dedicated Resource State
+- Observability Screen Rendering
+- Scoped Resource Filtering
+- Selection and Clipboard Helpers
+- Pane Navigation State
+- Monitoring Storage Forms
+- Paginated Resource Lists
+- Dedicated Screen Rendering
+- Server and Switch Screens
+- Profile Management
+- Registry Detail Rendering
+- Storage Access Keys
+- Billing Screen Rendering
+- Async Application State Machine
+- Secret Vault Interactions
+- Cloud Resource Browser
+- Account Screen Rendering
+- Dashboard Management
+- Simple Monitor Management
+- Managed Resources Browser
+- AppRun Screen Rendering
+- JSON Value Flattening
+- Registry List Rendering
+- Managed Resource Roadmap
+- Monitoring Storage Types
+- Domain Behavior Tests
+- Dimmed Table Styling
+- Package and Local Permissions
+- Storage Credential Concepts
 - Project Overview
 
 ## God Nodes (most connected - your core abstractions)
-1. `App` - 119 edges
-2. `Message` - 44 edges
-3. `accent()` - 37 edges
-4. `Loadable` - 36 edges
-5. `border_style()` - 29 edges
-6. `App` - 26 edges
-7. `ResourceId` - 25 edges
-8. `matches()` - 24 edges
-9. `ProfileForm` - 24 edges
-10. `CredentialSource` - 24 edges
+1. `App` - 148 edges
+2. `App` - 131 edges
+3. `accent()` - 62 edges
+4. `Async Message Bus` - 61 edges
+5. `MonitoringClient` - 56 edges
+6. `Loadable State` - 51 edges
+7. `Overlay dialogs and forms` - 38 edges
+8. `ResourceId` - 37 edges
+9. `CredentialSource` - 35 edges
+10. `border_style()` - 35 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `Loadable Service Cache` --conceptually_related_to--> `Asynchronous Responsive UI`  [INFERRED]
-  src/app/mod.rs → README.md
-- `Dedicated AppRun Read-Only Boundary` --rationale_for--> `Dedicated AppRun Client`  [EXTRACTED]
-  README.md → src/apprun_dedicated.rs
-- `Transient Failure Retry Policy` --rationale_for--> `Retrying HTTP Transport`  [EXTRACTED]
-  README.md → src/http.rs
-- `sakura-tui` --references--> `Service Catalog and Navigation`  [EXTRACTED]
-  README.md → src/app/mod.rs
-- `Read-Only-by-Default Safety` --rationale_for--> `Read-Only Write Guard`  [EXTRACTED]
-  README.md → src/app/mod.rs
+- `Service name summary` --conceptually_related_to--> `Service switching`  [INFERRED]
+  src/main.rs → README.md
+- `Managed services browsing` --rationale_for--> `Managed resources browser`  [EXTRACTED]
+  README.md → src/ui/managed_resources.rs
+- `AI Engine token handling` --conceptually_related_to--> `Overlay dialogs and forms`  [INFERRED]
+  README.md → src/ui/overlay.rs
+- `Overlay dialogs and forms` --conceptually_related_to--> `Read-only mode`  [INFERRED]
+  src/ui/overlay.rs → README.md
+- `Secret manager` --rationale_for--> `Secret vault`  [EXTRACTED]
+  README.md → src/secretmanager.rs
 
 ## Import Cycles
 - 2-file cycle: `src/app/account.rs -> src/app/mod.rs -> src/app/account.rs`
 - 2-file cycle: `src/app/mod.rs -> src/app/server.rs -> src/app/mod.rs`
+- 2-file cycle: `src/app/mod.rs -> src/app/switch.rs -> src/app/mod.rs`
 
 ## Hyperedges (group relationships)
-- **Shared Authenticated HTTP Client Pattern** — src_sacloud_client, src_apprun_client, dedicated_client, src_monitoring_client, src_http_retry_transport, src_config_api_credentials [EXTRACTED 1.00]
-- **Asynchronous TUI Data Flow** — src_main_runtime, app_state_machine, app_message_channel, app_loadable_cache [EXTRACTED 1.00]
-- **Service-Specific View Models** — src_app_account_view, src_app_apprun_view, src_app_dedicated_view, src_app_billing_view, src_app_observability_views, app_state_machine [EXTRACTED 1.00]
-- **Root TUI Composition** — src_ui_mod_root_renderer, src_ui_mod_service_dispatch, src_ui_mod_status_and_hints, src_ui_overlay_overlay_router [EXTRACTED 1.00]
-- **Registry Navigation Flow** — src_ui_registries_registry_list, src_ui_detail_registry_detail, src_ui_detail_repository_tag_drilldown [EXTRACTED 1.00]
-- **Server Control Flow** — src_ui_server_server_console, src_app_server_server_filtering, src_app_server_power_confirmation, src_app_server_power_execution [INFERRED 0.88]
+- **Shared API Transport** — src_http_client, src_http_send_with_retry, src_iam_auth_issue_access_token, src_ai_engine_client, src_apprun_client, src_apprun_dedicated_client [INFERRED 0.92]
+- **Async App State Pipeline** — src_app_mod_state_machine, src_app_mod_message, src_app_mod_loadable, src_app_mod_tx, src_app_mod_pane, src_app_apprun_view, src_app_dedicated_view, src_app_billing_view, src_app_server_view, src_app_observability_view [INFERRED 0.88]
+- **Common Service Item Flow** — src_commonservice_dnszone, src_commonservice_simplemonitor, src_commonservice_update_dns_records, src_commonservice_update_simple_monitor, src_commonservice_set_simple_monitor_enabled [INFERRED 0.84]
+- **UI screen suite** — src_ui_mod_ui, src_ui_account_draw, src_ui_apprun_draw, src_ui_billing_draw, src_ui_cloud_resources_draw, src_ui_dedicated_draw, src_ui_detail_draw, src_ui_managed_resources_draw, src_ui_observability_draw, src_ui_overlay_draw, src_ui_registries_draw, src_ui_server_draw, src_ui_switch_draw [EXTRACTED 0.92]
 
-## Communities (32 total, 3 thin omitted)
+## Communities (57 total, 6 thin omitted)
 
-### Community 0 - "Dedicated AppRun Resources"
+### Community 0 - "Configuration and Credentials"
+Cohesion: 0.05
+Nodes (72): API Credentials, Credential Source, Access Token, IAM Credentials, Path, PathBuf, AiEngineTokenEntry, AiEngineTokenProfile (+64 more)
+
+### Community 1 - "Managed Resource Operations"
+Cohesion: 0.07
+Nodes (60): add_detail(), AiEngineClient, authentication_error_has_a_setup_hint(), capability_text(), format_error(), ignores_entries_without_an_id(), non_empty(), parse_model() (+52 more)
+
+### Community 2 - "Sacloud API Client"
 Cohesion: 0.06
-Nodes (53): App, ChildKind, DedicatedFocus, DedicatedTab, DedicatedView, Application, HashMap, KeyEvent (+45 more)
+Nodes (47): Instant, accepts_null_strings(), ApiError, CachedIamToken, ContainerRegistry, filters_out_other_common_service_items(), FindResponse, flexible_number() (+39 more)
 
-### Community 1 - "Reusable UI Components"
+### Community 3 - "Container Registry Client"
 Cohesion: 0.07
-Nodes (82): Cell, Constraint, Paragraph, Row, draw(), draw_selected(), draw_table(), App (+74 more)
+Nodes (57): HeaderMap, Container registry login, RequestBuilder, Auth challenge, check_status(), digest_header(), entry(), falls_back_to_any_linux() (+49 more)
 
-### Community 2 - "Container Registry API"
-Cohesion: 0.07
-Nodes (52): HeaderMap, Mutex, RequestBuilder, RegistryLogin, Challenge, check_status(), digest_header(), entry() (+44 more)
-
-### Community 3 - "Shared AppRun Services"
+### Community 4 - "AppRun Application Flow"
 Cohesion: 0.06
 Nodes (43): App, AppRunPane, AppRunView, Application, HashMap, KeyEvent, Option, String (+35 more)
 
-### Community 4 - "Sacloud API Models"
-Cohesion: 0.07
-Nodes (40): accepts_null_strings(), ApiError, ContainerRegistry, filters_out_other_common_service_items(), FindResponse, flexible_number(), format_api_error(), formats_api_error_from_json() (+32 more)
+### Community 5 - "Overlay UI Components"
+Cohesion: 0.14
+Nodes (66): Browse-first policy, Fn, AI Engine token handling, Read-only mode, accent(), aligned_padding(), category_picker_line(), centered() (+58 more)
 
-### Community 5 - "Credential Configuration"
-Cohesion: 0.08
-Nodes (37): Path, PathBuf, ApiCredentials, available_credential_sources(), clean_secret(), Config, config_path(), create_keychain_credential() (+29 more)
-
-### Community 6 - "IaaS Server Control"
+### Community 6 - "Billing and Summaries"
 Cohesion: 0.06
-Nodes (38): App, KeyEvent, Option, String, environments_have_distinct_zones(), every_zone_has_a_description(), known_zones_for(), NakedDisk (+30 more)
+Nodes (37): Default, App, BillingFocus, BillingTab, BillingView, current_year(), month_list_is_focused_by_default(), pane_for() (+29 more)
 
-### Community 7 - "Billing Data Views"
-Cohesion: 0.06
-Nodes (35): Default, App, BillingFocus, BillingTab, BillingView, current_year(), month_list_is_focused_by_default(), pane_for() (+27 more)
-
-### Community 8 - "Account Permissions"
+### Community 7 - "Account Authentication Status"
 Cohesion: 0.07
-Nodes (45): Account, AuthStatus, collects_member_errors(), id_to_string(), keeps_unknown_access_raw(), KeyPermission, limit(), Member (+37 more)
+Nodes (46): Account, Auth Status, collects_member_errors(), id_to_string(), keeps_unknown_access_raw(), Key Permission, limit(), Member (+38 more)
+
+### Community 8 - "IaaS Server Management"
+Cohesion: 0.06
+Nodes (38): App, HashMap, KeyEvent, Option, String, Vec, ServerView, Server View (+30 more)
 
 ### Community 9 - "Common Service Resources"
-Cohesion: 0.10
-Nodes (33): accepts_numeric_port(), DnsRecord, DnsZone, FindResponse, has_class(), NakedDns, NakedDnsRecord, NakedDnsSetting (+25 more)
-
-### Community 10 - "Application Navigation"
-Cohesion: 0.06
-Nodes (27): HashSet, Item, Iterator, arg_names_are_unique(), Availability, availability_reason(), Category, category_order_matches_service_order() (+19 more)
-
-### Community 11 - "Architecture and Clients"
-Cohesion: 0.07
-Nodes (42): Loadable Service Cache, Asynchronous Message Channel, Read-Only Write Guard, Service Catalog and Navigation, Application State Machine, Dedicated AppRun Client, Dedicated AppRun Resource Hierarchy, Asynchronous Responsive UI (+34 more)
-
-### Community 12 - "Overlay Dialog Rendering"
-Cohesion: 0.17
-Nodes (38): Fn, accent(), centered(), choice_line(), dialog(), dialog_height(), draw(), draw_confirm() (+30 more)
-
-### Community 13 - "HTTP Retry Runtime"
-Cohesion: 0.09
-Nodes (29): DefaultTerminal, Duration, client(), describe(), is_retryable(), retry_after(), Error, F (+21 more)
-
-### Community 14 - "Secret Manager"
-Cohesion: 0.12
-Nodes (17): Option, PaginatedSecretList, PaginatedVaultList, parses_vault_list(), RawSecret, RawVault, From, Option (+9 more)
-
-### Community 15 - "Monitoring Data Models"
-Cohesion: 0.09
-Nodes (23): accepts_string_ids_in_projects(), accepts_string_ids_in_storages(), ApiError, FlattenValue, flexible_float(), format_api_error(), formats_error_from_detail(), Option<serde_json::Value> (+15 more)
-
-### Community 16 - "Root TUI Layout"
-Cohesion: 0.15
-Nodes (26): credential_badge(), draw(), draw_body(), draw_full_width_error(), draw_header(), draw_hints(), draw_registry(), draw_status() (+18 more)
-
-### Community 17 - "Credential State Transitions"
-Cohesion: 0.16
-Nodes (4): fmt_error(), Error, Into, CredentialSource
-
-### Community 18 - "Server UI Workflow"
 Cohesion: 0.08
-Nodes (29): Asynchronous Server Loading, Server Power Action Confirmation, Asynchronous Power Action Execution, Power State Mismatch Guard, Risky Action Name Verification, Server Search and Selection, Zone-scoped Server View State, API Key Permission Dashboard (+21 more)
+Nodes (43): ConfirmAction, Observability View, accepts_numeric_port(), builds_dns_update_with_settings_hash(), dns_update_body(), DnsRecord, DNS Zone, FindResponse (+35 more)
 
-### Community 19 - "Keychain Storage"
-Cohesion: 0.19
-Nodes (22): availability(), credential_key(), decode_pair(), delete_api_credentials(), delete_password(), deleting_missing_entry_is_ok(), encode_pair(), encodes_pair_in_one_entry() (+14 more)
+### Community 10 - "Global Key Routing"
+Cohesion: 0.07
+Nodes (38): HashSet, AlertRuleFormMode, DnsRecordForm, DnsRecordFormMode, edit_alert_project_form(), edit_alert_rule_form(), edit_dashboard_form(), edit_dns_record_form() (+30 more)
 
-### Community 20 - "Registry Async Operations"
-Cohesion: 0.13
-Nodes (11): Box, copy_to_clipboard(), Loadable<T>, Message, Application, Result, String, T (+3 more)
+### Community 11 - "Dedicated AppRun Resources"
+Cohesion: 0.11
+Nodes (40): api_root(), ApiError, Application, AutoScalingGroup, Certificate, Cluster, DedicatedClient, forbidden_includes_hint() (+32 more)
 
-### Community 21 - "Pane Navigation"
+### Community 12 - "Application Command Coordination"
+Cohesion: 0.11
+Nodes (8): AiEngineTokenForm, App, fmt_error(), IamCredentialForm, Error, Into, SacloudClient, StatusKind
+
+### Community 13 - "HTTP and Runtime Bootstrap"
+Cohesion: 0.06
+Nodes (46): DefaultTerminal, Common completion criteria, Duration, Monitoring suite, Service switching, Simple monitoring, AI Engine Client, List AI Engine Models (+38 more)
+
+### Community 14 - "Switch Management"
+Cohesion: 0.06
+Nodes (31): Switch management, SwitchForm, SwitchFormMode, App, form(), HashMap, KeyEvent, Option (+23 more)
+
+### Community 15 - "Resource Form Models"
+Cohesion: 0.08
+Nodes (20): AlertRuleForm, copy_to_clipboard(), DnsZoneForm, DnsZoneFormMode, LoginForm, LogMeasureRuleForm, LogRoutingForm, MetricsRoutingForm (+12 more)
+
+### Community 16 - "Monitoring Domain Models"
+Cohesion: 0.09
+Nodes (38): accepts_string_ids_in_projects(), accepts_string_ids_in_storages(), AlertHistory, ApiError, format_api_error(), formats_error_from_detail(), LogMeasureRule, LogMeasureRuleInput (+30 more)
+
+### Community 17 - "Observability Resource Selection"
+Cohesion: 0.08
+Nodes (5): App, String, LogRouting, MetricsRouting, NotificationRouting
+
+### Community 18 - "Keychain Credential Storage"
+Cohesion: 0.15
+Nodes (39): ai_engine_key(), availability(), credential_key(), decode_pair(), delete_ai_engine_token(), delete_api_credentials(), delete_iam_private_key(), Delete Named AI Engine Token (+31 more)
+
+### Community 19 - "Monitoring Key Handlers"
+Cohesion: 0.09
+Nodes (7): AlertProjectForm, AlertProjectFormMode, NotificationTargetForm, NotificationTargetFormMode, AlertProject, AlertRule, NotificationTarget
+
+### Community 20 - "Monitoring API Operations"
+Cohesion: 0.15
+Nodes (7): AlertRuleInput, MonitoringClient, parses_log_measure_rule_and_preserves_matcher_json(), parses_log_routing_and_builds_payload(), Client, Method, Result
+
+### Community 21 - "Secret Manager Resources"
+Cohesion: 0.12
+Nodes (19): Secret manager, Vault lister, PaginatedSecretList, PaginatedVaultList, parses_vault_list(), RawSecret, RawVault, From (+11 more)
+
+### Community 22 - "Registry and IAM Editing"
+Cohesion: 0.11
+Nodes (7): credential_messages_survive_epoch_change(), iam_user_form_debug_redacts_password(), IamResourceForm, IamResourceFormMode, IamRoleForm, old_results_are_dropped(), secret_form_debug_redacts_value()
+
+### Community 23 - "Main TUI Rendering"
+Cohesion: 0.14
+Nodes (29): compact_service_area_keeps_all_available_space(), credential_badge(), draw(), draw_body(), draw_full_width_error(), draw_header(), draw_hints(), draw_registry() (+21 more)
+
+### Community 24 - "Observability Application State"
+Cohesion: 0.10
+Nodes (19): TableState, dns_form(), dns_record_from_form(), DnsView, format_match_labels(), ListFocus, monitor_form(), MonitoringTab (+11 more)
+
+### Community 25 - "Service Catalog Navigation"
+Cohesion: 0.10
+Nodes (15): Cloud Resource Kind, Item, Iterator, arg_names_are_unique(), Availability, availability_reason(), Category, category_order_matches_service_order() (+7 more)
+
+### Community 26 - "Cloud Resource Parsing"
 Cohesion: 0.17
-Nodes (5): Filters, ListState, Pane, KeyEvent, SelectableList
+Nodes (21): add_detail(), CloudResource, CloudResourceKind, detail_fields(), find_items(), first_non_empty(), packet_filter_rule_summary(), parse_resource() (+13 more)
 
-### Community 22 - "Registry Selection State"
-Cohesion: 0.21
-Nodes (3): Option, Vec, RegistryUser
-
-### Community 23 - "Loadable View State"
-Cohesion: 0.20
-Nodes (16): AccountView, Loadable, TableState, DnsView, ListFocus, MonitoringView, HashMap, String (+8 more)
-
-### Community 24 - "Profile Form State"
+### Community 27 - "Dedicated Resource State"
 Cohesion: 0.13
-Nodes (6): ApiRootChoice, edit_profile_form(), Mode, ProfileForm, ProfileStorage, Self
+Nodes (10): App, ChildKind, DedicatedFocus, DedicatedTab, DedicatedView, Application, HashMap, KeyEvent (+2 more)
 
-### Community 26 - "Monitoring Client API"
-Cohesion: 0.30
-Nodes (9): MonitoringClient, Paginated, Paginated<T>, Client, F, Result, Self, T (+1 more)
+### Community 28 - "Observability Screen Rendering"
+Cohesion: 0.32
+Nodes (24): Constraint, Row, draw_dashboards(), draw_dns(), draw_histories(), draw_log_measure_rules(), draw_log_routings(), draw_metrics_routings() (+16 more)
 
-### Community 27 - "Monitoring Interactions"
-Cohesion: 0.16
-Nodes (4): App, MonitoringTab, KeyEvent, AlertProject
+### Community 29 - "Scoped Resource Filtering"
+Cohesion: 0.20
+Nodes (6): T, Vec, Loadable State, matches(), Vec, SimpleMonitorView
 
-### Community 28 - "Registry Form Editing"
-Cohesion: 0.47
-Nodes (3): edit_registry_form(), RegistryForm, RegistryFormMode
+### Community 30 - "Selection and Clipboard Helpers"
+Cohesion: 0.22
+Nodes (4): Loadable<T>, T, Vec, TagKey
 
-### Community 29 - "Registry Detail Navigation"
+### Community 31 - "Pane Navigation State"
+Cohesion: 0.17
+Nodes (7): CloudResourcesView, Filters, ListState, Filter Pane Registry, HashMap, SelectableList, Switch View
+
+### Community 32 - "Monitoring Storage Forms"
+Cohesion: 0.11
+Nodes (6): StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm, StorageFormMode, StorageRetentionForm, StorageAccessKey
+
+### Community 33 - "Paginated Resource Lists"
+Cohesion: 0.32
+Nodes (6): Paginated, Paginated<T>, F, T, Vec, storage_ref_id()
+
+### Community 34 - "Dedicated Screen Rendering"
+Cohesion: 0.35
+Nodes (19): Paragraph, AppRun dedicated endpoint, AppRun dedicated screen, draw_applications(), draw_certificates(), draw_clusters(), draw_overview(), draw_scaling_groups() (+11 more)
+
+### Community 35 - "Server and Switch Screens"
+Cohesion: 0.28
+Nodes (15): Server and IaaS browsing, field(), Line, Server screen, draw_detail(), draw_list(), App, Frame (+7 more)
+
+### Community 36 - "Profile Management"
+Cohesion: 0.18
+Nodes (4): ApiRootChoice, edit_profile_form(), ProfileForm, ProfileStorage
+
+### Community 37 - "Registry Detail Rendering"
+Cohesion: 0.40
+Nodes (16): Registry detail screen, draw_images(), draw_overview(), draw_repositories(), draw_tag_detail(), draw_tags(), draw_users(), format_bytes() (+8 more)
+
+### Community 38 - "Storage Access Keys"
+Cohesion: 0.24
+Nodes (7): access_key_secret(), parses_wrapped_access_key_secret(), Debug, Formatter, Monitoring storage, Storage kind, StorageAccessKeySecret
+
+### Community 39 - "Billing Screen Rendering"
+Cohesion: 0.38
+Nodes (10): Billing screen, draw_bills(), draw_details(), draw_summary(), draw_tabs(), App, Frame, Rect (+2 more)
+
+### Community 40 - "Async Application State Machine"
+Cohesion: 0.21
+Nodes (8): Box, Async Message Bus, Mode, Application, Self, App State Machine, Generation-Aware Sender, UnboundedSender
+
+### Community 42 - "Cloud Resource Browser"
+Cohesion: 0.42
+Nodes (9): Managed services browsing, Cloud resources browser, draw_detail(), draw_list(), App, Color, Frame, Rect (+1 more)
+
+### Community 43 - "Account Screen Rendering"
+Cohesion: 0.44
+Nodes (9): Account screen, draw_selected(), draw_table(), App, Frame, Rect, Style, section_style() (+1 more)
+
+### Community 44 - "Dashboard Management"
+Cohesion: 0.25
+Nodes (3): DashboardForm, DashboardFormMode, DashboardProject
+
+### Community 46 - "Managed Resources Browser"
 Cohesion: 0.50
-Nodes (4): Container Registry Detail Pane, Registry Users and Login-aware Images, Repository Tag Drilldown, Container Registry List Pane
+Nodes (8): Managed resources browser, draw_detail(), draw_list(), App, Color, Frame, Rect, status_color()
+
+### Community 47 - "AppRun Screen Rendering"
+Cohesion: 0.75
+Nodes (7): AppRun shared screen, draw_applications(), draw_detail(), draw_versions(), App, Frame, Rect
+
+### Community 48 - "JSON Value Flattening"
+Cohesion: 0.33
+Nodes (5): FlattenValue, flexible_float(), Option<serde_json::Value>, D, Error
+
+### Community 49 - "Registry List Rendering"
+Cohesion: 0.47
+Nodes (5): UI module root, Registry list screen, App, Frame, Rect
+
+### Community 50 - "Managed Resource Roadmap"
+Cohesion: 0.50
+Nodes (4): Future service roadmap, Managed resource lister, Managed resource, Managed resource kind
+
+### Community 52 - "Domain Behavior Tests"
+Cohesion: 0.50
+Nodes (3): Self, rule_payload_omits_disabled_threshold_with_null(), system_storage_does_not_support_access_keys()
+
+### Community 53 - "Dimmed Table Styling"
+Cohesion: 0.67
+Nodes (3): Cell, dim(), String
 
 ## Knowledge Gaps
-- **32 isolated node(s):** `sakura-tui`, `SacloudClient`, `Paginated<T>`, `Sample`, `sakura-tui` (+27 more)
+- **31 isolated node(s):** `sakura-tui`, `SacloudClient`, `Claims`, `Paginated<T>`, `Sample` (+26 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **3 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **6 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Message` connect `Registry Async Operations` to `Dedicated AppRun Resources`, `Container Registry API`, `Shared AppRun Services`, `Sacloud API Models`, `Credential Configuration`, `IaaS Server Control`, `Billing Data Views`, `Account Permissions`, `Common Service Resources`, `Application Navigation`, `Secret Manager`, `Monitoring Data Models`, `Credential State Transitions`, `Registry Selection State`, `Loadable View State`, `Profile Form State`, `Monitoring Interactions`?**
-  _High betweenness centrality (0.173) - this node is a cross-community bridge._
-- **Why does `App` connect `Registry User Actions` to `Dedicated AppRun Resources`, `Container Registry API`, `Shared AppRun Services`, `Credential Configuration`, `IaaS Server Control`, `Billing Data Views`, `Application Navigation`, `Credential State Transitions`, `Registry Async Operations`, `Pane Navigation`, `Registry Selection State`, `Loadable View State`, `Profile Form State`, `Monitoring Client API`?**
-  _High betweenness centrality (0.168) - this node is a cross-community bridge._
-- **Why does `Loadable` connect `Loadable View State` to `Dedicated AppRun Resources`, `Reusable UI Components`, `Shared AppRun Services`, `IaaS Server Control`, `Billing Data Views`, `Application Navigation`, `Secret Manager`, `Registry Async Operations`, `Registry Selection State`, `Registry User Actions`?**
-  _High betweenness centrality (0.085) - this node is a cross-community bridge._
-- **Are the 31 inferred relationships involving `accent()` (e.g. with `draw_table()` and `section_style()`) actually correct?**
-  _`accent()` has 31 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 25 inferred relationships involving `border_style()` (e.g. with `draw_selected()` and `draw_table()`) actually correct?**
-  _`border_style()` has 25 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `sakura-tui`, `SacloudClient`, `Paginated<T>` to the rest of the system?**
-  _32 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `Dedicated AppRun Resources` be split into smaller, more focused modules?**
-  _Cohesion score 0.06241234221598878 - nodes in this community are weakly interconnected._
+- **Why does `Async Message Bus` connect `Async Application State Machine` to `Configuration and Credentials`, `Managed Resource Operations`, `Sacloud API Client`, `Container Registry Client`, `AppRun Application Flow`, `Billing and Summaries`, `Account Authentication Status`, `IaaS Server Management`, `Common Service Resources`, `Global Key Routing`, `Dedicated AppRun Resources`, `Application Command Coordination`, `Switch Management`, `Resource Form Models`, `Monitoring Domain Models`, `Observability Resource Selection`, `Monitoring Key Handlers`, `Secret Manager Resources`, `Service Catalog Navigation`, `Cloud Resource Parsing`, `Scoped Resource Filtering`, `Selection and Clipboard Helpers`, `Monitoring Storage Forms`, `Profile Management`, `Storage Access Keys`, `Dashboard Management`?**
+  _High betweenness centrality (0.222) - this node is a cross-community bridge._
+- **Why does `App` connect `Application Command Coordination` to `Configuration and Credentials`, `Managed Resource Operations`, `Container Registry Client`, `AppRun Application Flow`, `Billing and Summaries`, `Account Authentication Status`, `IaaS Server Management`, `Global Key Routing`, `Dedicated AppRun Resources`, `Switch Management`, `Resource Form Models`, `Monitoring API Operations`, `Registry and IAM Editing`, `Observability Application State`, `Service Catalog Navigation`, `Dedicated Resource State`, `Scoped Resource Filtering`, `Selection and Clipboard Helpers`, `Pane Navigation State`, `Profile Management`, `Async Application State Machine`?**
+  _High betweenness centrality (0.183) - this node is a cross-community bridge._
+- **Why does `CredentialSource` connect `Configuration and Credentials` to `Sacloud API Client`, `Overlay UI Components`, `Async Application State Machine`, `Application Command Coordination`, `HTTP and Runtime Bootstrap`, `Resource Form Models`, `Registry and IAM Editing`, `Main TUI Rendering`?**
+  _High betweenness centrality (0.123) - this node is a cross-community bridge._
+- **Are the 56 inferred relationships involving `accent()` (e.g. with `draw_table()` and `section_style()`) actually correct?**
+  _`accent()` has 56 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `sakura-tui`, `SacloudClient`, `Claims` to the rest of the system?**
+  _31 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `Configuration and Credentials` be split into smaller, more focused modules?**
+  _Cohesion score 0.051833122629582805 - nodes in this community are weakly interconnected._
+- **Should `Managed Resource Operations` be split into smaller, more focused modules?**
+  _Cohesion score 0.06843718079673136 - nodes in this community are weakly interconnected._

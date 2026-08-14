@@ -1,167 +1,266 @@
 {
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/Cargo.toml": {
-    "mtime": 1786615644.7839415,
-    "ast_hash": "5536db0ef85e2f51616fa9660692d332",
-    "semantic_hash": "5536db0ef85e2f51616fa9660692d332"
+    "mtime": 1786664208.0220106,
+    "seen": 1786692054.022936,
+    "ast_hash": "74835ea1e867c18bcc4b3afe13162e44",
+    "semantic_hash": "74835ea1e867c18bcc4b3afe13162e44"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/account.rs": {
-    "mtime": 1786615644.784275,
+    "mtime": 1786614631.8203816,
+    "seen": 1786692054.022938,
     "ast_hash": "059fd14a5215f3b8bc1fd1e18edae2d5",
     "semantic_hash": "059fd14a5215f3b8bc1fd1e18edae2d5"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/account.rs": {
-    "mtime": 1786615644.784476,
+    "mtime": 1786614410.6227846,
+    "seen": 1786692054.02294,
     "ast_hash": "3f406e48a8552c116a36ef735fb31654",
     "semantic_hash": "3f406e48a8552c116a36ef735fb31654"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/apprun.rs": {
-    "mtime": 1786615644.784596,
+    "mtime": 1786519240.1435459,
+    "seen": 1786692054.0229409,
     "ast_hash": "99efbab331a4b22b1e11af2c7b01e1fa",
     "semantic_hash": "99efbab331a4b22b1e11af2c7b01e1fa"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/billing.rs": {
-    "mtime": 1786615644.7847056,
+    "mtime": 1786613817.683235,
+    "seen": 1786692054.0229409,
     "ast_hash": "510446a876d94424469b49db025efb56",
     "semantic_hash": "510446a876d94424469b49db025efb56"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/dedicated.rs": {
-    "mtime": 1786615644.784825,
+    "mtime": 1786606425.2240121,
+    "seen": 1786692054.022942,
     "ast_hash": "5bd5c528b546b7cc1837c073a6b149fa",
     "semantic_hash": "5bd5c528b546b7cc1837c073a6b149fa"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/mod.rs": {
-    "mtime": 1786615644.7852128,
-    "ast_hash": "38623dcfe1c964511462e174b1c2a864",
-    "semantic_hash": "38623dcfe1c964511462e174b1c2a864"
+    "mtime": 1786690611.4859903,
+    "seen": 1786692054.022943,
+    "ast_hash": "5504b41a913cfb8e514f087cec3f141c",
+    "semantic_hash": "5504b41a913cfb8e514f087cec3f141c"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/observability.rs": {
-    "mtime": 1786615644.7853558,
-    "ast_hash": "a0ead8176069938e1abe22bf444fa6c3",
-    "semantic_hash": "a0ead8176069938e1abe22bf444fa6c3"
+    "mtime": 1786664208.0399768,
+    "seen": 1786692054.022943,
+    "ast_hash": "271c5abc3804c75372ac9b7f5b01d491",
+    "semantic_hash": "271c5abc3804c75372ac9b7f5b01d491"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/server.rs": {
-    "mtime": 1786615644.7854888,
+    "mtime": 1786519240.156507,
+    "seen": 1786692054.022944,
     "ast_hash": "2f9dc75d2896420de90fbae1caee49a8",
     "semantic_hash": "2f9dc75d2896420de90fbae1caee49a8"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/apprun.rs": {
-    "mtime": 1786615644.7855995,
+    "mtime": 1786609641.9253678,
+    "seen": 1786692054.0229461,
     "ast_hash": "6911c86797dbf2e109398e78078a1471",
     "semantic_hash": "6911c86797dbf2e109398e78078a1471"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/apprun_dedicated.rs": {
-    "mtime": 1786615644.7857716,
+    "mtime": 1786609641.9258003,
+    "seen": 1786692054.022947,
     "ast_hash": "0c6dd6665b3215d3bb435cd68a8bd9ed",
     "semantic_hash": "0c6dd6665b3215d3bb435cd68a8bd9ed"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/billing.rs": {
-    "mtime": 1786615644.7859309,
+    "mtime": 1786609592.1317043,
+    "seen": 1786692054.022947,
     "ast_hash": "aaeb93f1c30f9ca323b7826a641d43b4",
     "semantic_hash": "aaeb93f1c30f9ca323b7826a641d43b4"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/commonservice.rs": {
-    "mtime": 1786615644.786052,
-    "ast_hash": "97a6aaf28d2d1cdefcc24daffdff7a87",
-    "semantic_hash": "97a6aaf28d2d1cdefcc24daffdff7a87"
+    "mtime": 1786664208.042935,
+    "seen": 1786692054.0229492,
+    "ast_hash": "cf69f12bef3b6decc14b7c89065a172a",
+    "semantic_hash": "cf69f12bef3b6decc14b7c89065a172a"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/config.rs": {
-    "mtime": 1786615644.786257,
-    "ast_hash": "2e91e6ad2f23c58c76427599d010bb3e",
-    "semantic_hash": "2e91e6ad2f23c58c76427599d010bb3e"
+    "mtime": 1786690576.048841,
+    "seen": 1786692054.02295,
+    "ast_hash": "fc61c91c408756a07dfdba61ebb75fd1",
+    "semantic_hash": "fc61c91c408756a07dfdba61ebb75fd1"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/http.rs": {
-    "mtime": 1786615644.786386,
+    "mtime": 1786525757.5954845,
+    "seen": 1786692054.02295,
     "ast_hash": "e183b76276c75e307dc28e147ef1507a",
     "semantic_hash": "e183b76276c75e307dc28e147ef1507a"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/iaas.rs": {
-    "mtime": 1786615644.7865145,
+    "mtime": 1786609091.0952566,
+    "seen": 1786692054.022951,
     "ast_hash": "56af3ed3bfdd9c0fff2139906259d3ea",
     "semantic_hash": "56af3ed3bfdd9c0fff2139906259d3ea"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/keychain.rs": {
-    "mtime": 1786615644.7866452,
-    "ast_hash": "e7e2b5881b9cc57fa9b9eeea0894d646",
-    "semantic_hash": "e7e2b5881b9cc57fa9b9eeea0894d646"
+    "mtime": 1786690557.1291754,
+    "seen": 1786692054.022953,
+    "ast_hash": "31797baf82ccd473e189ec7396c27953",
+    "semantic_hash": "31797baf82ccd473e189ec7396c27953"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/main.rs": {
-    "mtime": 1786615644.7867723,
-    "ast_hash": "fbed9d9f515f3f0940343b126efc4c3f",
-    "semantic_hash": "fbed9d9f515f3f0940343b126efc4c3f"
+    "mtime": 1786664208.0540278,
+    "seen": 1786692054.022954,
+    "ast_hash": "6351a5a5d90982dba7260782416f6c82",
+    "semantic_hash": "6351a5a5d90982dba7260782416f6c82"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/monitoring.rs": {
-    "mtime": 1786615644.7868936,
-    "ast_hash": "7e054110b000d4fca994811efa50d270",
-    "semantic_hash": "7e054110b000d4fca994811efa50d270"
+    "mtime": 1786664208.0566275,
+    "seen": 1786692054.022955,
+    "ast_hash": "58f482b3853e9f4f753dcb9dad6236ba",
+    "semantic_hash": "58f482b3853e9f4f753dcb9dad6236ba"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/registry.rs": {
-    "mtime": 1786615644.7870715,
+    "mtime": 1786527528.0030444,
+    "seen": 1786692054.0229561,
     "ast_hash": "a50a63552ba54abf84c1b21e9f5c4a86",
     "semantic_hash": "a50a63552ba54abf84c1b21e9f5c4a86"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/sacloud.rs": {
-    "mtime": 1786615644.7872236,
-    "ast_hash": "619c43ada5f6a8c3252f6c827b42c5f6",
-    "semantic_hash": "619c43ada5f6a8c3252f6c827b42c5f6"
+    "mtime": 1786664208.059021,
+    "seen": 1786692054.022957,
+    "ast_hash": "05319f9a8fdcf0ad86b614ea50a5deb9",
+    "semantic_hash": "05319f9a8fdcf0ad86b614ea50a5deb9"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/secretmanager.rs": {
-    "mtime": 1786615644.7873652,
-    "ast_hash": "a8d1b80578a12486928c3e2e1ecfb402",
-    "semantic_hash": "a8d1b80578a12486928c3e2e1ecfb402"
+    "mtime": 1786664208.0613902,
+    "seen": 1786692054.022957,
+    "ast_hash": "69f5403ce3da0aeacb6b7bf21ce4bad4",
+    "semantic_hash": "69f5403ce3da0aeacb6b7bf21ce4bad4"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/account.rs": {
-    "mtime": 1786615644.7875059,
-    "ast_hash": "239832cf5f9d627d94e7c81e52d638c0",
-    "semantic_hash": "239832cf5f9d627d94e7c81e52d638c0"
+    "mtime": 1786664208.065448,
+    "seen": 1786692054.022959,
+    "ast_hash": "b42ca9c3d6858fdfcb7f327157c7029b",
+    "semantic_hash": "b42ca9c3d6858fdfcb7f327157c7029b"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/apprun.rs": {
-    "mtime": 1786615644.7876267,
-    "ast_hash": "27a6048f7077dd5e84960b9aa5ed1b93",
-    "semantic_hash": "27a6048f7077dd5e84960b9aa5ed1b93"
+    "mtime": 1786664208.0675447,
+    "seen": 1786692054.0229602,
+    "ast_hash": "10b4976d8a05b1d6511af7b937c1236e",
+    "semantic_hash": "10b4976d8a05b1d6511af7b937c1236e"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/billing.rs": {
-    "mtime": 1786615644.7877202,
-    "ast_hash": "88fe488c0d065924f617d1557410f1e7",
-    "semantic_hash": "88fe488c0d065924f617d1557410f1e7"
+    "mtime": 1786664208.0684998,
+    "seen": 1786692054.0229602,
+    "ast_hash": "5a102c382b72f5b47fe2508b00667000",
+    "semantic_hash": "5a102c382b72f5b47fe2508b00667000"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/dedicated.rs": {
-    "mtime": 1786615644.7878199,
-    "ast_hash": "880d2b82b71a52739000769fc30797c4",
-    "semantic_hash": "880d2b82b71a52739000769fc30797c4"
+    "mtime": 1786664208.0714092,
+    "seen": 1786692054.0229619,
+    "ast_hash": "ba2d3127d05d0dce2b7bc7c81498df00",
+    "semantic_hash": "ba2d3127d05d0dce2b7bc7c81498df00"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/detail.rs": {
-    "mtime": 1786615644.7879696,
-    "ast_hash": "41067458a738d6b49774f1b0bf2947a7",
-    "semantic_hash": "41067458a738d6b49774f1b0bf2947a7"
+    "mtime": 1786664208.0733733,
+    "seen": 1786692054.0229619,
+    "ast_hash": "88f77d439009a37987766cd3c8212934",
+    "semantic_hash": "88f77d439009a37987766cd3c8212934"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/mod.rs": {
-    "mtime": 1786615644.7880888,
-    "ast_hash": "ce685a5965b48f2b037815e7de9a100e",
-    "semantic_hash": "ce685a5965b48f2b037815e7de9a100e"
+    "mtime": 1786664208.0758474,
+    "seen": 1786692054.022964,
+    "ast_hash": "c38b54e8d3296044240500dbe525817b",
+    "semantic_hash": "c38b54e8d3296044240500dbe525817b"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/observability.rs": {
-    "mtime": 1786615644.7882416,
-    "ast_hash": "0f9432ede50ad52592cc32d848067f7f",
-    "semantic_hash": "0f9432ede50ad52592cc32d848067f7f"
+    "mtime": 1786664208.0780098,
+    "seen": 1786692054.022965,
+    "ast_hash": "707a485b6ddae1f341bb4c67ddca3717",
+    "semantic_hash": "707a485b6ddae1f341bb4c67ddca3717"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/overlay.rs": {
-    "mtime": 1786615644.7884278,
-    "ast_hash": "fdf740fd81166d1ed92e9d7046ac1e58",
-    "semantic_hash": "fdf740fd81166d1ed92e9d7046ac1e58"
+    "mtime": 1786690637.6637516,
+    "seen": 1786692054.022965,
+    "ast_hash": "ad3ef327904bf4fc41367b779c04875e",
+    "semantic_hash": "ad3ef327904bf4fc41367b779c04875e"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/registries.rs": {
-    "mtime": 1786615644.7885675,
+    "mtime": 1786537320.1686711,
+    "seen": 1786692054.022966,
     "ast_hash": "b0260b5d9f142cb9fb6149cd9debbe22",
     "semantic_hash": "b0260b5d9f142cb9fb6149cd9debbe22"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/server.rs": {
-    "mtime": 1786615644.7886322,
-    "ast_hash": "67c4e0863aa92ca26831d138e09bc691",
-    "semantic_hash": "67c4e0863aa92ca26831d138e09bc691"
+    "mtime": 1786664208.0801077,
+    "seen": 1786692054.022966,
+    "ast_hash": "b996cc08cb248798bc35ac7d8130dc84",
+    "semantic_hash": "b996cc08cb248798bc35ac7d8130dc84"
   },
   "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/README.md": {
-    "mtime": 1786615644.7841063,
-    "ast_hash": "a1931691345eb091c2b4e360cdc16419",
-    "semantic_hash": "a1931691345eb091c2b4e360cdc16419"
+    "mtime": 1786664208.023813,
+    "seen": 1786692054.022968,
+    "ast_hash": "75479fc50fa15603bbe54c1eac3b987d",
+    "semantic_hash": "75479fc50fa15603bbe54c1eac3b987d"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/.claude/settings.local.json": {
+    "mtime": 1786173965.0906916,
+    "seen": 1786692054.022932,
+    "ast_hash": "3c32d7c2d9570949b8ba7165c6988624",
+    "semantic_hash": "3c32d7c2d9570949b8ba7165c6988624"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ai_engine.rs": {
+    "mtime": 1786664208.036468,
+    "seen": 1786692054.022939,
+    "ast_hash": "50739b1c15ae15c49d6f8e21f27f2191",
+    "semantic_hash": "50739b1c15ae15c49d6f8e21f27f2191"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/app/switch.rs": {
+    "mtime": 1786664208.0402653,
+    "seen": 1786692054.022945,
+    "ast_hash": "5fcc44a39f7d3d5e2f41c61ef85f3569",
+    "semantic_hash": "5fcc44a39f7d3d5e2f41c61ef85f3569"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/cloud_resources.rs": {
+    "mtime": 1786664208.0408542,
+    "seen": 1786692054.022948,
+    "ast_hash": "f2415e243ee0dc605bb565bb59ad409c",
+    "semantic_hash": "f2415e243ee0dc605bb565bb59ad409c"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/iam_auth.rs": {
+    "mtime": 1786664208.046926,
+    "seen": 1786692054.0229518,
+    "ast_hash": "b2bd77850ef270dd661655502fc3da58",
+    "semantic_hash": "b2bd77850ef270dd661655502fc3da58"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/managed_resources.rs": {
+    "mtime": 1786664208.0557904,
+    "seen": 1786692054.022955,
+    "ast_hash": "e17367495404858c4d936d55de6d102f",
+    "semantic_hash": "e17367495404858c4d936d55de6d102f"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/switch.rs": {
+    "mtime": 1786664208.0626347,
+    "seen": 1786692054.022958,
+    "ast_hash": "be643871a5d22aa0ce8e46635bed42db",
+    "semantic_hash": "be643871a5d22aa0ce8e46635bed42db"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/cloud_resources.rs": {
+    "mtime": 1786664208.0696514,
+    "seen": 1786692054.022961,
+    "ast_hash": "14312b93484eb0be02d16814106576b4",
+    "semantic_hash": "14312b93484eb0be02d16814106576b4"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/managed_resources.rs": {
+    "mtime": 1786664208.0739172,
+    "seen": 1786692054.022963,
+    "ast_hash": "8a0e239ac0dee34a4cf64c92c2c19779",
+    "semantic_hash": "8a0e239ac0dee34a4cf64c92c2c19779"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/src/ui/switch.rs": {
+    "mtime": 1786664208.080496,
+    "seen": 1786692054.022967,
+    "ast_hash": "cd5b7b14b1018e807c61dd23ba925683",
+    "semantic_hash": "cd5b7b14b1018e807c61dd23ba925683"
+  },
+  "/Users/y-tsuruoka/Github/github.com/y-tsuruoka74/sakura-tui/docs/ROADMAP.md": {
+    "mtime": 1786664208.0250387,
+    "seen": 1786692054.022969,
+    "ast_hash": "47c9b61b668f08e43a5aaa8d1c1d44cb",
+    "semantic_hash": "47c9b61b668f08e43a5aaa8d1c1d44cb"
   }
 }
