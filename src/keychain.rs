@@ -131,6 +131,23 @@ pub fn delete_api_credentials(name: &str) -> Result<()> {
     delete_password(&legacy_key(name, "secret"))
 }
 
+/// レジストリのユーザーごとにパスワードを分離する（1ホストに複数ユーザーを保存するため）。
+fn registry_user_key(host: &str, username: &str) -> String {
+    format!("@registry-user:{host}:{username}")
+}
+
+pub fn set_registry_user_password(host: &str, username: &str, password: &str) -> Result<()> {
+    set_password(&registry_user_key(host, username), password)
+}
+
+pub fn get_registry_user_password(host: &str, username: &str) -> Result<Option<String>> {
+    get_password(&registry_user_key(host, username))
+}
+
+pub fn delete_registry_user_password(host: &str, username: &str) -> Result<()> {
+    delete_password(&registry_user_key(host, username))
+}
+
 /// クラウドAPIの認証元ごとにIAMサービスプリンシパルの秘密鍵を分離する。
 fn iam_private_key_key(profile_key: &str) -> String {
     format!("@iam-service-principal:{profile_key}")
@@ -268,6 +285,40 @@ mod tests {
             "@ai-engine:prod:batch"
         );
         assert_ne!(ai_engine_key("prod"), credential_key("prod"));
+        assert_eq!(
+            registry_user_key("example.sakuracr.jp", "alice"),
+            "@registry-user:example.sakuracr.jp:alice"
+        );
+    }
+
+    /// レジストリの複数ユーザーを別々に出し入れできること。
+    #[test]
+    fn round_trips_registry_user_passwords() {
+        if skip_if_unavailable() {
+            return;
+        }
+        let host = test_host("registry-users");
+        let _ = delete_registry_user_password(&host, "alice");
+        let _ = delete_registry_user_password(&host, "bob");
+
+        set_registry_user_password(&host, "alice", "a-pass").unwrap();
+        set_registry_user_password(&host, "bob", "b-pass").unwrap();
+        assert_eq!(
+            get_registry_user_password(&host, "alice").unwrap().as_deref(),
+            Some("a-pass")
+        );
+        assert_eq!(
+            get_registry_user_password(&host, "bob").unwrap().as_deref(),
+            Some("b-pass")
+        );
+
+        delete_registry_user_password(&host, "alice").unwrap();
+        assert_eq!(get_registry_user_password(&host, "alice").unwrap(), None);
+        assert_eq!(
+            get_registry_user_password(&host, "bob").unwrap().as_deref(),
+            Some("b-pass")
+        );
+        delete_registry_user_password(&host, "bob").unwrap();
     }
 
     /// 1 項目にまとめて往復できること（確認ダイアログを 1 回で済ませるため）。

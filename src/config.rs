@@ -816,6 +816,10 @@ pub struct Config {
     /// レジストリの FQDN をキーにしたユーザー名。
     #[serde(default)]
     pub registries: BTreeMap<String, RegistryAccount>,
+    /// レジストリごとに保存済みのユーザー名一覧（ログイン時に選ぶため）。
+    /// パスワードはユーザーごとにキーチェーンへ預ける。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub registry_accounts: BTreeMap<String, Vec<String>>,
     /// 認証情報をキーにした見た目の設定。
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileStyle>,
@@ -845,8 +849,12 @@ impl Config {
     }
 
     /// ログイン情報を保存する。パスワードはキーチェーンにだけ書く。
+    ///
+    /// 既定の1件（自動ログインで使う）と、ユーザーごとの1件（ログイン時に
+    /// 選べるようにするため）の両方に書く。
     pub fn save_registry_login(&mut self, host: &str, login: &RegistryLogin) -> Result<PathBuf> {
         crate::keychain::set_password(host, &login.password)?;
+        crate::keychain::set_registry_user_password(host, &login.username, &login.password)?;
         self.registries.insert(
             host.to_string(),
             RegistryAccount {
@@ -854,14 +862,59 @@ impl Config {
                 password: None,
             },
         );
+        let names = self.registry_accounts.entry(host.to_string()).or_default();
+        if !names.contains(&login.username) {
+            names.push(login.username.clone());
+        }
         self.save()
     }
 
-    /// ログイン情報を破棄する。キーチェーンからも消す。
+    /// ログイン時に選べる、保存済みのユーザー名一覧。
+    ///
+    /// 以前のバージョンが保存した「既定の1件」しか無い場合もここに含める。
+    pub fn registry_account_names(&self, host: &str) -> Vec<String> {
+        let mut names = self
+            .registry_accounts
+            .get(host)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(account) = self.registries.get(host)
+            && !names.contains(&account.username)
+        {
+            names.push(account.username.clone());
+        }
+        names
+    }
+
+    /// 指定したユーザー名で保存されているログイン情報を取り出す。
+    pub fn registry_user_login(&self, host: &str, username: &str) -> Option<RegistryLogin> {
+        let password = crate::keychain::get_registry_user_password(host, username)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                // 以前のバージョンが保存した「既定の1件」からの取り出しにも対応する。
+                let account = self.registries.get(host)?;
+                if account.username != username {
+                    return None;
+                }
+                crate::keychain::get_password(host).ok().flatten()
+            })?;
+        Some(RegistryLogin {
+            username: username.to_string(),
+            password,
+        })
+    }
+
+    /// ログイン情報を破棄する。保存済みの全ユーザー分をキーチェーンからも消す。
     pub fn forget_registry_login(&mut self, host: &str) -> Result<bool> {
-        let removed = self.registries.remove(host).is_some();
+        let removed_default = self.registries.remove(host).is_some();
+        let usernames = self.registry_accounts.remove(host).unwrap_or_default();
         // 設定ファイルに項目が無くてもキーチェーンには残っていることがある。
         crate::keychain::delete_password(host)?;
+        for username in &usernames {
+            crate::keychain::delete_registry_user_password(host, username)?;
+        }
+        let removed = removed_default || !usernames.is_empty();
         if removed {
             self.save()?;
         }

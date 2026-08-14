@@ -102,6 +102,9 @@ pub enum Message {
         id: ResourceId,
         label: String,
         result: Result<(), String>,
+        /// 成功時、ログイン情報として保存するか確認するための資格情報
+        /// （ユーザー作成、またはパスワードを変更した更新のときだけ入る）。
+        save_login: Option<(String, RegistryLogin)>,
     },
     Applications(Result<Vec<Application>, String>),
     ApplicationDetail {
@@ -1114,6 +1117,7 @@ pub enum UserFormMode {
 pub struct UserForm {
     pub registry: ResourceId,
     pub registry_name: String,
+    pub registry_host: String,
     pub mode: UserFormMode,
     pub username: String,
     pub password: String,
@@ -2297,6 +2301,10 @@ pub enum ConfirmAction {
     ForgetLogin {
         host: String,
     },
+    SaveRegistryLogin {
+        host: String,
+        login: RegistryLogin,
+    },
     DeleteRegistry {
         id: ResourceId,
         name: String,
@@ -2466,6 +2474,12 @@ pub enum Overlay {
     StorageRetentionForm(StorageRetentionForm),
     StorageAccessKeyForm(StorageAccessKeyForm),
     Login(LoginForm),
+    /// 保存済みのユーザー名から選んでログインする。
+    LoginPicker {
+        host: String,
+        accounts: Vec<String>,
+        index: usize,
+    },
     /// 認証情報（usacloud プロファイル / 環境変数）の切り替え。
     ProfilePicker {
         /// 選択肢と、それぞれの既定ゾーン。
@@ -4267,10 +4281,28 @@ impl App {
                     self.set_status(err, StatusKind::Error);
                 }
             },
-            Message::UserAction { id, label, result } => match result {
+            Message::UserAction {
+                id,
+                label,
+                result,
+                save_login,
+            } => match result {
                 Ok(()) => {
                     self.set_status(format!("{label}しました"), StatusKind::Success);
                     self.load_users(id);
+                    if let Some((host, login)) = save_login {
+                        self.overlay = Some(Overlay::Confirm {
+                            title: "ログイン情報の保存".to_string(),
+                            body: format!(
+                                "ユーザー「{}」をレジストリ「{host}」のログイン情報として保存しますか？\n\
+                                 既存の保存済みログイン情報があれば上書きします。",
+                                login.username
+                            ),
+                            verify: None,
+                            typed: String::new(),
+                            action: ConfirmAction::SaveRegistryLogin { host, login },
+                        });
+                    }
                 }
                 Err(err) => {
                     self.overlay = Some(Overlay::Message {
@@ -6522,9 +6554,9 @@ impl App {
         if !self.require_write() {
             return;
         }
-        let Some((id, name)) = self
+        let Some((id, name, host)) = self
             .selected_registry()
-            .map(|registry| (registry.id, registry.name.clone()))
+            .map(|registry| (registry.id, registry.name.clone(), registry.host().to_string()))
         else {
             return;
         };
@@ -6533,6 +6565,7 @@ impl App {
         self.overlay = Some(Overlay::UserForm(UserForm {
             registry: id,
             registry_name: name,
+            registry_host: host,
             mode: UserFormMode::Add,
             username: String::new(),
             password: String::new(),
@@ -6551,7 +6584,7 @@ impl App {
         let Some(registry) = self.selected_registry() else {
             return;
         };
-        let (id, name) = (registry.id, registry.name.clone());
+        let (id, name, host) = (registry.id, registry.name.clone(), registry.host().to_string());
         let Some(user) = self.selected_user() else {
             self.set_status("編集するユーザーを選択してください", StatusKind::Info);
             return;
@@ -6563,6 +6596,7 @@ impl App {
         self.overlay = Some(Overlay::UserForm(UserForm {
             registry: id,
             registry_name: name,
+            registry_host: host,
             mode: UserFormMode::Edit,
             username: user.username.clone(),
             password: String::new(),
@@ -6617,6 +6651,7 @@ impl App {
                     return;
                 }
                 let label = format!("ユーザー「{}」を追加", form.username);
+                let host = form.registry_host;
                 let (username, password) = (form.username, form.password);
                 self.inflight += 1;
                 tokio::spawn(async move {
@@ -6624,21 +6659,38 @@ impl App {
                         .add_user(id, &username, &password, permission)
                         .await
                         .map_err(fmt_error);
-                    let _ = tx.send(Message::UserAction { id, label, result });
+                    // 作成したユーザーをそのままログイン情報として保存できるよう持ち越す。
+                    let save_login = Some((host, RegistryLogin { username, password }));
+                    let _ = tx.send(Message::UserAction {
+                        id,
+                        label,
+                        result,
+                        save_login,
+                    });
                 });
             }
             UserFormMode::Edit => {
                 let label = format!("ユーザー「{}」を更新", form.username);
+                let host = form.registry_host;
                 let username = form.username;
                 // パスワードが空欄なら現在のパスワードを維持する。
-                let password = (!form.password.is_empty()).then_some(form.password);
+                let new_password = (!form.password.is_empty()).then_some(form.password);
+                let password_for_save = new_password.clone();
                 self.inflight += 1;
                 tokio::spawn(async move {
                     let result = client
-                        .update_user(id, &username, password.as_deref(), permission)
+                        .update_user(id, &username, new_password.as_deref(), permission)
                         .await
                         .map_err(fmt_error);
-                    let _ = tx.send(Message::UserAction { id, label, result });
+                    // パスワードを変更したときだけ、ログイン情報の更新を提案する。
+                    let save_login =
+                        password_for_save.map(|password| (host, RegistryLogin { username, password }));
+                    let _ = tx.send(Message::UserAction {
+                        id,
+                        label,
+                        result,
+                        save_login,
+                    });
                 });
             }
         }
@@ -6661,6 +6713,7 @@ impl App {
                         id: registry,
                         label,
                         result,
+                        save_login: None,
                     });
                 });
                 self.set_status("送信中…", StatusKind::Info);
@@ -6871,6 +6924,24 @@ impl App {
                     ),
                 }
             }
+            ConfirmAction::SaveRegistryLogin { host, login } => {
+                match self.config.save_registry_login(&host, &login) {
+                    Ok(_) => {
+                        // 保存前に一度でもタブを開いていると「試した」印がついたままなので、
+                        // 今保存したばかりの情報で改めて自動ログインを試せるようにする。
+                        self.registry.auto_login_tried.remove(&host);
+                        self.set_status(
+                            format!("{host} のログイン情報を保存しました（パスワードはキーチェーンに保存）"),
+                            StatusKind::Success,
+                        );
+                    }
+                    // 保存できないときに平文へ退避したりはしない。
+                    Err(err) => self.set_status(
+                        format!("ログイン情報を保存できませんでした: {}", fmt_error(err)),
+                        StatusKind::Error,
+                    ),
+                }
+            }
         }
     }
 
@@ -7045,16 +7116,39 @@ impl App {
             );
             return;
         }
-        let saved = self.config.registries.get(&host);
         self.registry.tab = Tab::Images;
         self.registry.focus = Focus::Detail;
-        self.overlay = Some(Overlay::Login(LoginForm {
-            username: saved.map(|a| a.username.clone()).unwrap_or_default(),
-            password: String::new(),
-            save: saved.is_some(),
-            host,
-            field: 0,
-        }));
+        let accounts = self.config.registry_account_names(&host);
+        if accounts.is_empty() {
+            self.overlay = Some(Overlay::Login(LoginForm {
+                username: String::new(),
+                password: String::new(),
+                save: false,
+                host,
+                field: 0,
+            }));
+        } else {
+            self.overlay = Some(Overlay::LoginPicker {
+                host,
+                accounts,
+                index: 0,
+            });
+        }
+    }
+
+    /// 保存済みのユーザー名を選んでログインする。パスワードの取り出しは
+    /// キーチェーンに触るため別スレッドで行う。
+    fn login_with_saved_account(&mut self, host: String, username: String) {
+        // これから試すので、前に「試した」印がついていても関係ない。
+        self.registry.auto_login_tried.insert(host.clone());
+        self.set_status(format!("{host} に接続中…"), StatusKind::Info);
+        let config = self.config.clone();
+        let tx = self.tx.clone();
+        self.inflight += 1;
+        tokio::task::spawn_blocking(move || {
+            let login = config.registry_user_login(&host, &username);
+            let _ = tx.send(Message::SavedLogin { host, login });
+        });
     }
 
     fn confirm_forget_login(&mut self) {
@@ -7605,6 +7699,53 @@ impl App {
                     self.overlay = Some(Overlay::Login(form));
                 }
             },
+            Overlay::LoginPicker {
+                host,
+                accounts,
+                mut index,
+            } => {
+                // 選択肢は保存済みのユーザーに加えて、末尾に「新しく入力する」を1件持つ。
+                let rows = accounts.len() + 1;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {}
+                    KeyCode::Enter if index < accounts.len() => {
+                        let username = accounts[index].clone();
+                        self.login_with_saved_account(host, username);
+                    }
+                    KeyCode::Enter => {
+                        self.overlay = Some(Overlay::Login(LoginForm {
+                            username: String::new(),
+                            password: String::new(),
+                            save: false,
+                            host,
+                            field: 0,
+                        }));
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        index = (index + 1) % rows;
+                        self.overlay = Some(Overlay::LoginPicker {
+                            host,
+                            accounts,
+                            index,
+                        });
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        index = (index + rows - 1) % rows;
+                        self.overlay = Some(Overlay::LoginPicker {
+                            host,
+                            accounts,
+                            index,
+                        });
+                    }
+                    _ => {
+                        self.overlay = Some(Overlay::LoginPicker {
+                            host,
+                            accounts,
+                            index,
+                        });
+                    }
+                }
+            }
         }
     }
 }

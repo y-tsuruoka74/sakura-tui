@@ -66,6 +66,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::StorageRetentionForm(form) => draw_storage_retention_form(frame, form),
         Overlay::StorageAccessKeyForm(form) => draw_storage_access_key_form(frame, form),
         Overlay::Login(form) => draw_login_form(frame, form),
+        Overlay::LoginPicker {
+            host,
+            accounts,
+            index,
+        } => draw_login_picker(frame, host, accounts, *index),
         Overlay::ProfilePicker { sources, index } => {
             draw_profile_picker(frame, app, sources, *index)
         }
@@ -2149,6 +2154,62 @@ fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog("レジストリへログイン", accent())),
+        area,
+    );
+}
+
+/// 保存済みのユーザー名から選ぶログイン画面。末尾に「新しく入力する」を1件追加する。
+fn draw_login_picker(frame: &mut Frame, host: &str, accounts: &[String], index: usize) {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("ホスト  ", Style::default().fg(DIM)),
+            Span::styled(host.to_string(), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::raw(""),
+    ];
+
+    for (i, username) in accounts.iter().enumerate() {
+        let selected = i == index;
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { "▌ " } else { "  " },
+                Style::default().fg(accent()),
+            ),
+            Span::styled(
+                username.clone(),
+                if selected {
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ]));
+    }
+    let entering_new = index == accounts.len();
+    lines.push(Line::from(vec![
+        Span::styled(
+            if entering_new { "▌ " } else { "  " },
+            Style::default().fg(accent()),
+        ),
+        Span::styled(
+            "新しいログイン情報を入力…",
+            if entering_new {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ),
+    ]));
+
+    lines.push(Line::raw(""));
+    lines.push(picker_hint("ログイン"));
+
+    let area = centered(frame, 60, dialog_height(&lines, 60));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("ログイン情報の選択", accent())),
         area,
     );
 }
