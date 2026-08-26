@@ -16,6 +16,7 @@ mod api_gateway;
 mod apprun;
 mod billing;
 mod dedicated;
+mod nosql;
 mod observability;
 mod server;
 mod switch;
@@ -25,6 +26,7 @@ pub use api_gateway::{ApiGatewayTab, ApiGatewayView};
 pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
+pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
     DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
 };
@@ -51,6 +53,7 @@ use crate::monitoring::{
     MonitoringClient, NotificationRouting, NotificationTarget, Publisher, Storage,
     StorageAccessKey, StorageAccessKeySecret, StorageKind,
 };
+use crate::nosql::{NoSqlBackup, NoSqlDatabase, NoSqlNodeHealth, NoSqlParameter, NoSqlStatus};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 use crate::secretmanager::{Secret, Vault};
@@ -95,6 +98,25 @@ pub enum Message {
     },
     ApiGatewayOidcs {
         result: Result<Vec<Oidc>, String>,
+    },
+    NoSqlDatabases {
+        result: Result<Vec<NoSqlDatabase>, String>,
+    },
+    NoSqlStatus {
+        database_id: String,
+        result: Result<NoSqlStatus, String>,
+    },
+    NoSqlNodeHealth {
+        database_id: String,
+        result: Result<NoSqlNodeHealth, String>,
+    },
+    NoSqlBackups {
+        database_id: String,
+        result: Result<Vec<NoSqlBackup>, String>,
+    },
+    NoSqlParameters {
+        database_id: String,
+        result: Result<Vec<NoSqlParameter>, String>,
     },
     IamAction {
         label: String,
@@ -438,6 +460,11 @@ pub enum Pane {
     ApiGatewayDomains,
     ApiGatewayCertificates,
     ApiGatewayOidcs,
+    // NoSQL
+    NoSqlDatabases,
+    NoSqlNodes,
+    NoSqlBackups,
+    NoSqlParameters,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -490,6 +517,17 @@ fn matches(filter: &str, fields: &[&str]) -> bool {
     fields
         .iter()
         .any(|field| field.to_lowercase().contains(&needle))
+}
+
+/// 親に紐づく子リソースのうち、これから読むべきものの ID。
+///
+/// 選択中の親がまだキャッシュに無いか `Idle` のときだけ返すので、
+/// 同じ親に対して何度も読みに行かずに済む。
+fn child_id_to_load<T>(
+    selected_id: Option<String>,
+    cache: &HashMap<String, Loadable<T>>,
+) -> Option<String> {
+    selected_id.filter(|id| cache.get(id).is_none_or(Loadable::is_idle))
 }
 
 fn category_service_indices(category: Category) -> Vec<usize> {
@@ -689,6 +727,7 @@ pub enum Service {
     MobileGateway,
     LocalRouter,
     Database,
+    NoSql,
     Nfs,
     Archive,
     IsoImage,
@@ -718,7 +757,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 37] = [
+    pub const ALL: [Service; 38] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -751,6 +790,7 @@ impl Service {
         Service::Archive,
         Service::IsoImage,
         Service::Database,
+        Service::NoSql,
         Service::Nfs,
         Service::ObjectStorage,
         Service::EnhancedDb,
@@ -954,6 +994,16 @@ impl Service {
                 countable_label: Some("データベース"),
                 count_label: Some("台"),
                 zoned: true,
+            },
+            // 東京第2ゾーン限定のため、ゾーン切り替えの対象にはしない。
+            // 問い合わせ先のゾーンは画面のタイトルに出す。
+            Service::NoSql => ServiceMeta {
+                category: Category::Storage,
+                title: "NoSQL",
+                arg_name: "nosql",
+                countable_label: None,
+                count_label: Some("DB"),
+                zoned: false,
             },
             Service::Nfs => ServiceMeta {
                 category: Category::Storage,
@@ -2642,6 +2692,7 @@ pub struct App {
     pub cloud_resources: CloudResourcesView,
     pub managed_resources: ManagedResourcesView,
     pub api_gateway: ApiGatewayView,
+    pub nosql: NoSqlView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2704,6 +2755,7 @@ impl App {
             cloud_resources: CloudResourcesView::default(),
             managed_resources: ManagedResourcesView::default(),
             api_gateway: ApiGatewayView::default(),
+            nosql: NoSqlView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -2971,6 +3023,12 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => Pane::ManagedResources,
+            Service::NoSql => match self.nosql.tab {
+                NoSqlTab::Databases => Pane::NoSqlDatabases,
+                NoSqlTab::Nodes => Pane::NoSqlNodes,
+                NoSqlTab::Backups => Pane::NoSqlBackups,
+                NoSqlTab::Parameters => Pane::NoSqlParameters,
+            },
             Service::ApiGateway => match self.api_gateway.tab {
                 ApiGatewayTab::Subscriptions => Pane::ApiGatewaySubscriptions,
                 ApiGatewayTab::Services => Pane::ApiGatewayServices,
@@ -3142,6 +3200,7 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
+            Service::NoSql => self.nosql_ensure_loaded(),
             Service::ApiGateway => self.api_gateway_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
             Service::SimpleMonitor => self.monitor_ensure_loaded(),
@@ -3318,6 +3377,44 @@ impl App {
             Message::ApiGatewayOidcs { result } => {
                 self.api_gateway.oidcs = self.store_result(result);
                 self.fill_selection(Pane::ApiGatewayOidcs);
+            }
+            Message::NoSqlDatabases { result } => {
+                self.nosql.databases = self.store_result(result);
+                self.fill_selection(Pane::NoSqlDatabases);
+                // 選択が定まってから、その DB にぶら下がる 4 つを読みに行く。
+                self.nosql_reset_child_selection();
+                self.nosql_ensure_loaded();
+            }
+            Message::NoSqlStatus {
+                database_id,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.nosql.statuses.insert(database_id, loadable);
+                self.fill_selection(Pane::NoSqlNodes);
+            }
+            Message::NoSqlNodeHealth {
+                database_id,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.nosql.healths.insert(database_id, loadable);
+            }
+            Message::NoSqlBackups {
+                database_id,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.nosql.backups.insert(database_id, loadable);
+                self.fill_selection(Pane::NoSqlBackups);
+            }
+            Message::NoSqlParameters {
+                database_id,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.nosql.parameters.insert(database_id, loadable);
+                self.fill_selection(Pane::NoSqlParameters);
             }
             Message::IamAction { label, result } => match result {
                 Ok(()) => {
@@ -4433,7 +4530,8 @@ impl App {
     }
 
     /// 取得結果を `Loadable` に変換しつつ、失敗ならステータス行にも出す。
-    fn store_result<T>(&mut self, result: Result<Vec<T>, String>) -> Loadable<Vec<T>> {
+    /// 一覧に限らず、単体で取ってくるリソースにも使う。
+    fn store_result<T>(&mut self, result: Result<T, String>) -> Loadable<T> {
         match result {
             Ok(items) => Loadable::Ready(items),
             Err(err) => {
@@ -4697,6 +4795,7 @@ impl App {
             | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {}
+            Service::NoSql => self.on_key_nosql(key),
             Service::ApiGateway => self.on_key_api_gateway(key),
             Service::Secrets => self.on_key_secrets(key),
             Service::Monitoring => self.on_key_monitoring(key),
@@ -5375,6 +5474,7 @@ impl App {
                     }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
+                    Service::NoSql => sacloud.list_nosql_databases().await.map(|v| v.len()),
                     Service::ApiGateway => api_gateway.list_services().await.map(|v| v.len()),
                     // 件数専用の API が無いものは一覧を引いて数える。
                     Service::Registry => sacloud.list_registries().await.map(|v| v.len()),
@@ -5509,6 +5609,7 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::NoSql => self.nosql.databases.ready()?.len(),
             Service::ApiGateway => self.api_gateway.services.ready()?.len(),
             Service::ObjectStorage
             | Service::AiEngine
@@ -5693,6 +5794,10 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::NoSqlDatabases => self.visible_nosql_databases().ready().map_or(0, Vec::len),
+            Pane::NoSqlNodes => self.visible_nosql_nodes().ready().map_or(0, Vec::len),
+            Pane::NoSqlBackups => self.visible_nosql_backups().ready().map_or(0, Vec::len),
+            Pane::NoSqlParameters => self.visible_nosql_parameters().ready().map_or(0, Vec::len),
             Pane::ApiGatewayOidcs => self.visible_api_gateway_oidcs().ready().map_or(0, Vec::len),
             Pane::Clusters => self.visible_clusters().len(),
             Pane::DedicatedApplications => self
@@ -5756,6 +5861,10 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::NoSqlDatabases => Some(&mut self.nosql.database_state),
+            Pane::NoSqlNodes => Some(&mut self.nosql.node_state),
+            Pane::NoSqlBackups => Some(&mut self.nosql.backup_state),
+            Pane::NoSqlParameters => Some(&mut self.nosql.parameter_state),
             Pane::ApiGatewayOidcs => Some(&mut self.api_gateway.oidc_state),
             Pane::Clusters => Some(&mut self.dedicated.cluster_state),
             Pane::DedicatedApplications => Some(&mut self.dedicated.application_state),
@@ -5899,6 +6008,13 @@ impl App {
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
                 .map(|resource| resource.id),
+            Pane::NoSqlDatabases => self.selected_nosql_database().map(|resource| resource.id),
+            // ノードは自前のIDを持たないので、所属アプライアンスのIDを渡す。
+            Pane::NoSqlNodes => self
+                .selected_nosql_node()
+                .map(|resource| resource.appliance_id),
+            Pane::NoSqlBackups => self.selected_nosql_backup().map(|resource| resource.id),
+            Pane::NoSqlParameters => self.selected_nosql_parameter().map(|resource| resource.id),
             Pane::ApiGatewayOidcs => self.selected_api_gateway_oidc().map(|resource| resource.id),
         }
     }
@@ -6413,6 +6529,7 @@ impl App {
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::NoSql => self.nosql_refresh(),
             Service::ApiGateway => self.api_gateway_refresh(),
             // 複数ペインのサービスは、該当キャッシュを捨てて読み直す。
             Service::Dns => {
@@ -6593,6 +6710,7 @@ impl App {
         self.managed_resources.items.clear();
         self.managed_resources.state.select(None);
         self.api_gateway = ApiGatewayView::default();
+        self.nosql = NoSqlView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -6703,6 +6821,10 @@ impl App {
         }
         if pane == Pane::ApiGatewayUsers {
             self.api_gateway_ensure_loaded();
+        }
+        if pane == Pane::NoSqlDatabases {
+            self.nosql_reset_child_selection();
+            self.nosql_ensure_loaded();
         }
         if self.service != Service::Registry {
             return;
@@ -8851,6 +8973,41 @@ mod tests {
         let left = KeyEvent::from(KeyCode::Char('h'));
         assert!(matches!(right.code, KeyCode::Char('l')));
         assert!(matches!(left.code, KeyCode::Char('h')));
+    }
+
+    #[test]
+    fn nosql_is_resolvable_from_service_arg() {
+        assert_eq!(Service::from_arg("nosql"), Some(Service::NoSql));
+    }
+
+    /// ストレージ・データ分類の並び。マネージドDB系の隣に置く。
+    #[test]
+    fn storage_category_lists_nosql_after_database() {
+        let names: Vec<&str> = Category::Storage
+            .services()
+            .map(Service::arg_name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "disk",
+                "archive",
+                "iso-image",
+                "database",
+                "nosql",
+                "nfs",
+                "object-storage",
+                "enhanced-db",
+            ]
+        );
+    }
+
+    /// NoSQL は東京第2ゾーン限定のため、ゾーン切り替えの対象にしない。
+    /// ゾーン別件数の集計対象にも入れない。
+    #[test]
+    fn nosql_is_not_zone_scoped() {
+        assert!(!Service::NoSql.is_zoned());
+        assert_eq!(Service::NoSql.countable_label(), None);
     }
 }
 

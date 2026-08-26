@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
-use super::{App, Loadable, Message, Pane, fmt_error, matches};
+use super::{App, Loadable, Message, Pane, child_id_to_load, fmt_error, matches};
 use crate::api_gateway::{
     ApiGatewayGroup, ApiGatewayService, ApiGatewayUser, Certificate, Domain, Oidc, Route,
     Subscription, UserAuthentication,
@@ -76,13 +76,6 @@ pub struct ApiGatewayView {
     pub certificate_state: TableState,
     pub oidcs: Loadable<Vec<Oidc>>,
     pub oidc_state: TableState,
-}
-
-fn child_id_to_load<T>(
-    selected_id: Option<String>,
-    cache: &HashMap<String, Loadable<T>>,
-) -> Option<String> {
-    selected_id.filter(|id| cache.get(id).is_none_or(Loadable::is_idle))
 }
 
 impl App {

@@ -8,6 +8,7 @@ mod cloud_resources;
 mod dedicated;
 mod detail;
 mod managed_resources;
+mod nosql;
 mod observability;
 mod overlay;
 mod registries;
@@ -244,6 +245,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Registry => draw_registry(frame, area, app),
         Service::AppRun => apprun::draw(frame, area, app),
         Service::ApiGateway => api_gateway::draw(frame, area, app),
+        Service::NoSql => nosql::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
@@ -415,6 +417,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         }
         Service::Dedicated => hints.push("Tab タブ"),
         Service::ApiGateway => hints.push("←→/hl タブ"),
+        Service::NoSql => hints.push("←→/hl タブ"),
         Service::Dns => {
             hints.push(if app.dns.focus == crate::app::ListFocus::Left {
                 "Enter レコードへ"
