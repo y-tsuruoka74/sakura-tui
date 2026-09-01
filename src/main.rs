@@ -19,6 +19,7 @@ mod iam_auth;
 mod keychain;
 mod managed_resources;
 mod monitoring;
+mod networking_suite;
 mod nosql;
 mod registry;
 mod sacloud;

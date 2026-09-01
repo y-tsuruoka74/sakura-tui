@@ -9,6 +9,7 @@ mod cloudhsm;
 mod dedicated;
 mod detail;
 mod managed_resources;
+mod networking_suite;
 mod nosql;
 mod observability;
 mod overlay;
@@ -252,6 +253,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Seg => seg::draw(frame, area, app),
         Service::SecurityControl => security_control::draw(frame, area, app),
         Service::CloudHsm => cloudhsm::draw(frame, area, app),
+        Service::NetworkingSuite => networking_suite::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
@@ -428,6 +430,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Service::Seg => hints.push("←→/hl タブ"),
         Service::SecurityControl => hints.push("←→/hl タブ"),
         Service::CloudHsm => hints.push("←→/hl タブ"),
+        Service::NetworkingSuite => hints.push("←→/hl タブ"),
         Service::Dns => {
             hints.push(if app.dns.focus == crate::app::ListFocus::Left {
                 "Enter レコードへ"

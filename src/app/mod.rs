@@ -17,6 +17,7 @@ mod apprun;
 mod billing;
 mod cloudhsm;
 mod dedicated;
+mod networking_suite;
 mod nosql;
 mod observability;
 mod security_control;
@@ -30,6 +31,7 @@ pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use cloudhsm::{CloudHsmTab, CloudHsmView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
+pub use networking_suite::{NetworkingSuiteTab, NetworkingSuiteView};
 pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
     DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
@@ -60,6 +62,7 @@ use crate::monitoring::{
     MonitoringClient, NotificationRouting, NotificationTarget, Publisher, Storage,
     StorageAccessKey, StorageAccessKeySecret, StorageKind,
 };
+use crate::networking_suite::{Subnet, SubnetAddress, SubnetGroup};
 use crate::nosql::{NoSqlBackup, NoSqlDatabase, NoSqlNodeHealth, NoSqlParameter, NoSqlStatus};
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
@@ -155,6 +158,17 @@ pub enum Message {
     CloudHsmDocuments {
         license_id: String,
         result: Result<Vec<CloudHsmDocument>, String>,
+    },
+    NetworkingSuiteGroups {
+        result: Result<Vec<SubnetGroup>, String>,
+    },
+    NetworkingSuiteSubnets {
+        group_srn: String,
+        result: Result<Vec<Subnet>, String>,
+    },
+    NetworkingSuiteAddresses {
+        subnet_srn: String,
+        result: Result<Vec<SubnetAddress>, String>,
     },
     IamAction {
         label: String,
@@ -514,6 +528,10 @@ pub enum Pane {
     CloudHsmClients,
     CloudHsmLicenses,
     CloudHsmDocuments,
+    // ネットワークスイート (CR)
+    NetworkingSuiteGroups,
+    NetworkingSuiteSubnets,
+    NetworkingSuiteAddresses,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -776,6 +794,7 @@ pub enum Service {
     MobileGateway,
     LocalRouter,
     Seg,
+    NetworkingSuite,
     Database,
     NoSql,
     Nfs,
@@ -810,7 +829,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 42] = [
+    pub const ALL: [Service; 43] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -838,6 +857,7 @@ impl Service {
         Service::LocalRouter,
         Service::Dns,
         Service::Seg,
+        Service::NetworkingSuite,
         Service::WebAccel,
         // ストレージ・データ
         Service::Disk,
@@ -1133,6 +1153,16 @@ impl Service {
                 countable_label: Some("ゲートウェイ"),
                 count_label: Some("台"),
                 zoned: true,
+            },
+            // 受付ゾーンが is1c 固定なので、ゾーン切り替えの対象にはしない。
+            // 問い合わせ先のゾーンは画面のタイトルに出す。
+            Service::NetworkingSuite => ServiceMeta {
+                category: Category::Network,
+                title: "ネットワークスイート",
+                arg_name: "networking-suite",
+                countable_label: None,
+                count_label: Some("グループ"),
+                zoned: false,
             },
             Service::Secrets => ServiceMeta {
                 category: Category::Security,
@@ -2787,6 +2817,7 @@ pub struct App {
     pub seg: SegView,
     pub security_control: SecurityControlView,
     pub cloudhsm: CloudHsmView,
+    pub networking_suite: NetworkingSuiteView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2853,6 +2884,7 @@ impl App {
             seg: SegView::default(),
             security_control: SecurityControlView::default(),
             cloudhsm: CloudHsmView::default(),
+            networking_suite: NetworkingSuiteView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -3122,6 +3154,11 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb
             | Service::AutoBackup => Pane::ManagedResources,
+            Service::NetworkingSuite => match self.networking_suite.tab {
+                NetworkingSuiteTab::Groups => Pane::NetworkingSuiteGroups,
+                NetworkingSuiteTab::Subnets => Pane::NetworkingSuiteSubnets,
+                NetworkingSuiteTab::Addresses => Pane::NetworkingSuiteAddresses,
+            },
             Service::CloudHsm => match self.cloudhsm.tab {
                 CloudHsmTab::Hsms => Pane::CloudHsmHsms,
                 CloudHsmTab::Clients => Pane::CloudHsmClients,
@@ -3314,6 +3351,7 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb
             | Service::AutoBackup => self.managed_resources_ensure_loaded(),
+            Service::NetworkingSuite => self.networking_suite_ensure_loaded(),
             Service::CloudHsm => self.cloudhsm_ensure_loaded(),
             Service::SecurityControl => self.security_control_ensure_loaded(),
             Service::Seg => self.seg_ensure_loaded(),
@@ -3532,6 +3570,25 @@ impl App {
                 let loadable = self.store_result(result);
                 self.nosql.parameters.insert(database_id, loadable);
                 self.fill_selection(Pane::NoSqlParameters);
+            }
+            Message::NetworkingSuiteGroups { result } => {
+                self.networking_suite.groups = self.store_result(result);
+                self.fill_selection(Pane::NetworkingSuiteGroups);
+                self.networking_suite.subnet_state.select(None);
+                self.networking_suite.address_state.select(None);
+                self.networking_suite_ensure_loaded();
+            }
+            Message::NetworkingSuiteSubnets { group_srn, result } => {
+                let loadable = self.store_result(result);
+                self.networking_suite.subnets.insert(group_srn, loadable);
+                self.fill_selection(Pane::NetworkingSuiteSubnets);
+                self.networking_suite.address_state.select(None);
+                self.networking_suite_ensure_loaded();
+            }
+            Message::NetworkingSuiteAddresses { subnet_srn, result } => {
+                let loadable = self.store_result(result);
+                self.networking_suite.addresses.insert(subnet_srn, loadable);
+                self.fill_selection(Pane::NetworkingSuiteAddresses);
             }
             Message::CloudHsmHsms { zone, result } => {
                 let loadable = self.store_result(result);
@@ -4954,6 +5011,7 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb
             | Service::AutoBackup => {}
+            Service::NetworkingSuite => self.on_key_networking_suite(key),
             Service::CloudHsm => self.on_key_cloudhsm(key),
             Service::SecurityControl => self.on_key_security_control(key),
             Service::Seg => self.on_key_seg(key),
@@ -5642,6 +5700,7 @@ impl App {
                         sacloud.list_evaluation_rules().await.map(|v| v.len())
                     }
                     Service::CloudHsm => sacloud.list_cloudhsms(&zone).await.map(|v| v.len()),
+                    Service::NetworkingSuite => sacloud.list_subnet_groups().await.map(|v| v.len()),
                     Service::Seg => sacloud.list_segs(&zone).await.map(|v| v.len()),
                     Service::NoSql => sacloud.list_nosql_databases().await.map(|v| v.len()),
                     Service::ApiGateway => api_gateway.list_services().await.map(|v| v.len()),
@@ -5783,6 +5842,7 @@ impl App {
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
             Service::CloudHsm => self.cloudhsm.hsms.get(&self.zone)?.ready()?.len(),
+            Service::NetworkingSuite => self.networking_suite.groups.ready()?.len(),
             Service::SecurityControl => self.security_control.rules.ready()?.len(),
             Service::Seg => self.seg.gateways.get(&self.zone)?.ready()?.len(),
             Service::NoSql => self.nosql.databases.ready()?.len(),
@@ -5972,6 +6032,18 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::NetworkingSuiteGroups => self
+                .visible_networking_suite_groups()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::NetworkingSuiteSubnets => self
+                .visible_networking_suite_subnets()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::NetworkingSuiteAddresses => self
+                .visible_networking_suite_addresses()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::CloudHsmHsms => self.visible_cloudhsm_hsms().ready().map_or(0, Vec::len),
             Pane::CloudHsmClients => self.visible_cloudhsm_clients().ready().map_or(0, Vec::len),
             Pane::CloudHsmLicenses => self.visible_cloudhsm_licenses().ready().map_or(0, Vec::len),
@@ -6056,6 +6128,9 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::NetworkingSuiteGroups => Some(&mut self.networking_suite.group_state),
+            Pane::NetworkingSuiteSubnets => Some(&mut self.networking_suite.subnet_state),
+            Pane::NetworkingSuiteAddresses => Some(&mut self.networking_suite.address_state),
             Pane::CloudHsmHsms => Some(&mut self.cloudhsm.hsm_state),
             Pane::CloudHsmClients => Some(&mut self.cloudhsm.client_state),
             Pane::CloudHsmLicenses => Some(&mut self.cloudhsm.license_state),
@@ -6211,6 +6286,16 @@ impl App {
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
                 .map(|resource| resource.id),
+            // 数値IDのフィールドが無いので、参照に使う SRN をそのまま渡す。
+            Pane::NetworkingSuiteGroups => self
+                .selected_networking_suite_group()
+                .map(|resource| resource.srn),
+            Pane::NetworkingSuiteSubnets => self
+                .selected_networking_suite_subnet()
+                .map(|resource| resource.srn),
+            Pane::NetworkingSuiteAddresses => self
+                .selected_networking_suite_address()
+                .map(|resource| resource.srn),
             Pane::CloudHsmHsms => self.selected_cloudhsm_hsm().map(|resource| resource.id),
             Pane::CloudHsmClients => self.selected_cloudhsm_client().map(|resource| resource.id),
             Pane::CloudHsmLicenses => self.selected_cloudhsm_license().map(|resource| resource.id),
@@ -6751,6 +6836,7 @@ impl App {
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::NetworkingSuite => self.networking_suite_refresh(),
             Service::CloudHsm => self.cloudhsm_refresh(),
             Service::SecurityControl => self.security_control_refresh(),
             Service::Seg => self.seg_refresh(),
@@ -6939,6 +7025,7 @@ impl App {
         self.seg = SegView::default();
         self.security_control = SecurityControlView::default();
         self.cloudhsm = CloudHsmView::default();
+        self.networking_suite = NetworkingSuiteView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -7062,6 +7149,15 @@ impl App {
         if pane == Pane::CloudHsmHsms {
             self.cloudhsm.client_state.select(None);
             self.cloudhsm_ensure_loaded();
+        }
+        if pane == Pane::NetworkingSuiteGroups {
+            self.networking_suite.subnet_state.select(None);
+            self.networking_suite.address_state.select(None);
+            self.networking_suite_ensure_loaded();
+        }
+        if pane == Pane::NetworkingSuiteSubnets {
+            self.networking_suite.address_state.select(None);
+            self.networking_suite_ensure_loaded();
         }
         if pane == Pane::CloudHsmLicenses {
             self.cloudhsm.document_state.select(None);
@@ -9279,9 +9375,25 @@ mod tests {
                 "local-router",
                 "dns",
                 "seg",
+                "networking-suite",
                 "webaccel",
             ]
         );
+    }
+
+    #[test]
+    fn networking_suite_is_resolvable_from_service_arg() {
+        assert_eq!(
+            Service::from_arg("networking-suite"),
+            Some(Service::NetworkingSuite)
+        );
+    }
+
+    /// 受付ゾーンが is1c 固定なので、ゾーン切り替えの対象にしない。
+    #[test]
+    fn networking_suite_is_not_zone_scoped() {
+        assert!(!Service::NetworkingSuite.is_zoned());
+        assert_eq!(Service::NetworkingSuite.countable_label(), None);
     }
 
     /// SEG は全ゾーンで提供されるので、ゾーン切り替えとゾーン別件数の対象。
