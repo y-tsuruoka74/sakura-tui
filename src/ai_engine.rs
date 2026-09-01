@@ -33,6 +33,56 @@ impl AiEngineClient {
         parse_models(&text)
     }
 
+    /// Bearer 認証で multipart を送る。
+    ///
+    /// RAGのアップロードは `multipart/form-data` が主たる形式。
+    /// 再送すると同じファイルを二重に登録しかねないので、リトライは挟まない。
+    pub(crate) async fn post_multipart(
+        &self,
+        path: &str,
+        form: reqwest::multipart::Form,
+    ) -> Result<String> {
+        let url = reqwest::Url::parse(&format!("{API_ROOT}{path}"))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .multipart(form)
+            .send()
+            .await
+            .context("AI Engine APIへのアップロードに失敗しました")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("AI Engine APIレスポンスの読み取りに失敗しました")?;
+        if !status.is_success() {
+            bail!("{}", format_error(status, &text));
+        }
+        Ok(text)
+    }
+
+    /// Bearer 認証で DELETE する。成功時は本文が無い（204）。
+    pub(crate) async fn delete(&self, path: &str) -> Result<()> {
+        let url = reqwest::Url::parse(&format!("{API_ROOT}{path}"))?;
+        let response = crate::http::send_with_retry(&self.http, || {
+            Ok(self
+                .http
+                .request(Method::DELETE, url.clone())
+                .bearer_auth(&self.token)
+                .build()?)
+        })
+        .await
+        .context("AI Engine APIへの削除リクエストに失敗しました")?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = response.text().await.unwrap_or_default();
+        bail!("{}", format_error(status, &text))
+    }
+
     /// Bearer 認証で GET して本文をそのまま返す。
     ///
     /// モデル一覧と RAG は同じホスト・同じトークンなので、送受信をここへ寄せる。

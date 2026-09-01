@@ -14,7 +14,7 @@ use crate::app::{
     IamResourceFormMode, IamRoleForm, LogMeasureRuleForm, LogMeasureRuleFormMode, LogRoutingForm,
     LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
     NotificationRoutingForm, NotificationRoutingFormMode, NotificationTargetForm,
-    NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage, RegistryForm,
+    NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage, RagUploadForm, RegistryForm,
     RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm, SimpleMonitorFormMode,
     StatusKind, StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm, StorageFormMode,
     StorageRetentionForm, SwitchForm, SwitchFormMode, UserForm, UserFormMode, VaultForm,
@@ -49,6 +49,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::IamResourceForm(form) => draw_iam_resource_form(frame, form),
         Overlay::IamRoleForm(form) => draw_iam_role_form(frame, form),
         Overlay::SwitchForm(form) => draw_switch_form(frame, form),
+        Overlay::RagUploadForm(form) => draw_rag_upload_form(frame, form),
         Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
         Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),
         Overlay::SimpleMonitorForm(form) => draw_simple_monitor_form(frame, form),
@@ -1376,6 +1377,44 @@ fn draw_switch_form(frame: &mut Frame, form: &SwitchForm) {
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+fn draw_rag_upload_form(frame: &mut Frame, form: &RagUploadForm) {
+    let mut lines: Vec<Line> = RagUploadForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "名前を省くとファイル名が使われます。モデルと分割サイズを空にすると既定値になります。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "取り込みには時間がかかります。状態は一覧で確認してください。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" アップロード   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 76, dialog_height(&lines, 76));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("ドキュメントのアップロード", accent())),
         area,
     );
 }

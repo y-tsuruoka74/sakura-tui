@@ -12,9 +12,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    App, Loadable, ManagedResourceKind, Message, Pane, child_id_to_load, fmt_error, matches,
+    App, ConfirmAction, Loadable, ManagedResourceKind, Message, Overlay, Pane, RagUploadForm,
+    StatusKind, child_id_to_load, fmt_error, matches,
 };
-use crate::ai_rag::{RagChunk, RagDocument};
+use crate::ai_rag::{RagChunk, RagDocument, RagUpload};
 
 /// トークン未設定のときの案内。モデル一覧側と同じ文言に揃える。
 const TOKEN_REQUIRED: &str = "AI Engineには専用のアカウントトークンが必要です";
@@ -182,8 +183,92 @@ impl App {
             KeyCode::Char('J') => self.scroll_ai_engine_chunks(1),
             KeyCode::Char('K') => self.scroll_ai_engine_chunks(-1),
             KeyCode::Char('t') => self.open_ai_engine_token_form(),
+            // 書き込み系はドキュメントタブでだけ受ける。
+            KeyCode::Char('n') if self.ai_engine.tab == AiEngineTab::Documents => {
+                self.open_rag_upload_form()
+            }
+            KeyCode::Char('d') if self.ai_engine.tab == AiEngineTab::Documents => {
+                self.confirm_delete_rag_document()
+            }
             _ => {}
         }
+    }
+
+    fn open_rag_upload_form(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        if self.ai_engine_client.is_none() {
+            self.set_status(TOKEN_REQUIRED, StatusKind::Error);
+            return;
+        }
+        self.overlay = Some(Overlay::RagUploadForm(RagUploadForm::default()));
+    }
+
+    pub(super) fn submit_rag_upload_form(&mut self, form: RagUploadForm) {
+        let path = form.path.trim().to_string();
+        if path.is_empty() {
+            self.overlay = Some(Overlay::RagUploadForm(form));
+            self.set_status("ファイルのパスを入力してください", StatusKind::Error);
+            return;
+        }
+        let Some(client) = self.ai_engine_client.clone() else {
+            self.set_status(TOKEN_REQUIRED, StatusKind::Error);
+            return;
+        };
+        let input = RagUpload {
+            path,
+            name: form.name.trim().to_string(),
+            tags: form.tag_list(),
+            model: form.model.trim().to_string(),
+            chunk_size: form.chunk_size.trim().to_string(),
+        };
+        self.overlay = None;
+        self.set_status("アップロードしています…", StatusKind::Info);
+        self.inflight += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.upload_rag_document(input).await.map_err(fmt_error);
+            let _ = tx.send(Message::RagDocumentUploaded { result });
+        });
+    }
+
+    fn confirm_delete_rag_document(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(document) = self.selected_ai_engine_document() else {
+            self.set_status("削除するドキュメントを選んでください", StatusKind::Error);
+            return;
+        };
+        // 取り返しがつかないので、名前の入力を要求する。
+        self.overlay = Some(Overlay::Confirm {
+            title: "ドキュメントの削除".to_string(),
+            body: format!(
+                "ドキュメント「{}」を削除します。チャンクも一緒に消え、元に戻せません。\n\
+                 実行するには名前を入力してください。",
+                document.name
+            ),
+            verify: Some(document.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteRagDocument {
+                id: document.id,
+                name: document.name,
+            },
+        });
+    }
+
+    pub(super) fn run_delete_rag_document(&mut self, id: String, name: String) {
+        let Some(client) = self.ai_engine_client.clone() else {
+            self.set_status(TOKEN_REQUIRED, StatusKind::Error);
+            return;
+        };
+        self.inflight += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.delete_rag_document(&id).await.map_err(fmt_error);
+            let _ = tx.send(Message::RagDocumentDeleted { name, result });
+        });
     }
 
     fn cycle_ai_engine_tab(&mut self, delta: i32) {
@@ -237,5 +322,39 @@ mod tests {
     #[test]
     fn default_tab_is_the_model_list() {
         assert_eq!(AiEngineTab::default(), AiEngineTab::Models);
+    }
+
+    /// タグはカンマ区切りで受け、空要素と前後の空白は捨てる。
+    #[test]
+    fn upload_form_splits_tags() {
+        let form = RagUploadForm {
+            tags: " manual , ja ,, ".to_string(),
+            ..RagUploadForm::default()
+        };
+        assert_eq!(form.tag_list(), vec!["manual", "ja"]);
+
+        // 未入力ならタグ無しで送る。
+        assert!(RagUploadForm::default().tag_list().is_empty());
+    }
+
+    /// 入力欄の並びとラベルを固定する。value の対応がずれると別の値を送ってしまう。
+    #[test]
+    fn upload_form_fields_match_their_labels() {
+        let form = RagUploadForm {
+            path: "/tmp/a.txt".to_string(),
+            name: "名前".to_string(),
+            tags: "t".to_string(),
+            model: "m".to_string(),
+            chunk_size: "512".to_string(),
+            field: 0,
+        };
+        assert_eq!(RagUploadForm::LABELS.len(), 5);
+        assert_eq!(form.value(0), "/tmp/a.txt");
+        assert_eq!(form.value(1), "名前");
+        assert_eq!(form.value(2), "t");
+        assert_eq!(form.value(3), "m");
+        assert_eq!(form.value(4), "512");
+        // 範囲外は空文字。描画側で落ちないようにする。
+        assert_eq!(form.value(5), "");
     }
 }

@@ -60,6 +60,16 @@ impl RagDocument {
     }
 }
 
+/// アップロードの入力。空の項目はサービス側の既定に任せる。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RagUpload {
+    pub path: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub model: String,
+    pub chunk_size: String,
+}
+
 /// ドキュメントを分割したチャンク 1 件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RagChunk {
@@ -237,6 +247,47 @@ impl AiEngineClient {
             }
         }
         Ok(out)
+    }
+
+    /// ドキュメントをアップロードする。
+    ///
+    /// `name` を空にするとファイル名が使われる。`model` と `chunk_size` も
+    /// 空ならサービス側の既定値になるので、送らずに任せる。
+    pub async fn upload_rag_document(&self, input: RagUpload) -> Result<RagDocument> {
+        use anyhow::Context;
+        let bytes = std::fs::read(&input.path)
+            .with_context(|| format!("ファイルを読めませんでした: {}", input.path))?;
+        let file_name = std::path::Path::new(&input.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "document".to_string());
+
+        let mut form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(bytes).file_name(file_name),
+        );
+        if !input.name.is_empty() {
+            form = form.text("name", input.name);
+        }
+        if !input.model.is_empty() {
+            form = form.text("model", input.model);
+        }
+        if !input.chunk_size.is_empty() {
+            form = form.text("chunk_size", input.chunk_size);
+        }
+        // タグは配列なので、同じキーを繰り返して送る。
+        for tag in input.tags {
+            form = form.text("tags", tag);
+        }
+
+        let text = self.post_multipart("/v1/documents/upload/", form).await?;
+        let raw: RawDocument = parse_json(&text)?;
+        Ok(RagDocument::from(raw))
+    }
+
+    /// ドキュメントを削除する。取り返しがつかない。
+    pub async fn delete_rag_document(&self, document_id: &str) -> Result<()> {
+        self.delete(&format!("/v1/documents/{document_id}/")).await
     }
 
     /// 指定ドキュメントのチャンク一覧。

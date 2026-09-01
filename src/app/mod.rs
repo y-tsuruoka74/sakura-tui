@@ -180,6 +180,13 @@ pub enum Message {
         document_id: String,
         result: Result<Vec<RagChunk>, String>,
     },
+    RagDocumentUploaded {
+        result: Result<RagDocument, String>,
+    },
+    RagDocumentDeleted {
+        name: String,
+        result: Result<(), String>,
+    },
     IamAction {
         label: String,
         result: Result<(), String>,
@@ -1814,6 +1821,62 @@ impl SwitchForm {
     }
 }
 
+/// RAGドキュメントのアップロードフォーム。
+///
+/// 名前・モデル・分割サイズは空ならサービス側の既定に任せるので、
+/// 必須はファイルのパスだけにしてある。
+#[derive(Debug, Clone, Default)]
+pub struct RagUploadForm {
+    pub path: String,
+    pub name: String,
+    pub tags: String,
+    pub model: String,
+    pub chunk_size: String,
+    pub field: usize,
+}
+
+impl RagUploadForm {
+    pub const LABELS: [&'static str; 5] = [
+        "ファイルのパス",
+        "名前（任意）",
+        "タグ（カンマ区切り・任意）",
+        "モデル（任意）",
+        "分割サイズ（任意）",
+    ];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.path,
+            1 => &self.name,
+            2 => &self.tags,
+            3 => &self.model,
+            4 => &self.chunk_size,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.path),
+            1 => Some(&mut self.name),
+            2 => Some(&mut self.tags),
+            3 => Some(&mut self.model),
+            4 => Some(&mut self.chunk_size),
+            _ => None,
+        }
+    }
+
+    /// カンマ区切りのタグを配列にする。空の要素は捨てる。
+    fn tag_list(&self) -> Vec<String> {
+        self.tags
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsRecordFormMode {
     Add,
@@ -2531,6 +2594,10 @@ impl DnsRecordForm {
 /// 確認ダイアログで実行する操作。
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    DeleteRagDocument {
+        id: String,
+        name: String,
+    },
     DeleteUser {
         registry: ResourceId,
         username: String,
@@ -2694,6 +2761,7 @@ pub enum Overlay {
     IamResourceForm(IamResourceForm),
     IamRoleForm(IamRoleForm),
     SwitchForm(SwitchForm),
+    RagUploadForm(RagUploadForm),
     DnsRecordForm(DnsRecordForm),
     DnsZoneForm(DnsZoneForm),
     SimpleMonitorForm(SimpleMonitorForm),
@@ -3602,6 +3670,43 @@ impl App {
                 let loadable = self.store_result(result);
                 self.ai_engine.chunks.insert(document_id, loadable);
             }
+            Message::RagDocumentUploaded { result } => match result {
+                Ok(document) => {
+                    self.set_status(
+                        format!("ドキュメント「{}」をアップロードしました", document.name),
+                        StatusKind::Success,
+                    );
+                    // 取り込みは非同期なので、一覧を引き直して状態を見せる。
+                    self.ai_engine_refresh();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "アップロードに失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::RagDocumentDeleted { name, result } => match result {
+                Ok(()) => {
+                    self.set_status(
+                        format!("ドキュメント「{name}」を削除しました"),
+                        StatusKind::Success,
+                    );
+                    self.ai_engine_refresh();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "削除に失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::NetworkingSuiteGroups { result } => {
                 self.networking_suite.groups = self.store_result(result);
                 self.fill_selection(Pane::NetworkingSuiteGroups);
@@ -7492,6 +7597,7 @@ impl App {
                     Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
                 }
             }
+            ConfirmAction::DeleteRagDocument { id, name } => self.run_delete_rag_document(id, name),
             ConfirmAction::UnveilSecret { vault, name } => self.run_unveil(vault, name),
             ConfirmAction::DeleteVault { id, name } => self.run_delete_vault(id, name),
             ConfirmAction::DeleteSecret { vault, name } => self.run_delete_secret(vault, name),
@@ -8192,6 +8298,14 @@ impl App {
                     self.overlay = Some(Overlay::IamRoleForm(form));
                 }
             },
+            Overlay::RagUploadForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_rag_upload_form(form),
+                _ => {
+                    edit_rag_upload_form(&mut form, key);
+                    self.overlay = Some(Overlay::RagUploadForm(form));
+                }
+            },
             Overlay::SwitchForm(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => self.submit_switch_form(form),
@@ -8548,6 +8662,26 @@ fn edit_iam_role_form(form: &mut IamRoleForm, key: KeyEvent) {
         }
         KeyCode::Char(c) => {
             if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn edit_rag_upload_form(form: &mut RagUploadForm, key: KeyEvent) {
+    let fields = RagUploadForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
                 value.push(c);
             }
         }

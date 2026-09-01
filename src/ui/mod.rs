@@ -26,7 +26,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Tabs};
 
-use crate::app::{App, Focus, Mode, Overlay, Service, StatusKind, Tab};
+use crate::app::{AiEngineTab, App, Focus, Mode, Overlay, Service, StatusKind, Tab};
 use crate::config::CredentialSource;
 
 /// 既定のアクセント色（さくらのピンク）。
@@ -434,7 +434,13 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Service::NetworkingSuite => {
             hints.push("←→/hl タブ");
         }
-        Service::AiEngine => hints.extend(["←→/hl タブ", "J/K 本文", "t トークン管理"]),
+        Service::AiEngine => {
+            hints.extend(["←→/hl タブ", "J/K 本文", "t トークン管理"]);
+            // 書き込み系のキーは、書き込みモードのときだけ案内する。
+            if app.mode == Mode::Write && app.ai_engine.tab == AiEngineTab::Documents {
+                hints.extend(["n アップロード", "d 削除"]);
+            }
+        }
         Service::Dns => {
             hints.push(if app.dns.focus == crate::app::ListFocus::Left {
                 "Enter レコードへ"
