@@ -304,12 +304,41 @@ struct NakedUser {
 }
 
 /// API がエラー時に返す JSON。
+///
+/// 形式が2種類ある。さくらのゲートウェイが返す認証・権限エラーは
+/// `error_msg` / `error_code` だが、セキュリティコントロールのように
+/// サービス自身が RFC 7807 の `title` / `detail` を返すものもある。
+/// 片方しか見ないと、もう片方で生のJSONがそのまま画面に出てしまう。
 #[derive(Debug, Deserialize)]
 struct ApiError {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     error_msg: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     error_code: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    title: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    detail: String,
+}
+
+impl ApiError {
+    /// 利用者に見せる本文。
+    fn message(&self) -> &str {
+        if self.error_msg.is_empty() {
+            &self.title
+        } else {
+            &self.error_msg
+        }
+    }
+
+    /// 本文に併記する識別子。無ければ空。
+    fn code(&self) -> &str {
+        if self.error_code.is_empty() {
+            &self.detail
+        } else {
+            &self.error_code
+        }
+    }
 }
 
 /// さくらのクラウド API クライアント。
@@ -771,15 +800,12 @@ impl SacloudClient {
 /// エラーレスポンスから人間が読めるメッセージを組み立てる。
 fn format_api_error(status: StatusCode, body: &str) -> String {
     if let Ok(err) = serde_json::from_str::<ApiError>(body)
-        && !err.error_msg.is_empty()
+        && !err.message().is_empty()
     {
-        return if err.error_code.is_empty() {
-            format!("API エラー ({status}): {}", err.error_msg)
+        return if err.code().is_empty() {
+            format!("API エラー ({status}): {}", err.message())
         } else {
-            format!(
-                "API エラー ({status}): {} [{}]",
-                err.error_msg, err.error_code
-            )
+            format!("API エラー ({status}): {} [{}]", err.message(), err.code())
         };
     }
     let head: String = body.trim().chars().take(200).collect();
@@ -864,6 +890,33 @@ mod tests {
         let message = format_api_error(StatusCode::UNAUTHORIZED, body);
         assert!(message.contains("error-unauthorized"), "{message}");
         assert!(message.contains("unauthorized"), "{message}");
+    }
+
+    /// セキュリティコントロールなどは RFC 7807 形式で返す。
+    /// 実際に crane74 で受け取ったレスポンス。
+    #[test]
+    fn formats_api_error_from_rfc7807_json() {
+        let body = r#"{"title":"project is not activated","status":403}"#;
+        let message = format_api_error(StatusCode::FORBIDDEN, body);
+        assert!(message.contains("project is not activated"), "{message}");
+        // 生のJSONがそのまま出ないこと。
+        assert!(!message.contains('{'), "{message}");
+
+        let with_detail = r#"{"type":"about:blank","title":"不適切な要求です。",
+            "status":400,"detail":"invalid"}"#;
+        let message = format_api_error(StatusCode::BAD_REQUEST, with_detail);
+        assert!(message.contains("不適切な要求です。"), "{message}");
+        assert!(message.contains("invalid"), "{message}");
+    }
+
+    /// さくら形式と RFC 7807 が混ざっていても、さくら側を優先する。
+    #[test]
+    fn sakura_error_fields_win_over_rfc7807() {
+        let body = r#"{"error_msg":"さくら側","error_code":"forbidden",
+            "title":"rfc側","detail":"d"}"#;
+        let message = format_api_error(StatusCode::FORBIDDEN, body);
+        assert!(message.contains("さくら側"), "{message}");
+        assert!(!message.contains("rfc側"), "{message}");
     }
 
     #[test]
