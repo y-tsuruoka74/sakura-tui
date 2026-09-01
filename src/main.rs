@@ -76,7 +76,7 @@ const USAGE: &str = "さくらインターネットのサービスをターミ�
   sakura-tui [オプション]
 
 オプション:
-  -p, --profile <名前>   使う usacloud プロファイル
+  -p, --profile <名前>   使う認証情報（usacloud プロファイル / キーチェーン）\n                         同名があるときは @keychain:<名前> で明示できる
   -z, --zone <ゾーン>     ゾーン依存のサービスで使うゾーン (例: is1a)
   -s, --service <名前>    起動時に開くサービス{サービス名}
       --api-root <URL>   接続先の API ルート（既定: 本番）
@@ -143,6 +143,20 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
+/// 起動時に使う認証情報を決める。
+///
+/// `--profile` は usacloud のプロファイルとキーチェーンの両方から探す。
+/// 指定が無いときは従来どおり環境変数 → usacloud プロファイルの順に見る。
+fn load_credentials(args: &Args) -> Result<ApiCredentials> {
+    match &args.profile {
+        Some(name) => {
+            let source = config::resolve_credential_source(name)?;
+            config::load_credentials_from(&source)
+        }
+        None => config::load_api_credentials(false),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = match parse_args() {
@@ -152,26 +166,28 @@ async fn main() -> Result<()> {
             std::process::exit(2);
         }
     };
-    // --profile は環境変数より優先させたいので、読み込み前に反映する。
-    if let Some(profile) = &args.profile {
-        unsafe { std::env::set_var("SAKURA_PROFILE", profile) };
-    }
-
     // 認証情報が無くても TUI を起動し、アプリ内の作成フォームへ案内する。
     // 空の認証情報で作ったクライアントはオンボーディング中には通信へ使わない。
-    let (credentials, has_credentials) = match config::load_api_credentials(args.profile.is_some())
-    {
+    let (credentials, has_credentials) = match load_credentials(&args) {
         Ok(credentials) => (credentials, true),
-        Err(_) => (
-            ApiCredentials {
-                token: String::new(),
-                secret: String::new(),
-                source: CredentialSource::Env,
-                zone: args.zone.clone(),
-                api_root: std::env::var("SAKURA_API_ROOT_URL").ok(),
-            },
-            false,
-        ),
+        Err(err) => {
+            // 名前を明示したのに見つからないのは、綴り違いの可能性が高い。
+            // 黙ってオンボーディングへ流すと気づけないので理由を出す。
+            if args.profile.is_some() {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
+            (
+                ApiCredentials {
+                    token: String::new(),
+                    secret: String::new(),
+                    source: CredentialSource::Env,
+                    zone: args.zone.clone(),
+                    api_root: std::env::var("SAKURA_API_ROOT_URL").ok(),
+                },
+                false,
+            )
+        }
     };
     let clients = Clients::new(&credentials)?;
     let mut settings = match config::Config::load() {

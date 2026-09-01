@@ -143,6 +143,52 @@ pub fn load_api_credentials(prefer_profile: bool) -> Result<ApiCredentials> {
     }
 }
 
+/// `--profile` に渡された名前を、実在する認証元へ解決する。
+///
+/// usacloud のプロファイルとキーチェーンのどちらも名前で選べるようにする。
+/// 同名が両方にあるときは、以前からの挙動を変えないよう usacloud を採る。
+/// 明示したいときは `config_key()` と同じ `@keychain:<名前>` 形式が使える。
+pub fn resolve_credential_source(name: &str) -> Result<CredentialSource> {
+    if let Some(keychain) = name.strip_prefix("@keychain:") {
+        return keychain_source(keychain);
+    }
+    if name == "@env" {
+        return credentials_from_env()
+            .map(|_| CredentialSource::Env)
+            .context("環境変数に認証情報が設定されていません");
+    }
+
+    if list_usacloud_profiles().iter().any(|p| p == name) {
+        return Ok(CredentialSource::Profile(name.to_string()));
+    }
+    if let Ok(source) = keychain_source(name) {
+        return Ok(source);
+    }
+
+    let known: Vec<String> = available_credential_sources()
+        .iter()
+        .map(CredentialSource::label)
+        .collect();
+    if known.is_empty() {
+        bail!("認証情報が1件もありません: {name}");
+    }
+    bail!(
+        "{name} という認証情報は見つかりませんでした。\n\
+         使えるのは: {}",
+        known.join(" / ")
+    )
+}
+
+/// 設定ファイルに名前が載っているキーチェーン資格情報を指す。
+fn keychain_source(name: &str) -> Result<CredentialSource> {
+    let config = Config::load().context("設定ファイルを読めませんでした")?;
+    if config.credentials.contains_key(name) {
+        Ok(CredentialSource::Keychain(name.to_string()))
+    } else {
+        bail!("キーチェーンに {name} という認証情報はありません")
+    }
+}
+
 /// 指定の出どころから認証情報を読み直す（TUI 内での切り替え用）。
 pub fn load_credentials_from(source: &CredentialSource) -> Result<ApiCredentials> {
     match source {
@@ -1345,6 +1391,31 @@ mod api_root_tests {
         assert_eq!(
             DEFAULT_API_ROOT.replace("/cloud/", "/cloud-test/"),
             TEST_API_ROOT
+        );
+    }
+
+    /// `@keychain:` 接頭辞は、usacloud と同名でもキーチェーン側を選ぶ手段。
+    /// 接頭辞の切り出しだけを検証する（実際の解決は設定ファイルに依存するため）。
+    #[test]
+    fn keychain_prefix_is_stripped() {
+        assert_eq!(
+            "@keychain:crane74".strip_prefix("@keychain:"),
+            Some("crane74")
+        );
+        // 接頭辞が無ければ素の名前として扱う。
+        assert_eq!("crane74".strip_prefix("@keychain:"), None);
+        // 名前に @ を含む usacloud プロファイルは作れないので取り違えない。
+        assert_eq!("@env".strip_prefix("@keychain:"), None);
+    }
+
+    /// 見つからない名前はエラーにする。黙って別の認証情報へ落ちない。
+    #[test]
+    fn unknown_credential_name_is_an_error() {
+        let err = resolve_credential_source("この名前は存在しないはず-9f3a").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("この名前は存在しないはず-9f3a"),
+            "{message}"
         );
     }
 
