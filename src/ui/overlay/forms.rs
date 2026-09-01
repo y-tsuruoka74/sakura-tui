@@ -234,6 +234,43 @@ pub(super) fn draw_switch_form(frame: &mut Frame, form: &SwitchForm) {
     );
 }
 
+pub(super) fn draw_rag_edit_form(frame: &mut Frame, form: &RagEditForm) {
+    let mut lines: Vec<Line> = RagEditForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "モデルと分割サイズは取り込み時に決まるため変更できません。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 更新   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 72, dialog_height(&lines, 72));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(
+                &format!("ドキュメントの編集 — {}", form.original_name),
+                accent(),
+            )),
+        area,
+    );
+}
+
 pub(super) fn draw_rag_upload_form(frame: &mut Frame, form: &RagUploadForm) {
     let mut lines: Vec<Line> = RagUploadForm::LABELS
         .iter()

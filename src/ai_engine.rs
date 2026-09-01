@@ -63,6 +63,31 @@ impl AiEngineClient {
         Ok(text)
     }
 
+    /// Bearer 認証で JSON を PUT する。
+    pub(crate) async fn put_json(&self, path: &str, body: serde_json::Value) -> Result<String> {
+        let url = reqwest::Url::parse(&format!("{API_ROOT}{path}"))?;
+        let response = crate::http::send_with_retry(&self.http, || {
+            Ok(self
+                .http
+                .request(Method::PUT, url.clone())
+                .bearer_auth(&self.token)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .json(&body)
+                .build()?)
+        })
+        .await
+        .context("AI Engine APIへの更新リクエストに失敗しました")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("AI Engine APIレスポンスの読み取りに失敗しました")?;
+        if !status.is_success() {
+            bail!("{}", format_error(status, &text));
+        }
+        Ok(text)
+    }
+
     /// Bearer 認証で DELETE する。成功時は本文が無い（204）。
     pub(crate) async fn delete(&self, path: &str) -> Result<()> {
         let url = reqwest::Url::parse(&format!("{API_ROOT}{path}"))?;

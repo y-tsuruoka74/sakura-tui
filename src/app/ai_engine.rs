@@ -12,8 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    App, ConfirmAction, Loadable, ManagedResourceKind, Message, Overlay, Pane, RagUploadForm,
-    StatusKind, child_id_to_load, fmt_error, matches,
+    App, ConfirmAction, Loadable, ManagedResourceKind, Message, Overlay, Pane, RagEditForm,
+    RagUploadForm, StatusKind, child_id_to_load, fmt_error, matches,
 };
 use crate::ai_rag::{RagChunk, RagDocument, RagUpload};
 
@@ -190,6 +190,9 @@ impl App {
             KeyCode::Char('d') if self.ai_engine.tab == AiEngineTab::Documents => {
                 self.confirm_delete_rag_document()
             }
+            KeyCode::Char('e') if self.ai_engine.tab == AiEngineTab::Documents => {
+                self.open_rag_edit_form()
+            }
             _ => {}
         }
     }
@@ -230,6 +233,48 @@ impl App {
         tokio::spawn(async move {
             let result = client.upload_rag_document(input).await.map_err(fmt_error);
             let _ = tx.send(Message::RagDocumentUploaded { result });
+        });
+    }
+
+    fn open_rag_edit_form(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(document) = self.selected_ai_engine_document() else {
+            self.set_status("編集するドキュメントを選んでください", StatusKind::Error);
+            return;
+        };
+        self.overlay = Some(Overlay::RagEditForm(RagEditForm {
+            id: document.id,
+            original_name: document.name.clone(),
+            name: document.name,
+            tags: document.tags.join(", "),
+            field: 0,
+        }));
+    }
+
+    pub(super) fn submit_rag_edit_form(&mut self, form: RagEditForm) {
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            self.overlay = Some(Overlay::RagEditForm(form));
+            self.set_status("名前を入力してください", StatusKind::Error);
+            return;
+        }
+        let Some(client) = self.ai_engine_client.clone() else {
+            self.set_status(TOKEN_REQUIRED, StatusKind::Error);
+            return;
+        };
+        let tags = form.tag_list();
+        let id = form.id;
+        self.overlay = None;
+        self.inflight += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .update_rag_document(&id, &name, tags)
+                .await
+                .map_err(fmt_error);
+            let _ = tx.send(Message::RagDocumentUpdated { result });
         });
     }
 
@@ -335,6 +380,25 @@ mod tests {
 
         // 未入力ならタグ無しで送る。
         assert!(RagUploadForm::default().tag_list().is_empty());
+    }
+
+    /// 編集フォームは名前とタグの2項目だけ。読み取り専用の項目を送らない。
+    #[test]
+    fn edit_form_has_only_the_writable_fields() {
+        assert_eq!(RagEditForm::LABELS.len(), 2);
+        let form = RagEditForm {
+            id: "d1".to_string(),
+            original_name: "旧名".to_string(),
+            name: "新名".to_string(),
+            tags: " a , b ,, ".to_string(),
+            field: 0,
+        };
+        assert_eq!(form.value(0), "新名");
+        assert_eq!(form.value(1), " a , b ,, ");
+        assert_eq!(form.tag_list(), vec!["a", "b"]);
+        assert_eq!(form.value(2), "");
+        // 変更前の名前は確認の文言に使うので保持する。
+        assert_eq!(form.original_name, "旧名");
     }
 
     /// 入力欄の並びとラベルを固定する。value の対応がずれると別の値を送ってしまう。

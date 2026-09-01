@@ -285,6 +285,24 @@ impl AiEngineClient {
         Ok(RagDocument::from(raw))
     }
 
+    /// ドキュメントの名前とタグを変更する。
+    ///
+    /// 仕様上ここで書き換えられるのはこの2つだけで、モデルや分割サイズは
+    /// 取り込み時に決まる読み取り専用の項目。
+    pub async fn update_rag_document(
+        &self,
+        document_id: &str,
+        name: &str,
+        tags: Vec<String>,
+    ) -> Result<RagDocument> {
+        let body = serde_json::json!({ "name": name, "tags": tags });
+        let text = self
+            .put_json(&format!("/v1/documents/{document_id}/"), body)
+            .await?;
+        let raw: RawDocument = parse_json(&text)?;
+        Ok(RagDocument::from(raw))
+    }
+
     /// ドキュメントを削除する。取り返しがつかない。
     pub async fn delete_rag_document(&self, document_id: &str) -> Result<()> {
         self.delete(&format!("/v1/documents/{document_id}/")).await

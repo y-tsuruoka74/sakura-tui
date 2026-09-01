@@ -438,7 +438,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             hints.extend(["←→/hl タブ", "J/K 本文", "t トークン管理"]);
             // 書き込み系のキーは、書き込みモードのときだけ案内する。
             if app.mode == Mode::Write && app.ai_engine.tab == AiEngineTab::Documents {
-                hints.extend(["n アップロード", "d 削除"]);
+                hints.extend(["n アップロード", "e 編集", "d 削除"]);
             }
         }
         Service::Dns => {

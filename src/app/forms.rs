@@ -533,15 +533,55 @@ impl RagUploadForm {
         }
     }
 
-    /// カンマ区切りのタグを配列にする。空の要素は捨てる。
     pub(super) fn tag_list(&self) -> Vec<String> {
-        self.tags
-            .split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_string)
-            .collect()
+        split_tags(&self.tags)
     }
+}
+
+/// RAGドキュメントの名前とタグの編集フォーム。
+///
+/// 仕様上これ以外の項目は取り込み時に決まる読み取り専用なので、2項目だけ扱う。
+#[derive(Debug, Clone, Default)]
+pub struct RagEditForm {
+    pub id: String,
+    /// 変更前の名前。確認の文言に使う。
+    pub original_name: String,
+    pub name: String,
+    pub tags: String,
+    pub field: usize,
+}
+
+impl RagEditForm {
+    pub const LABELS: [&'static str; 2] = ["名前", "タグ（カンマ区切り）"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.tags,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.tags),
+            _ => None,
+        }
+    }
+
+    pub(super) fn tag_list(&self) -> Vec<String> {
+        split_tags(&self.tags)
+    }
+}
+
+/// カンマ区切りのタグを配列にする。空の要素は捨てる。
+fn split_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1340,6 +1380,26 @@ pub(super) fn edit_iam_role_form(form: &mut IamRoleForm, key: KeyEvent) {
         }
         KeyCode::Char(c) => {
             if let Some(value) = form.value_mut(form.field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn edit_rag_edit_form(form: &mut RagEditForm, key: KeyEvent) {
+    let fields = RagEditForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
                 value.push(c);
             }
         }

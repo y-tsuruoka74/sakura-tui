@@ -192,6 +192,9 @@ pub enum Message {
         name: String,
         result: Result<(), String>,
     },
+    RagDocumentUpdated {
+        result: Result<RagDocument, String>,
+    },
     IamAction {
         label: String,
         result: Result<(), String>,
@@ -895,6 +898,7 @@ pub enum Overlay {
     IamRoleForm(IamRoleForm),
     SwitchForm(SwitchForm),
     RagUploadForm(RagUploadForm),
+    RagEditForm(RagEditForm),
     DnsRecordForm(DnsRecordForm),
     DnsZoneForm(DnsZoneForm),
     SimpleMonitorForm(SimpleMonitorForm),
@@ -1786,6 +1790,24 @@ impl App {
                 Err(err) => {
                     self.overlay = Some(Overlay::Message {
                         title: "アップロードに失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::RagDocumentUpdated { result } => match result {
+                Ok(document) => {
+                    self.set_status(
+                        format!("ドキュメントを「{}」に更新しました", document.name),
+                        StatusKind::Success,
+                    );
+                    self.ai_engine_refresh();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "更新に失敗しました".to_string(),
                         body: err.clone(),
                         kind: StatusKind::Error,
                         scroll: 0,
@@ -5776,6 +5798,14 @@ impl App {
                 _ => {
                     edit_iam_role_form(&mut form, key);
                     self.overlay = Some(Overlay::IamRoleForm(form));
+                }
+            },
+            Overlay::RagEditForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_rag_edit_form(form),
+                _ => {
+                    edit_rag_edit_form(&mut form, key);
+                    self.overlay = Some(Overlay::RagEditForm(form));
                 }
             },
             Overlay::RagUploadForm(mut form) => match key.code {
