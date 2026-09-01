@@ -5,6 +5,7 @@ mod api_gateway;
 mod apprun;
 mod billing;
 mod cloud_resources;
+mod cloudhsm;
 mod dedicated;
 mod detail;
 mod managed_resources;
@@ -250,6 +251,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::NoSql => nosql::draw(frame, area, app),
         Service::Seg => seg::draw(frame, area, app),
         Service::SecurityControl => security_control::draw(frame, area, app),
+        Service::CloudHsm => cloudhsm::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
@@ -277,7 +279,8 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         | Service::Kms
         | Service::Iam
         | Service::AutoScale
-        | Service::EnhancedDb => managed_resources::draw(frame, area, app),
+        | Service::EnhancedDb
+        | Service::AutoBackup => managed_resources::draw(frame, area, app),
         Service::Dns => observability::draw_dns(frame, area, app),
         Service::SimpleMonitor => observability::draw_simple_monitor(frame, area, app),
         Service::Secrets => observability::draw_secrets(frame, area, app),
@@ -424,6 +427,7 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Service::NoSql => hints.push("←→/hl タブ"),
         Service::Seg => hints.push("←→/hl タブ"),
         Service::SecurityControl => hints.push("←→/hl タブ"),
+        Service::CloudHsm => hints.push("←→/hl タブ"),
         Service::Dns => {
             hints.push(if app.dns.focus == crate::app::ListFocus::Left {
                 "Enter レコードへ"
@@ -579,7 +583,8 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         | Service::Kms
         | Service::Iam
         | Service::AutoScale
-        | Service::EnhancedDb => {
+        | Service::EnhancedDb
+        | Service::AutoBackup => {
             if app.service == Service::AiEngine {
                 hints.push("t トークン管理");
             }

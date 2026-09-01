@@ -15,6 +15,7 @@ mod account;
 mod api_gateway;
 mod apprun;
 mod billing;
+mod cloudhsm;
 mod dedicated;
 mod nosql;
 mod observability;
@@ -27,6 +28,7 @@ pub use account::AccountView;
 pub use api_gateway::{ApiGatewayTab, ApiGatewayView};
 pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
+pub use cloudhsm::{CloudHsmTab, CloudHsmView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
 pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
@@ -47,6 +49,7 @@ use crate::apprun::{AppRunClient, Application, ApplicationDetail, Traffic, Versi
 use crate::apprun_dedicated::{self as ded, Cluster, DedicatedClient};
 use crate::billing::{Bill, BillDetail, BillingIdentity};
 use crate::cloud_resources::{CloudResource, CloudResourceKind};
+use crate::cloudhsm::{CloudHsm, CloudHsmClient, CloudHsmDocument, CloudHsmLicense};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::{ApiCredentials, Config, CredentialSource, IamCredentials, RegistryLogin};
 use crate::iaas::{PowerAction, Server, Zone};
@@ -136,6 +139,22 @@ pub enum Message {
     },
     SecurityControlActions {
         result: Result<Vec<AutomatedAction>, String>,
+    },
+    CloudHsmHsms {
+        zone: String,
+        result: Result<Vec<CloudHsm>, String>,
+    },
+    CloudHsmClients {
+        hsm_id: String,
+        result: Result<Vec<CloudHsmClient>, String>,
+    },
+    CloudHsmLicenses {
+        zone: String,
+        result: Result<Vec<CloudHsmLicense>, String>,
+    },
+    CloudHsmDocuments {
+        license_id: String,
+        result: Result<Vec<CloudHsmDocument>, String>,
     },
     IamAction {
         label: String,
@@ -490,6 +509,11 @@ pub enum Pane {
     // セキュリティコントロール
     SecurityControlRules,
     SecurityControlActions,
+    // クラウドHSM
+    CloudHsmHsms,
+    CloudHsmClients,
+    CloudHsmLicenses,
+    CloudHsmDocuments,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -759,6 +783,7 @@ pub enum Service {
     IsoImage,
     ObjectStorage,
     EnhancedDb,
+    AutoBackup,
     WebAccel,
     Dns,
     SimpleMonitor,
@@ -766,6 +791,7 @@ pub enum Service {
     Kms,
     Iam,
     SecurityControl,
+    CloudHsm,
     Monitoring,
     Account,
     Billing,
@@ -784,7 +810,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 40] = [
+    pub const ALL: [Service; 42] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -822,11 +848,13 @@ impl Service {
         Service::Nfs,
         Service::ObjectStorage,
         Service::EnhancedDb,
+        Service::AutoBackup,
         // セキュリティ
         Service::Secrets,
         Service::Kms,
         Service::Iam,
         Service::SecurityControl,
+        Service::CloudHsm,
         // 運用・監視
         Service::SimpleMonitor,
         Service::Monitoring,
@@ -1074,6 +1102,14 @@ impl Service {
                 count_label: Some("DB"),
                 zoned: false,
             },
+            Service::AutoBackup => ServiceMeta {
+                category: Category::Storage,
+                title: "自動バックアップ",
+                arg_name: "auto-backup",
+                countable_label: None,
+                count_label: Some("設定"),
+                zoned: false,
+            },
             Service::WebAccel => ServiceMeta {
                 category: Category::Network,
                 title: "ウェブアクセラレータ",
@@ -1130,6 +1166,15 @@ impl Service {
                 countable_label: None,
                 count_label: Some("ルール"),
                 zoned: false,
+            },
+            // ゾーンごとに配置されるアプライアンス。全ゾーンで提供される。
+            Service::CloudHsm => ServiceMeta {
+                category: Category::Security,
+                title: "クラウドHSM",
+                arg_name: "cloudhsm",
+                countable_label: Some("HSM"),
+                count_label: Some("台"),
+                zoned: true,
             },
             Service::SimpleMonitor => ServiceMeta {
                 category: Category::Ops,
@@ -2741,6 +2786,7 @@ pub struct App {
     pub nosql: NoSqlView,
     pub seg: SegView,
     pub security_control: SecurityControlView,
+    pub cloudhsm: CloudHsmView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2806,6 +2852,7 @@ impl App {
             nosql: NoSqlView::default(),
             seg: SegView::default(),
             security_control: SecurityControlView::default(),
+            cloudhsm: CloudHsmView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -2884,6 +2931,7 @@ impl App {
             Service::Iam => Some(ManagedResourceKind::Iam),
             Service::AutoScale => Some(ManagedResourceKind::AutoScale),
             Service::EnhancedDb => Some(ManagedResourceKind::EnhancedDb),
+            Service::AutoBackup => Some(ManagedResourceKind::AutoBackup),
             _ => None,
         }
     }
@@ -3072,7 +3120,14 @@ impl App {
             | Service::Kms
             | Service::Iam
             | Service::AutoScale
-            | Service::EnhancedDb => Pane::ManagedResources,
+            | Service::EnhancedDb
+            | Service::AutoBackup => Pane::ManagedResources,
+            Service::CloudHsm => match self.cloudhsm.tab {
+                CloudHsmTab::Hsms => Pane::CloudHsmHsms,
+                CloudHsmTab::Clients => Pane::CloudHsmClients,
+                CloudHsmTab::Licenses => Pane::CloudHsmLicenses,
+                CloudHsmTab::Documents => Pane::CloudHsmDocuments,
+            },
             Service::SecurityControl => match self.security_control.tab {
                 SecurityControlTab::Rules => Pane::SecurityControlRules,
                 SecurityControlTab::Actions => Pane::SecurityControlActions,
@@ -3257,7 +3312,9 @@ impl App {
             | Service::Kms
             | Service::Iam
             | Service::AutoScale
-            | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
+            | Service::EnhancedDb
+            | Service::AutoBackup => self.managed_resources_ensure_loaded(),
+            Service::CloudHsm => self.cloudhsm_ensure_loaded(),
             Service::SecurityControl => self.security_control_ensure_loaded(),
             Service::Seg => self.seg_ensure_loaded(),
             Service::NoSql => self.nosql_ensure_loaded(),
@@ -3475,6 +3532,30 @@ impl App {
                 let loadable = self.store_result(result);
                 self.nosql.parameters.insert(database_id, loadable);
                 self.fill_selection(Pane::NoSqlParameters);
+            }
+            Message::CloudHsmHsms { zone, result } => {
+                let loadable = self.store_result(result);
+                self.cloudhsm.hsms.insert(zone, loadable);
+                self.fill_selection(Pane::CloudHsmHsms);
+                self.cloudhsm.client_state.select(None);
+                self.cloudhsm_ensure_loaded();
+            }
+            Message::CloudHsmClients { hsm_id, result } => {
+                let loadable = self.store_result(result);
+                self.cloudhsm.clients.insert(hsm_id, loadable);
+                self.fill_selection(Pane::CloudHsmClients);
+            }
+            Message::CloudHsmLicenses { zone, result } => {
+                let loadable = self.store_result(result);
+                self.cloudhsm.licenses.insert(zone, loadable);
+                self.fill_selection(Pane::CloudHsmLicenses);
+                self.cloudhsm.document_state.select(None);
+                self.cloudhsm_ensure_loaded();
+            }
+            Message::CloudHsmDocuments { license_id, result } => {
+                let loadable = self.store_result(result);
+                self.cloudhsm.documents.insert(license_id, loadable);
+                self.fill_selection(Pane::CloudHsmDocuments);
             }
             Message::SecurityControlActivation { result } => {
                 self.security_control.activation = self.store_result(result);
@@ -4871,7 +4952,9 @@ impl App {
             | Service::Gslb
             | Service::Kms
             | Service::AutoScale
-            | Service::EnhancedDb => {}
+            | Service::EnhancedDb
+            | Service::AutoBackup => {}
+            Service::CloudHsm => self.on_key_cloudhsm(key),
             Service::SecurityControl => self.on_key_security_control(key),
             Service::Seg => self.on_key_seg(key),
             Service::NoSql => self.on_key_nosql(key),
@@ -5451,6 +5534,7 @@ impl App {
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&name).await,
                     Service::Seg => sacloud.list_segs(&name).await.map(|v| v.len()),
+                    Service::CloudHsm => sacloud.list_cloudhsms(&name).await.map(|v| v.len()),
                     Service::ApiGateway => Ok(0),
                     _ => Ok(0),
                 };
@@ -5557,6 +5641,7 @@ impl App {
                     Service::SecurityControl => {
                         sacloud.list_evaluation_rules().await.map(|v| v.len())
                     }
+                    Service::CloudHsm => sacloud.list_cloudhsms(&zone).await.map(|v| v.len()),
                     Service::Seg => sacloud.list_segs(&zone).await.map(|v| v.len()),
                     Service::NoSql => sacloud.list_nosql_databases().await.map(|v| v.len()),
                     Service::ApiGateway => api_gateway.list_services().await.map(|v| v.len()),
@@ -5618,6 +5703,10 @@ impl App {
                         .map(|v| v.len()),
                     Service::EnhancedDb => sacloud
                         .list_managed_resources(ManagedResourceKind::EnhancedDb)
+                        .await
+                        .map(|v| v.len()),
+                    Service::AutoBackup => sacloud
+                        .list_managed_resources(ManagedResourceKind::AutoBackup)
                         .await
                         .map(|v| v.len()),
                     // 請求はアカウントIDを引いてから年を指定して数える。
@@ -5693,6 +5782,7 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::CloudHsm => self.cloudhsm.hsms.get(&self.zone)?.ready()?.len(),
             Service::SecurityControl => self.security_control.rules.ready()?.len(),
             Service::Seg => self.seg.gateways.get(&self.zone)?.ready()?.len(),
             Service::NoSql => self.nosql.databases.ready()?.len(),
@@ -5710,7 +5800,8 @@ impl App {
             | Service::Kms
             | Service::Iam
             | Service::AutoScale
-            | Service::EnhancedDb => {
+            | Service::EnhancedDb
+            | Service::AutoBackup => {
                 let kind = match service {
                     Service::AiEngine => ManagedResourceKind::AiEngine,
                     Service::ObjectStorage => ManagedResourceKind::ObjectStorage,
@@ -5726,6 +5817,7 @@ impl App {
                     Service::Iam => ManagedResourceKind::Iam,
                     Service::AutoScale => ManagedResourceKind::AutoScale,
                     Service::EnhancedDb => ManagedResourceKind::EnhancedDb,
+                    Service::AutoBackup => ManagedResourceKind::AutoBackup,
                     _ => unreachable!(),
                 };
                 self.managed_resources.items.get(&kind)?.ready()?.len()
@@ -5880,6 +5972,13 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::CloudHsmHsms => self.visible_cloudhsm_hsms().ready().map_or(0, Vec::len),
+            Pane::CloudHsmClients => self.visible_cloudhsm_clients().ready().map_or(0, Vec::len),
+            Pane::CloudHsmLicenses => self.visible_cloudhsm_licenses().ready().map_or(0, Vec::len),
+            Pane::CloudHsmDocuments => self
+                .visible_cloudhsm_documents()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::SecurityControlRules => self
                 .visible_security_control_rules()
                 .ready()
@@ -5957,6 +6056,10 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::CloudHsmHsms => Some(&mut self.cloudhsm.hsm_state),
+            Pane::CloudHsmClients => Some(&mut self.cloudhsm.client_state),
+            Pane::CloudHsmLicenses => Some(&mut self.cloudhsm.license_state),
+            Pane::CloudHsmDocuments => Some(&mut self.cloudhsm.document_state),
             Pane::SecurityControlRules => Some(&mut self.security_control.rule_state),
             Pane::SecurityControlActions => Some(&mut self.security_control.action_state),
             Pane::SegGateways => Some(&mut self.seg.gateway_state),
@@ -6107,6 +6210,12 @@ impl App {
                 .map(|resource| resource.id),
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
+                .map(|resource| resource.id),
+            Pane::CloudHsmHsms => self.selected_cloudhsm_hsm().map(|resource| resource.id),
+            Pane::CloudHsmClients => self.selected_cloudhsm_client().map(|resource| resource.id),
+            Pane::CloudHsmLicenses => self.selected_cloudhsm_license().map(|resource| resource.id),
+            Pane::CloudHsmDocuments => self
+                .selected_cloudhsm_document()
                 .map(|resource| resource.id),
             Pane::SecurityControlRules => self
                 .selected_security_control_rule()
@@ -6635,12 +6744,14 @@ impl App {
             | Service::Kms
             | Service::Iam
             | Service::AutoScale
-            | Service::EnhancedDb => {
+            | Service::EnhancedDb
+            | Service::AutoBackup => {
                 if let Some(kind) = self.managed_resource_kind() {
                     self.managed_resources.items.remove(&kind);
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::CloudHsm => self.cloudhsm_refresh(),
             Service::SecurityControl => self.security_control_refresh(),
             Service::Seg => self.seg_refresh(),
             Service::NoSql => self.nosql_refresh(),
@@ -6827,6 +6938,7 @@ impl App {
         self.nosql = NoSqlView::default();
         self.seg = SegView::default();
         self.security_control = SecurityControlView::default();
+        self.cloudhsm = CloudHsmView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -6946,6 +7058,14 @@ impl App {
         if pane == Pane::SegGateways {
             self.seg_reset_child_selection();
             self.fill_selection(Pane::SegServices);
+        }
+        if pane == Pane::CloudHsmHsms {
+            self.cloudhsm.client_state.select(None);
+            self.cloudhsm_ensure_loaded();
+        }
+        if pane == Pane::CloudHsmLicenses {
+            self.cloudhsm.document_state.select(None);
+            self.cloudhsm_ensure_loaded();
         }
         if self.service != Service::Registry {
             return;
@@ -9103,7 +9223,7 @@ mod tests {
 
     /// ストレージ・データ分類の並び。マネージドDB系の隣に置く。
     #[test]
-    fn storage_category_lists_nosql_after_database() {
+    fn storage_category_lists_nosql_and_auto_backup() {
         let names: Vec<&str> = Category::Storage
             .services()
             .map(Service::arg_name)
@@ -9119,6 +9239,7 @@ mod tests {
                 "nfs",
                 "object-storage",
                 "enhanced-db",
+                "auto-backup",
             ]
         );
     }
@@ -9186,7 +9307,27 @@ mod tests {
             .services()
             .map(Service::arg_name)
             .collect();
-        assert_eq!(names, vec!["secrets", "kms", "iam", "security-control"]);
+        assert_eq!(
+            names,
+            vec!["secrets", "kms", "iam", "security-control", "cloudhsm"]
+        );
+    }
+
+    #[test]
+    fn cloudhsm_is_resolvable_from_service_arg() {
+        assert_eq!(Service::from_arg("cloudhsm"), Some(Service::CloudHsm));
+    }
+
+    /// クラウドHSMはゾーンごとに配置されるので、ゾーン別件数の対象。
+    #[test]
+    fn cloudhsm_is_zone_scoped_and_counted_per_zone() {
+        assert!(Service::CloudHsm.is_zoned());
+        assert_eq!(Service::CloudHsm.countable_label(), Some("HSM"));
+    }
+
+    #[test]
+    fn auto_backup_is_resolvable_from_service_arg() {
+        assert_eq!(Service::from_arg("auto-backup"), Some(Service::AutoBackup));
     }
 
     /// セキュリティコントロールはプロジェクト単位でゾーンに依存しない。

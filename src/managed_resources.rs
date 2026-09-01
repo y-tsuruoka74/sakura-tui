@@ -36,6 +36,7 @@ pub enum ManagedResourceKind {
     SimpleNotification,
     AutoScale,
     EnhancedDb,
+    AutoBackup,
 }
 
 impl ManagedResourceKind {
@@ -55,6 +56,7 @@ impl ManagedResourceKind {
             Self::SimpleNotification => "シンプル通知",
             Self::AutoScale => "オートスケール",
             Self::EnhancedDb => "エンハンスドデータベース",
+            Self::AutoBackup => "自動バックアップ",
         }
     }
 }
@@ -121,6 +123,7 @@ impl SacloudClient {
             }
             ManagedResourceKind::AutoScale => self.list_common_service("autoscale", kind).await,
             ManagedResourceKind::EnhancedDb => self.list_common_service("enhanceddb", kind).await,
+            ManagedResourceKind::AutoBackup => self.list_common_service("autobackup", kind).await,
         }
     }
 
@@ -582,6 +585,7 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
         "eventbusprocessconfiguration" => "処理設定",
         "autoscale" => "スケール設定",
         "enhanceddb" => "データベース",
+        "autobackup" => "バックアップ設定",
         "proxylb" => "ロードバランサ",
         "localrouter" => "ルータ",
         "gslb" => "GSLB",
@@ -657,6 +661,40 @@ fn parse_common_service(value: &Value, kind: ManagedResourceKind) -> Result<Mana
             );
             add_detail(&mut details, "ホスト", string_at(value, "/Status/hostname"));
             add_detail(&mut details, "ポート", string_at(value, "/Status/port"));
+        }
+        ManagedResourceKind::AutoBackup => {
+            add_detail(
+                &mut details,
+                "対象ディスク",
+                first_non_empty(value, &["/Status/DiskID", "/Status/DiskId"]),
+            );
+            // 公式SDKのマッピングは Settings.Autobackup（小文字b）だが、
+            // 綴り違いで黙って空になるのを避けるため両方見る。
+            add_detail(
+                &mut details,
+                "世代数",
+                first_non_empty(
+                    value,
+                    &[
+                        "/Settings/Autobackup/MaximumNumberOfArchives",
+                        "/Settings/AutoBackup/MaximumNumberOfArchives",
+                    ],
+                ),
+            );
+            let weekdays = {
+                let lower = string_array_at(value, "/Settings/Autobackup/BackupSpanWeekdays");
+                if lower.is_empty() {
+                    string_array_at(value, "/Settings/AutoBackup/BackupSpanWeekdays")
+                } else {
+                    lower
+                }
+            };
+            add_detail(&mut details, "取得曜日", weekdays.join(", "));
+            add_detail(
+                &mut details,
+                "対象ゾーン",
+                first_non_empty(value, &["/Status/ZoneName", "/Status/Zone/Name"]),
+            );
         }
         ManagedResourceKind::EnhancedLoadBalancer => {
             add_detail(

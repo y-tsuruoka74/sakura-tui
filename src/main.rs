@@ -10,6 +10,7 @@ mod apprun;
 mod apprun_dedicated;
 mod billing;
 mod cloud_resources;
+mod cloudhsm;
 mod commonservice;
 mod config;
 mod http;
