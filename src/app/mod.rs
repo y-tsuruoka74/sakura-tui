@@ -18,6 +18,7 @@ mod billing;
 mod dedicated;
 mod nosql;
 mod observability;
+mod security_control;
 mod seg;
 mod server;
 mod switch;
@@ -31,6 +32,7 @@ pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
     DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
 };
+pub use security_control::{SecurityControlTab, SecurityControlView};
 pub use seg::{SegTab, SegView};
 pub use server::ServerView;
 pub use switch::SwitchView;
@@ -59,6 +61,7 @@ use crate::nosql::{NoSqlBackup, NoSqlDatabase, NoSqlNodeHealth, NoSqlParameter, 
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 use crate::secretmanager::{Secret, Vault};
+use crate::security_control::{AutomatedAction, EvaluationRule, SecurityControlActivation};
 use crate::seg::Seg;
 use crate::switch::Switch;
 
@@ -124,6 +127,15 @@ pub enum Message {
     SegGateways {
         zone: String,
         result: Result<Vec<Seg>, String>,
+    },
+    SecurityControlActivation {
+        result: Result<SecurityControlActivation, String>,
+    },
+    SecurityControlRules {
+        result: Result<Vec<EvaluationRule>, String>,
+    },
+    SecurityControlActions {
+        result: Result<Vec<AutomatedAction>, String>,
     },
     IamAction {
         label: String,
@@ -475,6 +487,9 @@ pub enum Pane {
     // サービスエンドポイントゲートウェイ
     SegGateways,
     SegServices,
+    // セキュリティコントロール
+    SecurityControlRules,
+    SecurityControlActions,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -750,6 +765,7 @@ pub enum Service {
     Secrets,
     Kms,
     Iam,
+    SecurityControl,
     Monitoring,
     Account,
     Billing,
@@ -768,7 +784,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 39] = [
+    pub const ALL: [Service; 40] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -810,6 +826,7 @@ impl Service {
         Service::Secrets,
         Service::Kms,
         Service::Iam,
+        Service::SecurityControl,
         // 運用・監視
         Service::SimpleMonitor,
         Service::Monitoring,
@@ -1103,6 +1120,15 @@ impl Service {
                 arg_name: "iam",
                 countable_label: None,
                 count_label: Some("リソース"),
+                zoned: false,
+            },
+            // プロジェクト単位の機能でゾーンに依存しない。
+            Service::SecurityControl => ServiceMeta {
+                category: Category::Security,
+                title: "セキュリティコントロール",
+                arg_name: "security-control",
+                countable_label: None,
+                count_label: Some("ルール"),
                 zoned: false,
             },
             Service::SimpleMonitor => ServiceMeta {
@@ -2714,6 +2740,7 @@ pub struct App {
     pub api_gateway: ApiGatewayView,
     pub nosql: NoSqlView,
     pub seg: SegView,
+    pub security_control: SecurityControlView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2778,6 +2805,7 @@ impl App {
             api_gateway: ApiGatewayView::default(),
             nosql: NoSqlView::default(),
             seg: SegView::default(),
+            security_control: SecurityControlView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -3045,6 +3073,10 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => Pane::ManagedResources,
+            Service::SecurityControl => match self.security_control.tab {
+                SecurityControlTab::Rules => Pane::SecurityControlRules,
+                SecurityControlTab::Actions => Pane::SecurityControlActions,
+            },
             Service::Seg => match self.seg.tab {
                 SegTab::Gateways => Pane::SegGateways,
                 SegTab::Services => Pane::SegServices,
@@ -3226,6 +3258,7 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
+            Service::SecurityControl => self.security_control_ensure_loaded(),
             Service::Seg => self.seg_ensure_loaded(),
             Service::NoSql => self.nosql_ensure_loaded(),
             Service::ApiGateway => self.api_gateway_ensure_loaded(),
@@ -3442,6 +3475,17 @@ impl App {
                 let loadable = self.store_result(result);
                 self.nosql.parameters.insert(database_id, loadable);
                 self.fill_selection(Pane::NoSqlParameters);
+            }
+            Message::SecurityControlActivation { result } => {
+                self.security_control.activation = self.store_result(result);
+            }
+            Message::SecurityControlRules { result } => {
+                self.security_control.rules = self.store_result(result);
+                self.fill_selection(Pane::SecurityControlRules);
+            }
+            Message::SecurityControlActions { result } => {
+                self.security_control.actions = self.store_result(result);
+                self.fill_selection(Pane::SecurityControlActions);
             }
             Message::SegGateways { zone, result } => {
                 let loadable = self.store_result(result);
@@ -4828,6 +4872,7 @@ impl App {
             | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {}
+            Service::SecurityControl => self.on_key_security_control(key),
             Service::Seg => self.on_key_seg(key),
             Service::NoSql => self.on_key_nosql(key),
             Service::ApiGateway => self.on_key_api_gateway(key),
@@ -5509,6 +5554,9 @@ impl App {
                     }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
+                    Service::SecurityControl => {
+                        sacloud.list_evaluation_rules().await.map(|v| v.len())
+                    }
                     Service::Seg => sacloud.list_segs(&zone).await.map(|v| v.len()),
                     Service::NoSql => sacloud.list_nosql_databases().await.map(|v| v.len()),
                     Service::ApiGateway => api_gateway.list_services().await.map(|v| v.len()),
@@ -5645,6 +5693,7 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::SecurityControl => self.security_control.rules.ready()?.len(),
             Service::Seg => self.seg.gateways.get(&self.zone)?.ready()?.len(),
             Service::NoSql => self.nosql.databases.ready()?.len(),
             Service::ApiGateway => self.api_gateway.services.ready()?.len(),
@@ -5831,6 +5880,14 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::SecurityControlRules => self
+                .visible_security_control_rules()
+                .ready()
+                .map_or(0, Vec::len),
+            Pane::SecurityControlActions => self
+                .visible_security_control_actions()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::SegGateways => self.visible_seg_gateways().ready().map_or(0, Vec::len),
             Pane::SegServices => self.visible_seg_services().ready().map_or(0, Vec::len),
             Pane::NoSqlDatabases => self.visible_nosql_databases().ready().map_or(0, Vec::len),
@@ -5900,6 +5957,8 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::SecurityControlRules => Some(&mut self.security_control.rule_state),
+            Pane::SecurityControlActions => Some(&mut self.security_control.action_state),
             Pane::SegGateways => Some(&mut self.seg.gateway_state),
             Pane::SegServices => Some(&mut self.seg.service_state),
             Pane::NoSqlDatabases => Some(&mut self.nosql.database_state),
@@ -6048,6 +6107,12 @@ impl App {
                 .map(|resource| resource.id),
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
+                .map(|resource| resource.id),
+            Pane::SecurityControlRules => self
+                .selected_security_control_rule()
+                .map(|resource| resource.id),
+            Pane::SecurityControlActions => self
+                .selected_security_control_action()
                 .map(|resource| resource.id),
             Pane::SegGateways => self.selected_seg_gateway().map(|resource| resource.id),
             // 接続先サービスはIDを持たないので、エンドポイントを渡す。
@@ -6576,6 +6641,7 @@ impl App {
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::SecurityControl => self.security_control_refresh(),
             Service::Seg => self.seg_refresh(),
             Service::NoSql => self.nosql_refresh(),
             Service::ApiGateway => self.api_gateway_refresh(),
@@ -6760,6 +6826,7 @@ impl App {
         self.api_gateway = ApiGatewayView::default();
         self.nosql = NoSqlView::default();
         self.seg = SegView::default();
+        self.security_control = SecurityControlView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -9102,6 +9169,31 @@ mod tests {
     fn seg_is_zone_scoped_and_counted_per_zone() {
         assert!(Service::Seg.is_zoned());
         assert_eq!(Service::Seg.countable_label(), Some("ゲートウェイ"));
+    }
+
+    #[test]
+    fn security_control_is_resolvable_from_service_arg() {
+        assert_eq!(
+            Service::from_arg("security-control"),
+            Some(Service::SecurityControl)
+        );
+    }
+
+    /// セキュリティ分類の並び。
+    #[test]
+    fn security_category_lists_security_control_last() {
+        let names: Vec<&str> = Category::Security
+            .services()
+            .map(Service::arg_name)
+            .collect();
+        assert_eq!(names, vec!["secrets", "kms", "iam", "security-control"]);
+    }
+
+    /// セキュリティコントロールはプロジェクト単位でゾーンに依存しない。
+    #[test]
+    fn security_control_is_not_zone_scoped() {
+        assert!(!Service::SecurityControl.is_zoned());
+        assert_eq!(Service::SecurityControl.countable_label(), None);
     }
 }
 

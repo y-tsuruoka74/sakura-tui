@@ -451,6 +451,29 @@ impl SacloudClient {
         })
     }
 
+    /// ゾーン配下にある別系統のAPIを、普通のクエリ文字列で呼ぶ。
+    ///
+    /// IaaS API は検索条件を JSON にしてクエリへ丸ごと載せるが、
+    /// セキュリティコントロールのように `?page_size=100&next=...` という
+    /// 一般的な形を取るAPIもある。`request_global` はルートの末尾から `/zone`
+    /// を落として組み立てるので、ゾーンは接尾辞の側に含めて渡す。
+    pub(crate) async fn request_zoned_service<T: DeserializeOwned>(
+        &self,
+        zone: &str,
+        suffix: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
+        self.request_global(
+            Method::GET,
+            &format!("zone/{zone}/{suffix}"),
+            path,
+            query,
+            None,
+        )
+        .await
+    }
+
     /// ゾーンをURLに含まないグローバルAPIを呼ぶ。
     ///
     /// IAM APIは `/cloud/api/iam/1.0` にあり、IaaS APIのような
