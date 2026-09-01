@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "sakura-tui のアーキテクチャ",
+    "output": "sakura-tui-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1360,
+      560
+    ],
+    "views": [
+      {
+        "id": "input-loop",
+        "label": "入力と描画のループ",
+        "focus": [
+          "terminal",
+          "app",
+          "ui"
+        ],
+        "note": "キー入力は app が受け、ui は状態を描くだけ。描画結果が端末へ戻る。"
+      },
+      {
+        "id": "client-split",
+        "label": "共通クライアントと専用クライアント",
+        "focus": [
+          "app",
+          "sacloud",
+          "dedicated",
+          "http"
+        ],
+        "note": "多くのサービスは SacloudClient を共用し、別ホストのものだけ専用クライアントを持つ。"
+      },
+      {
+        "id": "auth-and-endpoints",
+        "label": "認証とエンドポイント",
+        "focus": [
+          "creds",
+          "http",
+          "iaas",
+          "service-api",
+          "ai-engine"
+        ],
+        "note": "APIキーのBasic認証が基本で、AI Engineだけ別ホストのBearer認証。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "terminal",
+      "type": "external",
+      "label": "端末",
+      "sublabel": "crossterm / ratatui",
+      "pos": [
+        40,
+        230
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "src/ui/",
+      "sublabel": "描画のみ",
+      "pos": [
+        270,
+        80
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "app",
+      "type": "backend",
+      "label": "src/app/",
+      "sublabel": "状態とイベント処理",
+      "pos": [
+        270,
+        250
+      ],
+      "size": [
+        190,
+        64
+      ],
+      "tag": "Service / Pane / Message"
+    },
+    {
+      "id": "creds",
+      "type": "security",
+      "label": "認証情報",
+      "sublabel": "src/config.rs · keychain.rs",
+      "pos": [
+        270,
+        420
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "sacloud",
+      "type": "backend",
+      "label": "SacloudClient",
+      "sublabel": "src/sacloud.rs",
+      "pos": [
+        560,
+        80
+      ],
+      "size": [
+        190,
+        64
+      ],
+      "tag": "大半のサービスが共用"
+    },
+    {
+      "id": "dedicated",
+      "type": "backend",
+      "label": "専用クライアント群",
+      "sublabel": "apigw / apprun / monitoring",
+      "pos": [
+        560,
+        390
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "http",
+      "type": "backend",
+      "label": "src/http.rs",
+      "sublabel": "リトライとトレース",
+      "pos": [
+        850,
+        230
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "429 / 5xx を最大3回"
+    },
+    {
+      "id": "iaas",
+      "type": "cloud",
+      "label": "IaaS API 1.1",
+      "sublabel": "appliance / commonserviceitem",
+      "pos": [
+        1090,
+        80
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "tag": "Basic 認証"
+    },
+    {
+      "id": "service-api",
+      "type": "cloud",
+      "label": "サービス別API",
+      "sublabel": "iam / securitycontrol / apigw ほか",
+      "pos": [
+        1090,
+        230
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "tag": "Basic 認証"
+    },
+    {
+      "id": "ai-engine",
+      "type": "cloud",
+      "label": "AI Engine API",
+      "sublabel": "api.ai.sakura.ad.jp",
+      "pos": [
+        1090,
+        380
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "tag": "Bearer 認証"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "sakura-tui プロセス",
+      "wraps": [
+        "ui",
+        "app",
+        "creds",
+        "sacloud",
+        "dedicated",
+        "http"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "さくらのクラウド",
+      "wraps": [
+        "iaas",
+        "service-api",
+        "ai-engine"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "key-input",
+      "from": "terminal",
+      "to": "app",
+      "label": "キー入力",
+      "variant": "emphasis",
+      "labelDy": 28
+    },
+    {
+      "id": "state-to-ui",
+      "from": "app",
+      "to": "ui",
+      "label": "状態を渡す"
+    },
+    {
+      "id": "render",
+      "from": "ui",
+      "to": "terminal",
+      "label": "描画"
+    },
+    {
+      "id": "creds-to-app",
+      "from": "creds",
+      "to": "app",
+      "label": "APIキー / トークン",
+      "variant": "security"
+    },
+    {
+      "id": "spawn-shared",
+      "from": "app",
+      "to": "sacloud",
+      "label": "tokio::spawn",
+      "variant": "emphasis"
+    },
+    {
+      "id": "spawn-dedicated",
+      "from": "app",
+      "to": "dedicated",
+      "label": "tokio::spawn"
+    },
+    {
+      "id": "shared-http",
+      "from": "sacloud",
+      "to": "http"
+    },
+    {
+      "id": "dedicated-http",
+      "from": "dedicated",
+      "to": "http"
+    },
+    {
+      "id": "to-iaas",
+      "from": "http",
+      "to": "iaas"
+    },
+    {
+      "id": "to-service-api",
+      "from": "http",
+      "to": "service-api"
+    },
+    {
+      "id": "to-ai-engine",
+      "from": "http",
+      "to": "ai-engine"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "画面",
+      "items": [
+        "キー入力は app が受け、ui は状態を描くだけ",
+        "サービスごとに src/app/<名前>.rs と src/ui/<名前>.rs を対で追加する",
+        "Service・Pane・Message の網羅 match が追加漏れをコンパイルエラーにする"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "APIクライアント",
+      "items": [
+        "IaaS API 上のサービスは SacloudClient を共用する",
+        "別ホストのAPIゲートウェイ・AppRun・モニタリング・AI Engineだけ専用クライアントを持つ",
+        "通信は全て tokio::spawn し、結果を Message としてチャネルで受けるのでUIは止まらない"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "認証と横断処理",
+      "items": [
+        "APIキーは環境変数・usacloudプロファイル・OSキーチェーンから読む",
+        "AI Engineのアカウントトークンは資格情報プロファイルごとに保存する",
+        "429・5xx・接続エラーは指数バックオフで最大3回まで送り直す"
+      ]
+    }
+  ]
+}

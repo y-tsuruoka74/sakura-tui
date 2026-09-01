@@ -421,6 +421,11 @@ username = "your-registry-user"
 
 ## 構成
 
+全体の構造は [`docs/sakura-tui-architecture.html`](docs/sakura-tui-architecture.html) にまとめてあります。
+ブラウザで開くと、入力と描画のループ、共通クライアントと専用クライアントの分かれ方、
+認証とエンドポイントの3つの流れを順に追えます。
+図の元データは [`docs/sakura-tui.architecture.json`](docs/sakura-tui.architecture.json) です。
+
 | ファイル | 役割 |
 | --- | --- |
 | `src/config.rs` | 認証情報の読み込み（環境変数 / usacloud プロファイル）と設定ファイルの保存 |
