@@ -19,6 +19,7 @@ mod billing;
 mod cloudhsm;
 mod dedicated;
 mod forms;
+mod monitoring_suite;
 mod networking_suite;
 mod nosql;
 mod observability;
