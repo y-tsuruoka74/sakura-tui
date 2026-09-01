@@ -304,7 +304,9 @@ mod tests {
         set_registry_user_password(&host, "alice", "a-pass").unwrap();
         set_registry_user_password(&host, "bob", "b-pass").unwrap();
         assert_eq!(
-            get_registry_user_password(&host, "alice").unwrap().as_deref(),
+            get_registry_user_password(&host, "alice")
+                .unwrap()
+                .as_deref(),
             Some("a-pass")
         );
         assert_eq!(
