@@ -197,6 +197,19 @@ cargo build --release
 ./target/release/sakura-tui
 ```
 
+### 開発時のフック
+
+push する前に整形・lint・テストを通すフックを用意してあります。
+クローンし直したときは一度だけ有効にしてください。
+
+```sh
+git config core.hooksPath .githooks
+```
+
+`cargo fmt --check` → `cargo clippy`（警告もエラー扱い）→ `cargo test` を順に実行し、
+一つでも落ちれば push を中止します。合計で3秒ほどです。
+急ぐときは `git push --no-verify` で飛ばせます。
+
 ### コマンドラインオプション
 
 ```

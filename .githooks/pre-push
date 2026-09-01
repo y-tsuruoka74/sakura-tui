@@ -1,0 +1,32 @@
+#!/bin/sh
+# push する前に整形・lint・テストを通す。
+#
+# .git/hooks/ ではなくリポジトリ内に置いてあるので、次のコマンドで有効にする。
+#   git config core.hooksPath .githooks
+#
+# 急ぐときは git push --no-verify で飛ばせる。
+
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+# 安い順に並べて、落ちたところで早く止める。
+run() {
+	printf '  %-28s' "$1"
+	if shift && "$@" >/tmp/sakura-tui-prepush.log 2>&1; then
+		echo 'ok'
+	else
+		echo 'FAILED'
+		echo
+		sed 's/^/    /' /tmp/sakura-tui-prepush.log
+		echo
+		echo "push を中止しました。直してから push し直してください。"
+		echo "確認せずに push するなら git push --no-verify"
+		exit 1
+	fi
+}
+
+echo 'pre-push:'
+run 'cargo fmt --check' cargo fmt --check
+# 警告をエラー扱いにしないと、clippy がここで止める役に立たない。
+run 'cargo clippy' cargo clippy --all-targets --quiet -- -D warnings
+run 'cargo test' cargo test --quiet
