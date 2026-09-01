@@ -6874,6 +6874,9 @@ impl App {
     /// レジストリへのログインはホスト単位でクラウドの契約とは独立なので保持する。
     fn apply_credentials(&mut self, source: CredentialSource, credentials: ApiCredentials) -> bool {
         let was_configured = self.has_credentials;
+        // 次回の起動でここから再開できるようにする。
+        // 保存に失敗しても切り替え自体は続ける（見た目の設定と同じ扱い）。
+        let _ = crate::config::remember_last_credential(&source);
         // 世代を進める。前の資格情報で投げた通信の結果は、
         // これ以降に届いても画面に入らない。
         self.epoch += 1;

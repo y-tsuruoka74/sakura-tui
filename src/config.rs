@@ -189,6 +189,46 @@ fn keychain_source(name: &str) -> Result<CredentialSource> {
     }
 }
 
+/// 最後に使った認証元を覚える。次回の起動でここから再開する。
+pub fn remember_last_credential(source: &CredentialSource) -> Result<()> {
+    let mut config = Config::load()?;
+    let key = source.config_key();
+    if config.last_credential.as_deref() == Some(key.as_str()) {
+        return Ok(());
+    }
+    config.last_credential = Some(key);
+    config.save().map(|_| ())
+}
+
+/// `config_key()` の値から認証元を組み立て直す。
+///
+/// 設定に残っていても、プロファイルや設定ファイルの項目が消えていることが
+/// あるので、実在するものだけを返す。
+fn credential_source_from_key(key: &str) -> Option<CredentialSource> {
+    if key == "@env" {
+        return credentials_from_env().map(|_| CredentialSource::Env);
+    }
+    if let Some(name) = key.strip_prefix("@keychain:") {
+        return keychain_source(name).ok();
+    }
+    list_usacloud_profiles()
+        .into_iter()
+        .find(|p| p == key)
+        .map(CredentialSource::Profile)
+}
+
+/// 起動時に使う認証元を、環境変数と usacloud プロファイル以外から拾う。
+///
+/// 資格情報が残っているのに初期設定フォームを出すと、作り直しを促してしまう。
+/// 前回使ったものを優先し、無ければ実在する先頭を使う。
+pub fn fallback_credential_source() -> Option<CredentialSource> {
+    let last = Config::load().ok().and_then(|c| c.last_credential);
+    if let Some(source) = last.as_deref().and_then(credential_source_from_key) {
+        return Some(source);
+    }
+    available_credential_sources().into_iter().next()
+}
+
 /// 指定の出どころから認証情報を読み直す（TUI 内での切り替え用）。
 pub fn load_credentials_from(source: &CredentialSource) -> Result<ApiCredentials> {
     match source {
@@ -878,6 +918,12 @@ pub struct Config {
     /// クラウドAPI認証元ごとのIAMサービスプリンシパル識別情報。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub iam_credentials: BTreeMap<String, IamCredentialMetadata>,
+    /// 最後に使った認証元（`CredentialSource::config_key()` の値）。
+    ///
+    /// 起動時に環境変数も usacloud プロファイルも見つからないとき、
+    /// これを手がかりに前回の続きから始める。秘密値は含まない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_credential: Option<String>,
 }
 
 impl Config {
@@ -1392,6 +1438,22 @@ mod api_root_tests {
             DEFAULT_API_ROOT.replace("/cloud/", "/cloud-test/"),
             TEST_API_ROOT
         );
+    }
+
+    /// 認証元と `config_key()` の往復。起動時の復元がこのキーに依存する。
+    #[test]
+    fn credential_keys_round_trip() {
+        assert_eq!(CredentialSource::Env.config_key(), "@env");
+        assert_eq!(
+            CredentialSource::Profile("prod".to_string()).config_key(),
+            "prod"
+        );
+        assert_eq!(
+            CredentialSource::Keychain("crane74".to_string()).config_key(),
+            "@keychain:crane74"
+        );
+        // usacloud のプロファイル名に @ は使えないので、接頭辞と衝突しない。
+        assert!(!"prod".starts_with('@'));
     }
 
     /// `@keychain:` 接頭辞は、usacloud と同名でもキーチェーン側を選ぶ手段。

@@ -153,7 +153,15 @@ fn load_credentials(args: &Args) -> Result<ApiCredentials> {
             let source = config::resolve_credential_source(name)?;
             config::load_credentials_from(&source)
         }
-        None => config::load_api_credentials(false),
+        None => match config::load_api_credentials(false) {
+            Ok(credentials) => Ok(credentials),
+            // 環境変数も usacloud プロファイルも無いが、キーチェーンに
+            // 預けたものが残っていることがある。初期設定を促す前に拾う。
+            Err(err) => match config::fallback_credential_source() {
+                Some(source) => config::load_credentials_from(&source),
+                None => Err(err),
+            },
+        },
     }
 }
 
