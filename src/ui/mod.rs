@@ -1,6 +1,7 @@
 //! 画面描画。
 
 mod account;
+mod ai_engine;
 mod api_gateway;
 mod apprun;
 mod billing;
@@ -254,6 +255,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::SecurityControl => security_control::draw(frame, area, app),
         Service::CloudHsm => cloudhsm::draw(frame, area, app),
         Service::NetworkingSuite => networking_suite::draw(frame, area, app),
+        Service::AiEngine => ai_engine::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
@@ -269,7 +271,6 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         | Service::Database
         | Service::Nfs => cloud_resources::draw(frame, area, app),
         Service::ObjectStorage
-        | Service::AiEngine
         | Service::SimpleMq
         | Service::SimpleNotification
         | Service::EventBus
@@ -430,7 +431,10 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Service::Seg => hints.push("←→/hl タブ"),
         Service::SecurityControl => hints.push("←→/hl タブ"),
         Service::CloudHsm => hints.push("←→/hl タブ"),
-        Service::NetworkingSuite => hints.push("←→/hl タブ"),
+        Service::NetworkingSuite => {
+            hints.push("←→/hl タブ");
+        }
+        Service::AiEngine => hints.extend(["←→/hl タブ", "J/K 本文", "t トークン管理"]),
         Service::Dns => {
             hints.push(if app.dns.focus == crate::app::ListFocus::Left {
                 "Enter レコードへ"
@@ -574,7 +578,6 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         | Service::Database
         | Service::Nfs => hints.push("z ゾーン"),
         Service::ObjectStorage
-        | Service::AiEngine
         | Service::SimpleMq
         | Service::SimpleNotification
         | Service::EventBus
@@ -588,9 +591,6 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         | Service::AutoScale
         | Service::EnhancedDb
         | Service::AutoBackup => {
-            if app.service == Service::AiEngine {
-                hints.push("t トークン管理");
-            }
             if app.service == Service::Iam && app.mode == Mode::Write {
                 hints.extend([
                     "u ユーザー作成",

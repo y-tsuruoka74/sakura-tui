@@ -29,7 +29,18 @@ impl AiEngineClient {
     /// 公式OpenAPIには掲載されていないため、レスポンスに追加項目があっても壊れない
     /// ようJSONを柔軟に読む。
     pub async fn list_models(&self) -> Result<Vec<ManagedResource>> {
-        let url = reqwest::Url::parse(&format!("{API_ROOT}/v1/models"))?;
+        let text = self.get_text("/v1/models", &[]).await?;
+        parse_models(&text)
+    }
+
+    /// Bearer 認証で GET して本文をそのまま返す。
+    ///
+    /// モデル一覧と RAG は同じホスト・同じトークンなので、送受信をここへ寄せる。
+    /// 解析は用途ごとに違うため呼び出し側に任せる。
+    pub(crate) async fn get_text(&self, path: &str, query: &[(&str, String)]) -> Result<String> {
+        let mut url = reqwest::Url::parse(&format!("{API_ROOT}{path}"))?;
+        url.query_pairs_mut()
+            .extend_pairs(query.iter().map(|(key, value)| (*key, value.as_str())));
         let response = crate::http::send_with_retry(&self.http, || {
             Ok(self
                 .http
@@ -39,7 +50,7 @@ impl AiEngineClient {
                 .build()?)
         })
         .await
-        .context("AI Engineモデル一覧の取得に失敗しました")?;
+        .context("AI Engine APIへのリクエストに失敗しました")?;
         let status = response.status();
         let text = response
             .text()
@@ -48,7 +59,7 @@ impl AiEngineClient {
         if !status.is_success() {
             bail!("{}", format_error(status, &text));
         }
-        parse_models(&text)
+        Ok(text)
     }
 }
 

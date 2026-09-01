@@ -4,6 +4,7 @@
 
 mod account;
 mod ai_engine;
+mod ai_rag;
 mod api_gateway;
 mod app;
 mod apprun;

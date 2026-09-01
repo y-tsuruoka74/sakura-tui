@@ -12,6 +12,7 @@ use ratatui::widgets::{ListState, TableState};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod account;
+mod ai_engine;
 mod api_gateway;
 mod apprun;
 mod billing;
@@ -26,6 +27,7 @@ mod server;
 mod switch;
 
 pub use account::AccountView;
+pub use ai_engine::{AiEngineTab, AiEngineView};
 pub use api_gateway::{ApiGatewayTab, ApiGatewayView};
 pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
@@ -43,6 +45,7 @@ pub use switch::SwitchView;
 
 use crate::account::AuthStatus;
 use crate::ai_engine::AiEngineClient;
+use crate::ai_rag::{RagChunk, RagDocument};
 use crate::api_gateway::{
     ApiGatewayClient, ApiGatewayGroup, ApiGatewayService, ApiGatewayUser, Certificate, Domain,
     Oidc, Route, Subscription, UserAuthentication,
@@ -169,6 +172,13 @@ pub enum Message {
     NetworkingSuiteAddresses {
         subnet_srn: String,
         result: Result<Vec<SubnetAddress>, String>,
+    },
+    AiEngineDocuments {
+        result: Result<Vec<RagDocument>, String>,
+    },
+    AiEngineChunks {
+        document_id: String,
+        result: Result<Vec<RagChunk>, String>,
     },
     IamAction {
         label: String,
@@ -532,6 +542,8 @@ pub enum Pane {
     NetworkingSuiteGroups,
     NetworkingSuiteSubnets,
     NetworkingSuiteAddresses,
+    // AI Engine（RAG）
+    AiEngineDocuments,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -2818,6 +2830,7 @@ pub struct App {
     pub security_control: SecurityControlView,
     pub cloudhsm: CloudHsmView,
     pub networking_suite: NetworkingSuiteView,
+    pub ai_engine: AiEngineView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2885,6 +2898,7 @@ impl App {
             security_control: SecurityControlView::default(),
             cloudhsm: CloudHsmView::default(),
             networking_suite: NetworkingSuiteView::default(),
+            ai_engine: AiEngineView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -3140,7 +3154,6 @@ impl App {
             | Service::Database
             | Service::Nfs => Pane::CloudResources,
             Service::ObjectStorage
-            | Service::AiEngine
             | Service::SimpleMq
             | Service::SimpleNotification
             | Service::EventBus
@@ -3154,6 +3167,11 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb
             | Service::AutoBackup => Pane::ManagedResources,
+            Service::AiEngine => match self.ai_engine.tab {
+                // モデル一覧はマネージドリソースの枠をそのまま使う。
+                AiEngineTab::Models => Pane::ManagedResources,
+                AiEngineTab::Documents => Pane::AiEngineDocuments,
+            },
             Service::NetworkingSuite => match self.networking_suite.tab {
                 NetworkingSuiteTab::Groups => Pane::NetworkingSuiteGroups,
                 NetworkingSuiteTab::Subnets => Pane::NetworkingSuiteSubnets,
@@ -3337,7 +3355,6 @@ impl App {
             | Service::Database
             | Service::Nfs => self.cloud_resources_ensure_loaded(),
             Service::ObjectStorage
-            | Service::AiEngine
             | Service::SimpleMq
             | Service::SimpleNotification
             | Service::EventBus
@@ -3351,6 +3368,7 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb
             | Service::AutoBackup => self.managed_resources_ensure_loaded(),
+            Service::AiEngine => self.ai_engine_ensure_loaded(),
             Service::NetworkingSuite => self.networking_suite_ensure_loaded(),
             Service::CloudHsm => self.cloudhsm_ensure_loaded(),
             Service::SecurityControl => self.security_control_ensure_loaded(),
@@ -3571,6 +3589,19 @@ impl App {
                 self.nosql.parameters.insert(database_id, loadable);
                 self.fill_selection(Pane::NoSqlParameters);
             }
+            Message::AiEngineDocuments { result } => {
+                self.ai_engine.documents = self.store_result(result);
+                self.fill_selection(Pane::AiEngineDocuments);
+                self.ai_engine.chunk_scroll = 0;
+                self.ai_engine_ensure_loaded();
+            }
+            Message::AiEngineChunks {
+                document_id,
+                result,
+            } => {
+                let loadable = self.store_result(result);
+                self.ai_engine.chunks.insert(document_id, loadable);
+            }
             Message::NetworkingSuiteGroups { result } => {
                 self.networking_suite.groups = self.store_result(result);
                 self.fill_selection(Pane::NetworkingSuiteGroups);
@@ -3671,6 +3702,7 @@ impl App {
                             self.managed_resources
                                 .state
                                 .select((count > 0).then_some(0));
+                            self.ai_engine_reset_rag();
                             self.overlay = None;
                             self.set_status(
                                 format!("AI Engineトークン「{name}」を保存しました（利用可能なモデル {count} 件）"),
@@ -4979,11 +5011,6 @@ impl App {
             Service::Registry => self.on_key_registry(key),
             Service::AppRun => self.on_key_apprun(key),
             Service::Dedicated => self.on_key_dedicated(key),
-            Service::AiEngine => {
-                if key.code == KeyCode::Char('t') {
-                    self.open_ai_engine_token_form();
-                }
-            }
             Service::Server => self.on_key_server(key),
             Service::Switch => self.on_key_switch(key),
             Service::Disk
@@ -5011,6 +5038,7 @@ impl App {
             | Service::AutoScale
             | Service::EnhancedDb
             | Service::AutoBackup => {}
+            Service::AiEngine => self.on_key_ai_engine(key),
             Service::NetworkingSuite => self.on_key_networking_suite(key),
             Service::CloudHsm => self.on_key_cloudhsm(key),
             Service::SecurityControl => self.on_key_security_control(key),
@@ -5843,12 +5871,18 @@ impl App {
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
             Service::CloudHsm => self.cloudhsm.hsms.get(&self.zone)?.ready()?.len(),
             Service::NetworkingSuite => self.networking_suite.groups.ready()?.len(),
+            // 件数はモデル一覧のもの。RAG はトークン次第なので数えない。
+            Service::AiEngine => self
+                .managed_resources
+                .items
+                .get(&ManagedResourceKind::AiEngine)?
+                .ready()?
+                .len(),
             Service::SecurityControl => self.security_control.rules.ready()?.len(),
             Service::Seg => self.seg.gateways.get(&self.zone)?.ready()?.len(),
             Service::NoSql => self.nosql.databases.ready()?.len(),
             Service::ApiGateway => self.api_gateway.services.ready()?.len(),
             Service::ObjectStorage
-            | Service::AiEngine
             | Service::SimpleMq
             | Service::SimpleNotification
             | Service::EventBus
@@ -5863,7 +5897,6 @@ impl App {
             | Service::EnhancedDb
             | Service::AutoBackup => {
                 let kind = match service {
-                    Service::AiEngine => ManagedResourceKind::AiEngine,
                     Service::ObjectStorage => ManagedResourceKind::ObjectStorage,
                     Service::SimpleMq => ManagedResourceKind::SimpleMq,
                     Service::SimpleNotification => ManagedResourceKind::SimpleNotification,
@@ -6032,6 +6065,10 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::AiEngineDocuments => self
+                .visible_ai_engine_documents()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::NetworkingSuiteGroups => self
                 .visible_networking_suite_groups()
                 .ready()
@@ -6128,6 +6165,7 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::AiEngineDocuments => Some(&mut self.ai_engine.document_state),
             Pane::NetworkingSuiteGroups => Some(&mut self.networking_suite.group_state),
             Pane::NetworkingSuiteSubnets => Some(&mut self.networking_suite.subnet_state),
             Pane::NetworkingSuiteAddresses => Some(&mut self.networking_suite.address_state),
@@ -6285,6 +6323,9 @@ impl App {
                 .map(|resource| resource.id),
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
+                .map(|resource| resource.id),
+            Pane::AiEngineDocuments => self
+                .selected_ai_engine_document()
                 .map(|resource| resource.id),
             // 数値IDのフィールドが無いので、参照に使う SRN をそのまま渡す。
             Pane::NetworkingSuiteGroups => self
@@ -6493,6 +6534,7 @@ impl App {
                 self.managed_resources
                     .items
                     .remove(&ManagedResourceKind::AiEngine);
+                self.ai_engine_reset_rag();
                 self.overlay = None;
                 self.set_status(
                     format!("AI Engineトークン「{name}」へ切り替えました"),
@@ -6817,7 +6859,6 @@ impl App {
                 self.cloud_resources_ensure_loaded();
             }
             Service::ObjectStorage
-            | Service::AiEngine
             | Service::SimpleMq
             | Service::SimpleNotification
             | Service::EventBus
@@ -6836,6 +6877,7 @@ impl App {
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::AiEngine => self.ai_engine_refresh(),
             Service::NetworkingSuite => self.networking_suite_refresh(),
             Service::CloudHsm => self.cloudhsm_refresh(),
             Service::SecurityControl => self.security_control_refresh(),
@@ -7026,6 +7068,7 @@ impl App {
         self.security_control = SecurityControlView::default();
         self.cloudhsm = CloudHsmView::default();
         self.networking_suite = NetworkingSuiteView::default();
+        self.ai_engine = AiEngineView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -7149,6 +7192,11 @@ impl App {
         if pane == Pane::CloudHsmHsms {
             self.cloudhsm.client_state.select(None);
             self.cloudhsm_ensure_loaded();
+        }
+        if pane == Pane::AiEngineDocuments {
+            // 別のドキュメントを選んだら本文は先頭から読み直す。
+            self.ai_engine.chunk_scroll = 0;
+            self.ai_engine_ensure_loaded();
         }
         if pane == Pane::NetworkingSuiteGroups {
             self.networking_suite.subnet_state.select(None);
@@ -7434,6 +7482,7 @@ impl App {
                         self.managed_resources
                             .items
                             .remove(&ManagedResourceKind::AiEngine);
+                        self.ai_engine_reset_rag();
                         self.set_status(
                             format!("このPCからAI Engineトークン「{name}」を削除しました"),
                             StatusKind::Success,
@@ -9379,6 +9428,13 @@ mod tests {
                 "webaccel",
             ]
         );
+    }
+
+    /// AI Engine は推論API（モデル一覧）と RAG を1つのサービスにまとめている。
+    #[test]
+    fn ai_category_has_a_single_merged_service() {
+        let names: Vec<&str> = Category::Ai.services().map(Service::arg_name).collect();
+        assert_eq!(names, vec!["ai-engine"]);
     }
 
     #[test]
