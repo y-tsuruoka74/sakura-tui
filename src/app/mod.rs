@@ -18,6 +18,7 @@ mod billing;
 mod dedicated;
 mod nosql;
 mod observability;
+mod seg;
 mod server;
 mod switch;
 
@@ -30,6 +31,7 @@ pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
     DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
 };
+pub use seg::{SegTab, SegView};
 pub use server::ServerView;
 pub use switch::SwitchView;
 
@@ -57,6 +59,7 @@ use crate::nosql::{NoSqlBackup, NoSqlDatabase, NoSqlNodeHealth, NoSqlParameter, 
 use crate::registry::{RegistryClients, TagDetail, TagInfo};
 use crate::sacloud::{ContainerRegistry, Permission, RegistryUser, ResourceId, SacloudClient};
 use crate::secretmanager::{Secret, Vault};
+use crate::seg::Seg;
 use crate::switch::Switch;
 
 /// 非同期処理の結果。
@@ -117,6 +120,10 @@ pub enum Message {
     NoSqlParameters {
         database_id: String,
         result: Result<Vec<NoSqlParameter>, String>,
+    },
+    SegGateways {
+        zone: String,
+        result: Result<Vec<Seg>, String>,
     },
     IamAction {
         label: String,
@@ -465,6 +472,9 @@ pub enum Pane {
     NoSqlNodes,
     NoSqlBackups,
     NoSqlParameters,
+    // サービスエンドポイントゲートウェイ
+    SegGateways,
+    SegServices,
     // DNS / シンプル監視
     DnsZones,
     DnsRecords,
@@ -726,6 +736,7 @@ pub enum Service {
     Gslb,
     MobileGateway,
     LocalRouter,
+    Seg,
     Database,
     NoSql,
     Nfs,
@@ -757,7 +768,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 38] = [
+    pub const ALL: [Service; 39] = [
         // コンピュート
         Service::Server,
         // コンテナ・アプリ実行
@@ -784,6 +795,7 @@ impl Service {
         Service::MobileGateway,
         Service::LocalRouter,
         Service::Dns,
+        Service::Seg,
         Service::WebAccel,
         // ストレージ・データ
         Service::Disk,
@@ -1060,6 +1072,14 @@ impl Service {
                 countable_label: None,
                 count_label: Some("DNSゾーン"),
                 zoned: false,
+            },
+            Service::Seg => ServiceMeta {
+                category: Category::Network,
+                title: "サービスエンドポイントゲートウェイ",
+                arg_name: "seg",
+                countable_label: Some("ゲートウェイ"),
+                count_label: Some("台"),
+                zoned: true,
             },
             Service::Secrets => ServiceMeta {
                 category: Category::Security,
@@ -2693,6 +2713,7 @@ pub struct App {
     pub managed_resources: ManagedResourcesView,
     pub api_gateway: ApiGatewayView,
     pub nosql: NoSqlView,
+    pub seg: SegView,
     pub dns: DnsView,
     pub simple_monitor: SimpleMonitorView,
     pub secrets: SecretsView,
@@ -2756,6 +2777,7 @@ impl App {
             managed_resources: ManagedResourcesView::default(),
             api_gateway: ApiGatewayView::default(),
             nosql: NoSqlView::default(),
+            seg: SegView::default(),
             dns: DnsView::default(),
             simple_monitor: SimpleMonitorView::default(),
             secrets: SecretsView::default(),
@@ -3023,6 +3045,10 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => Pane::ManagedResources,
+            Service::Seg => match self.seg.tab {
+                SegTab::Gateways => Pane::SegGateways,
+                SegTab::Services => Pane::SegServices,
+            },
             Service::NoSql => match self.nosql.tab {
                 NoSqlTab::Databases => Pane::NoSqlDatabases,
                 NoSqlTab::Nodes => Pane::NoSqlNodes,
@@ -3200,6 +3226,7 @@ impl App {
             | Service::Iam
             | Service::AutoScale
             | Service::EnhancedDb => self.managed_resources_ensure_loaded(),
+            Service::Seg => self.seg_ensure_loaded(),
             Service::NoSql => self.nosql_ensure_loaded(),
             Service::ApiGateway => self.api_gateway_ensure_loaded(),
             Service::Dns => self.dns_ensure_loaded(),
@@ -3415,6 +3442,12 @@ impl App {
                 let loadable = self.store_result(result);
                 self.nosql.parameters.insert(database_id, loadable);
                 self.fill_selection(Pane::NoSqlParameters);
+            }
+            Message::SegGateways { zone, result } => {
+                let loadable = self.store_result(result);
+                self.seg.gateways.insert(zone, loadable);
+                self.fill_selection(Pane::SegGateways);
+                self.fill_selection(Pane::SegServices);
             }
             Message::IamAction { label, result } => match result {
                 Ok(()) => {
@@ -4795,6 +4828,7 @@ impl App {
             | Service::Kms
             | Service::AutoScale
             | Service::EnhancedDb => {}
+            Service::Seg => self.on_key_seg(key),
             Service::NoSql => self.on_key_nosql(key),
             Service::ApiGateway => self.on_key_api_gateway(key),
             Service::Secrets => self.on_key_secrets(key),
@@ -5371,6 +5405,7 @@ impl App {
                     }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&name).await,
+                    Service::Seg => sacloud.list_segs(&name).await.map(|v| v.len()),
                     Service::ApiGateway => Ok(0),
                     _ => Ok(0),
                 };
@@ -5474,6 +5509,7 @@ impl App {
                     }
                     Service::Secrets => sacloud.count_vaults().await,
                     Service::Monitoring => monitoring.count_projects(&zone).await,
+                    Service::Seg => sacloud.list_segs(&zone).await.map(|v| v.len()),
                     Service::NoSql => sacloud.list_nosql_databases().await.map(|v| v.len()),
                     Service::ApiGateway => api_gateway.list_services().await.map(|v| v.len()),
                     // 件数専用の API が無いものは一覧を引いて数える。
@@ -5609,6 +5645,7 @@ impl App {
             }
             Service::Secrets => self.secrets.vaults.ready()?.len(),
             Service::Monitoring => self.monitoring.projects.get(&self.zone)?.ready()?.len(),
+            Service::Seg => self.seg.gateways.get(&self.zone)?.ready()?.len(),
             Service::NoSql => self.nosql.databases.ready()?.len(),
             Service::ApiGateway => self.api_gateway.services.ready()?.len(),
             Service::ObjectStorage
@@ -5794,6 +5831,8 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::SegGateways => self.visible_seg_gateways().ready().map_or(0, Vec::len),
+            Pane::SegServices => self.visible_seg_services().ready().map_or(0, Vec::len),
             Pane::NoSqlDatabases => self.visible_nosql_databases().ready().map_or(0, Vec::len),
             Pane::NoSqlNodes => self.visible_nosql_nodes().ready().map_or(0, Vec::len),
             Pane::NoSqlBackups => self.visible_nosql_backups().ready().map_or(0, Vec::len),
@@ -5861,6 +5900,8 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::SegGateways => Some(&mut self.seg.gateway_state),
+            Pane::SegServices => Some(&mut self.seg.service_state),
             Pane::NoSqlDatabases => Some(&mut self.nosql.database_state),
             Pane::NoSqlNodes => Some(&mut self.nosql.node_state),
             Pane::NoSqlBackups => Some(&mut self.nosql.backup_state),
@@ -6008,6 +6049,12 @@ impl App {
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
                 .map(|resource| resource.id),
+            Pane::SegGateways => self.selected_seg_gateway().map(|resource| resource.id),
+            // 接続先サービスはIDを持たないので、エンドポイントを渡す。
+            Pane::SegServices => self
+                .selected_seg_service()
+                .map(|resource| resource.endpoint)
+                .filter(|endpoint| !endpoint.is_empty()),
             Pane::NoSqlDatabases => self.selected_nosql_database().map(|resource| resource.id),
             // ノードは自前のIDを持たないので、所属アプライアンスのIDを渡す。
             Pane::NoSqlNodes => self
@@ -6529,6 +6576,7 @@ impl App {
                 }
                 self.managed_resources_ensure_loaded();
             }
+            Service::Seg => self.seg_refresh(),
             Service::NoSql => self.nosql_refresh(),
             Service::ApiGateway => self.api_gateway_refresh(),
             // 複数ペインのサービスは、該当キャッシュを捨てて読み直す。
@@ -6711,6 +6759,7 @@ impl App {
         self.managed_resources.state.select(None);
         self.api_gateway = ApiGatewayView::default();
         self.nosql = NoSqlView::default();
+        self.seg = SegView::default();
         self.observability_invalidate();
         self.billing_invalidate();
         self.account_invalidate();
@@ -6825,6 +6874,11 @@ impl App {
         if pane == Pane::NoSqlDatabases {
             self.nosql_reset_child_selection();
             self.nosql_ensure_loaded();
+        }
+        // 接続先サービスは一覧に含まれるので、選択位置を捨てるだけでよい。
+        if pane == Pane::SegGateways {
+            self.seg_reset_child_selection();
+            self.fill_selection(Pane::SegServices);
         }
         if self.service != Service::Registry {
             return;
@@ -9008,6 +9062,46 @@ mod tests {
     fn nosql_is_not_zone_scoped() {
         assert!(!Service::NoSql.is_zoned());
         assert_eq!(Service::NoSql.countable_label(), None);
+    }
+
+    #[test]
+    fn seg_is_resolvable_from_service_arg() {
+        assert_eq!(Service::from_arg("seg"), Some(Service::Seg));
+    }
+
+    /// ネットワーク分類の並び。DNS の後、ウェブアクセラレータの前。
+    #[test]
+    fn network_category_lists_seg_after_dns() {
+        let names: Vec<&str> = Category::Network
+            .services()
+            .map(Service::arg_name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "switch",
+                "internet",
+                "packet-filter",
+                "bridge",
+                "loadbalancer",
+                "enhanced-loadbalancer",
+                "vpcrouter",
+                "gslb",
+                "mobile-gateway",
+                "local-router",
+                "dns",
+                "seg",
+                "webaccel",
+            ]
+        );
+    }
+
+    /// SEG は全ゾーンで提供されるので、ゾーン切り替えとゾーン別件数の対象。
+    /// countable_label が Some なら load_zone_counts の match に分岐が要る。
+    #[test]
+    fn seg_is_zone_scoped_and_counted_per_zone() {
+        assert!(Service::Seg.is_zoned());
+        assert_eq!(Service::Seg.countable_label(), Some("ゲートウェイ"));
     }
 }
 

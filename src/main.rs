@@ -22,6 +22,7 @@ mod nosql;
 mod registry;
 mod sacloud;
 mod secretmanager;
+mod seg;
 mod switch;
 mod ui;
 
