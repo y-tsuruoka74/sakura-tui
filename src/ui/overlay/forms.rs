@@ -3,6 +3,7 @@
 //! 定義と編集操作は `src/app/forms.rs` にあり、ここは見た目だけを持つ。
 
 use super::*;
+use crate::ui::clip;
 
 pub(super) fn draw_user_form(frame: &mut Frame, form: &UserForm) {
     let title = match form.mode {
@@ -1251,23 +1252,6 @@ fn selectable_line(
             Style::default().fg(DIM),
         ),
     ])
-}
-
-/// 表示セル数で切り詰める。切ったことが分かるよう末尾に … を付ける。
-fn clip(text: &str, width: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    if text.width() <= width {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    for c in text.chars() {
-        if out.width() + c.to_string().width() > width.saturating_sub(1) {
-            break;
-        }
-        out.push(c);
-    }
-    out.push('…');
-    out
 }
 
 pub(super) fn draw_rag_edit_form(frame: &mut Frame, form: &RagEditForm) {

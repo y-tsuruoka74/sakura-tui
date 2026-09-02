@@ -82,6 +82,61 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     overlay::draw(frame, app);
 }
 
+/// ヘッダーの部品。幅が足りないときは、この番号が大きいものから落とす。
+///
+/// 誰として・どのモードで操作しているかは、書き込みの前に必ず見える必要がある
+/// ので落とさない（`KEEP`）。
+struct HeaderPart {
+    drop_order: u8,
+    spans: Vec<Span<'static>>,
+}
+
+impl HeaderPart {
+    /// 落としてはいけない部品。
+    const KEEP: u8 = 0;
+
+    fn new(drop_order: u8, spans: Vec<Span<'static>>) -> Self {
+        Self { drop_order, spans }
+    }
+
+    /// 区切りを前に付けた部品。落とすと区切りも一緒に消える。
+    fn after_separator(drop_order: u8, spans: Vec<Span<'static>>) -> Self {
+        let mut with_sep = vec![separator()];
+        with_sep.extend(spans);
+        Self::new(drop_order, with_sep)
+    }
+}
+
+/// 幅に収まるまで、優先度の低い部品から落とす。
+fn fit_header(parts: Vec<HeaderPart>, area_width: usize) -> Vec<Span<'static>> {
+    let mut parts = parts;
+    loop {
+        let total: usize = parts.iter().map(|p| width(&p.spans)).sum();
+        if total <= area_width {
+            break;
+        }
+        // 落としてよいもののうち、いちばん優先度が低いものを1つ外す。
+        let Some((index, _)) = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.drop_order != HeaderPart::KEEP)
+            .max_by_key(|(_, p)| p.drop_order)
+        else {
+            break;
+        };
+        parts.remove(index);
+    }
+    let mut spans: Vec<Span<'static>> = parts.into_iter().flat_map(|p| p.spans).collect();
+    // 先頭の部品を落とすと、次の部品が持つ区切りが行頭に残る。
+    if spans
+        .first()
+        .is_some_and(|span| span.content == separator().content)
+    {
+        spans.remove(0);
+    }
+    spans
+}
+
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let choosing_service = matches!(
         app.overlay,
@@ -92,78 +147,111 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         " "
     };
-    let mut spans = vec![
-        Span::styled(
+
+    let mut parts = vec![HeaderPart::new(
+        3,
+        vec![Span::styled(
             " sakura-tui ",
             Style::default()
                 .fg(accent())
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-        ),
-        separator(),
-        Span::styled(
-            if choosing_service {
-                "サービスを選択"
-            } else {
-                app.service.title()
-            },
-            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" (s)", Style::default().fg(DIM)),
-        separator(),
-        mode_badge(app.mode),
-    ];
-    // ゾーンはゾーン依存のサービスのときだけ出す。
-    if !choosing_service && app.service.is_zoned() {
-        spans.push(separator());
-        spans.push(Span::styled(
-            format!("ゾーン {}", app.zone),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    // 本番以外に繋いでいるときは、それが分かるようにする。
-    if app.api_root != crate::config::DEFAULT_API_ROOT {
-        spans.push(separator());
-        spans.push(Span::styled(
-            format!(" {} ", environment_label(&app.api_root)),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    spans.push(separator());
-    if app.has_credentials {
-        spans.extend(credential_badge(
-            &app.credential_source,
-            app.config
-                .profile_color(&app.credential_source)
-                .and_then(parse_color),
-        ));
-        spans.push(Span::styled(" (p)", Style::default().fg(DIM)));
-    } else {
-        spans.push(Span::styled(
-            " 認証情報未設定 ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(spinner, Style::default().fg(accent())));
+        )],
+    )];
 
     // 分類を添えて、今どのあたりを見ているのかが分かるようにする。
-    // ただしプロファイル名やモードの方が大事なので、幅が足りなければ落とす。
     if !choosing_service {
-        let category = Span::styled(
-            format!("{} / ", app.service.category().title()),
-            Style::default().fg(DIM),
-        );
-        if width(&spans) + width(std::slice::from_ref(&category)) <= area.width as usize {
-            // サービス名の直前（"sakura-tui" と区切りの後ろ）に差し込む。
-            spans.insert(2, category);
-        }
+        parts.push(HeaderPart::after_separator(
+            4,
+            vec![Span::styled(
+                format!("{} / ", app.service.category().title()),
+                Style::default().fg(DIM),
+            )],
+        ));
     }
+    // 分類を落としたときに区切りが残らないよう、サービス名は区切りを持たない。
+    let service_has_separator = choosing_service;
+    let service = Span::styled(
+        if choosing_service {
+            "サービスを選択"
+        } else {
+            app.service.title()
+        },
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+    );
+    parts.push(if service_has_separator {
+        HeaderPart::after_separator(2, vec![service])
+    } else {
+        HeaderPart::new(2, vec![separator(), service])
+    });
+    parts.push(HeaderPart::new(
+        5,
+        vec![Span::styled(" (s)", Style::default().fg(DIM))],
+    ));
+
+    parts.push(HeaderPart::after_separator(
+        HeaderPart::KEEP,
+        vec![mode_badge(app.mode)],
+    ));
+
+    // ゾーンはゾーン依存のサービスのときだけ出す。
+    if !choosing_service && app.service.is_zoned() {
+        parts.push(HeaderPart::after_separator(
+            2,
+            vec![Span::styled(
+                format!("ゾーン {}", app.zone),
+                Style::default().fg(Color::Cyan),
+            )],
+        ));
+    }
+    // 本番以外に繋いでいるときは、それが分かるようにする。落とさない。
+    if app.api_root != crate::config::DEFAULT_API_ROOT {
+        parts.push(HeaderPart::after_separator(
+            HeaderPart::KEEP,
+            vec![Span::styled(
+                format!(" {} ", environment_label(&app.api_root)),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )],
+        ));
+    }
+
+    if app.has_credentials {
+        parts.push(HeaderPart::after_separator(
+            HeaderPart::KEEP,
+            credential_badge(
+                &app.credential_source,
+                app.config
+                    .profile_color(&app.credential_source)
+                    .and_then(parse_color),
+            ),
+        ));
+        parts.push(HeaderPart::new(
+            5,
+            vec![Span::styled(" (p)", Style::default().fg(DIM))],
+        ));
+    } else {
+        parts.push(HeaderPart::after_separator(
+            HeaderPart::KEEP,
+            vec![Span::styled(
+                " 認証情報未設定 ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )],
+        ));
+    }
+    parts.push(HeaderPart::new(
+        4,
+        vec![
+            Span::raw("  "),
+            Span::styled(spinner, Style::default().fg(accent())),
+        ],
+    ));
+
+    let spans = fit_header(parts, area.width as usize);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -399,6 +487,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     };
     // 複数行のエラーはステータス行に収まらないので 1 行にまとめる。
     let text = text.replace('\n', " ");
+    // 行を増やすと本文の高さがメッセージのたびに変わって落ち着かないので、
+    // 1 行のまま切る。切ったことは … で分かるようにする。
+    let text = clip(&text, area.width.saturating_sub(1) as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(format!(" {text}"), style))),
         area,
@@ -800,6 +891,25 @@ pub fn pad(label: &str, width: usize) -> String {
     format!("{label}{}", " ".repeat(pad))
 }
 
+/// 表示セル数で切り詰める。切ったことが分かるよう末尾に … を付ける。
+///
+/// 端末の右端で黙って切れると、続きがあることに気づけない。
+pub fn clip(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if out.width() + c.to_string().width() > width.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 /// ラベル幅を表示セル数で揃えた `ラベル  値` の行。
 pub fn field(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
@@ -904,6 +1014,81 @@ mod color_tests {
         for name in PROFILE_COLORS {
             assert!(parse_color(name).is_some(), "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    fn part(order: u8, text: &'static str) -> HeaderPart {
+        HeaderPart::after_separator(order, vec![Span::raw(text)])
+    }
+
+    /// 落としてよい部品だけを、優先度の低い順に落とすこと。
+    #[test]
+    fn the_identity_and_mode_survive_a_narrow_terminal() {
+        let parts = vec![
+            HeaderPart::new(3, vec![Span::raw(" sakura-tui ")]),
+            part(4, "コンピュート / "),
+            part(2, "サーバー"),
+            part(5, " (s)"),
+            part(HeaderPart::KEEP, " 書込可 "),
+            part(2, "ゾーン is1a"),
+            part(HeaderPart::KEEP, "◆ crane74"),
+        ];
+        for width in [80usize, 50, 40, 30, 20] {
+            let spans = fit_header(
+                vec![
+                    HeaderPart::new(3, vec![Span::raw(" sakura-tui ")]),
+                    part(4, "コンピュート / "),
+                    part(2, "サーバー"),
+                    part(5, " (s)"),
+                    part(HeaderPart::KEEP, " 書込可 "),
+                    part(2, "ゾーン is1a"),
+                    part(HeaderPart::KEEP, "◆ crane74"),
+                ],
+                width,
+            );
+            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("crane74"), "幅 {width} で認証情報が消えた");
+            assert!(text.contains("書込可"), "幅 {width} でモードが消えた");
+        }
+        // 十分な幅なら何も落とさない。
+        let total: usize = parts.iter().map(|p| width(&p.spans)).sum();
+        let spans = fit_header(parts, total);
+        assert_eq!(width(&spans), total);
+    }
+
+    /// 先頭の部品を落としたとき、区切りが行頭に残らないこと。
+    #[test]
+    fn dropping_the_title_does_not_leave_a_separator() {
+        let spans = fit_header(
+            vec![
+                HeaderPart::new(3, vec![Span::raw(" sakura-tui ")]),
+                part(2, "サーバー"),
+                part(HeaderPart::KEEP, "◆ crane74"),
+            ],
+            // "サーバー │ ◆ crane74" がぎりぎり入る幅。
+            22,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.starts_with(" │ "), "行頭に区切りが残った: {text:?}");
+        assert!(text.contains("crane74"));
+    }
+
+    /// 落とせるものが尽きても止まること（無限ループにしない）。
+    #[test]
+    fn it_stops_when_nothing_more_can_be_dropped() {
+        let spans = fit_header(
+            vec![
+                part(HeaderPart::KEEP, "とても長い認証情報の名前"),
+                part(HeaderPart::KEEP, " 書込可 "),
+            ],
+            10,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("認証情報"));
     }
 }
 
