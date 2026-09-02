@@ -61,20 +61,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap_or(SAKURA);
     ACCENT.with(|current| current.set(color));
 
+    // ヒントは幅次第で2行になるので、先に組み立てて高さを決める。
+    let hints = fit_hints(&hints_for(app), frame.area().width as usize);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // ヘッダー
-            Constraint::Min(3),    // 本体
-            Constraint::Length(1), // ステータス
-            Constraint::Length(1), // キーヒント
+            Constraint::Length(1),                  // ヘッダー
+            Constraint::Min(3),                     // 本体
+            Constraint::Length(1),                  // ステータス
+            Constraint::Length(hints.len() as u16), // キーヒント
         ])
         .split(frame.area());
 
     draw_header(frame, chunks[0], app);
     draw_body(frame, chunks[1], app);
     draw_status(frame, chunks[2], app);
-    draw_hints(frame, chunks[3], app);
+    draw_hints(frame, chunks[3], &hints);
 
     overlay::draw(frame, app);
 }
@@ -402,8 +405,12 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
-    let mut hints: Vec<&str> = vec!["↑↓/jk 移動", "s サービス", "r 更新"];
+/// その画面で使えるキーの一覧。
+///
+/// 見ているペインで使えないキーは出さない。行に収まる数が限られるので、
+/// 出しても押せないキーに桁を使わない。
+fn hints_for(app: &App) -> Vec<&'static str> {
+    let mut hints: Vec<&'static str> = vec!["↑↓/jk 移動", "s サービス", "r 更新"];
     match app.service {
         Service::Registry => {
             hints.push("Tab タブ");
@@ -572,17 +579,21 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             hints.push("z ゾーン");
             hints.push("Tab サーバー/NIC");
             if app.mode == Mode::Write {
-                hints.extend([
-                    "n 作成",
-                    "D 削除",
-                    "P プラン変更",
-                    "c NIC接続先",
-                    "f NICフィルタ",
-                    "b 起動",
-                    "x 停止",
-                    "X 強制停止",
-                    "B 強制リセット",
-                ]);
+                // NIC を見ているときはサーバーの電源操作を出さない。
+                // 同じ n / D が別のものを指すので、今の相手だけ案内する。
+                if app.server.focus == crate::app::ListFocus::Right {
+                    hints.extend(["n NIC追加", "D NIC削除", "c 接続先", "f フィルタ"]);
+                } else {
+                    hints.extend([
+                        "n 作成",
+                        "D 削除",
+                        "P プラン変更",
+                        "b 起動",
+                        "x 停止",
+                        "X 強制停止",
+                        "B 強制リセット",
+                    ]);
+                }
             }
         }
         Service::Switch => {
@@ -601,7 +612,11 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
             hints.push("z ゾーン");
             hints.push("Tab フィルタ/ルール");
             if app.mode == Mode::Write {
-                hints.extend(["n 追加", "E 編集", "D 削除", "[ ] ルール並べ替え"]);
+                if app.packet_filter.focus == crate::app::ListFocus::Right {
+                    hints.extend(["n ルール追加", "E 編集", "D 削除", "[ ] 並べ替え"]);
+                } else {
+                    hints.extend(["n フィルタ作成", "E 編集", "D 削除"]);
+                }
             }
         }
         Service::Archive
@@ -649,24 +664,123 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Mode::ReadOnly => "w 書込モードへ",
         Mode::Write => "w 読取専用へ",
     });
-    hints.extend(["? ヘルプ", "q 終了"]);
+    hints.extend(HINT_TAIL);
+    hints
+}
 
-    let mut spans = vec![Span::raw(" ")];
-    for (i, hint) in hints.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+/// 何があっても最後まで残すキー。
+///
+/// 隠れたキーの調べ方（`?`）と抜け方（`q`）が消えると詰むため。
+const HINT_TAIL: [&str; 2] = ["? ヘルプ", "q 終了"];
+/// ヒントに使ってよい行数の上限。これを超える分は削る。
+const HINT_MAX_ROWS: usize = 2;
+/// 削ったことを示す印。押せるキーではないので、右隣の `? ヘルプ` に任せる。
+const HINT_ELLIPSIS: &str = "…";
+
+/// ヒントを行幅に詰める。入り切らない分は捨てるが、末尾は必ず残す。
+///
+/// 返すのは行ごとのヒントの並び。1行では収まらないときだけ2行にする。
+fn fit_hints(hints: &[&'static str], width: usize) -> Vec<Vec<&'static str>> {
+    use unicode_width::UnicodeWidthStr;
+    // 先頭の余白1桁ぶんを引いた、実際に書ける桁数。
+    let usable = width.saturating_sub(1);
+    let (body, tail) = hints.split_at(hints.len().saturating_sub(HINT_TAIL.len()));
+
+    // 最後の行には、末尾と「削った」印のぶんを空けておく。
+    let reserve: usize = HINT_ELLIPSIS.width()
+        + SEPARATOR_WIDTH
+        + tail
+            .iter()
+            .map(|h| h.width() + SEPARATOR_WIDTH)
+            .sum::<usize>();
+
+    let row_width = |row: &Vec<&str>| -> usize {
+        row.iter().map(|h| h.width()).sum::<usize>() + SEPARATOR_WIDTH * row.len().saturating_sub(1)
+    };
+    let fits = |row: &Vec<&str>, hint: &str, limit: usize| -> bool {
+        let sep = if row.is_empty() { 0 } else { SEPARATOR_WIDTH };
+        row_width(row) + sep + hint.width() <= limit
+    };
+    // その行が最後の行なら、末尾のぶんを空けた幅を返す。
+    let limit_of = |rows: usize| {
+        if rows == HINT_MAX_ROWS {
+            usable.saturating_sub(reserve)
+        } else {
+            usable
         }
-        let (key, rest) = hint.split_once(' ').unwrap_or((hint, ""));
-        spans.push(Span::styled(
-            key.to_string(),
-            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" {rest}"),
-            Style::default().fg(Color::Gray),
-        ));
+    };
+
+    let mut lines: Vec<Vec<&'static str>> = vec![Vec::new()];
+    let mut dropped = false;
+    for hint in body {
+        let rows = lines.len();
+        let current = lines.last().expect("行は必ず1つある");
+        if fits(current, hint, limit_of(rows)) {
+            lines.last_mut().expect("行は必ず1つある").push(hint);
+            continue;
+        }
+        // 行を増やせるなら次の行へ送る。増やせなければここで打ち切る。
+        if rows < HINT_MAX_ROWS && hint.width() <= limit_of(rows + 1) {
+            lines.push(vec![hint]);
+            continue;
+        }
+        dropped = true;
+        break;
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let mut trailing: Vec<&'static str> = Vec::new();
+    if dropped {
+        trailing.push(HINT_ELLIPSIS);
+    }
+    trailing.extend_from_slice(tail);
+
+    // 末尾が今の行に入らないなら行を増やす。増やせないときはそのまま置く
+    // （端末が極端に狭い場合で、切れても末尾を出すほうがまし）。
+    let needed: usize = trailing
+        .iter()
+        .map(|h| h.width() + SEPARATOR_WIDTH)
+        .sum::<usize>();
+    if row_width(lines.last().expect("行は必ず1つある")) + needed > usable
+        && lines.len() < HINT_MAX_ROWS
+    {
+        lines.push(Vec::new());
+    }
+    for hint in trailing {
+        lines.last_mut().expect("行は必ず1つある").push(hint);
+    }
+    lines
+}
+
+/// ヒントの区切り ` · ` の桁数。
+const SEPARATOR_WIDTH: usize = 3;
+
+fn draw_hints(frame: &mut Frame, area: Rect, lines: &[Vec<&'static str>]) {
+    let rendered: Vec<Line> = lines
+        .iter()
+        .map(|row| {
+            let mut spans = vec![Span::raw(" ")];
+            for (i, hint) in row.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+                }
+                // 省略の印はキーではないので、キーと同じ色にしない。
+                if *hint == HINT_ELLIPSIS {
+                    spans.push(Span::styled(HINT_ELLIPSIS, Style::default().fg(DIM)));
+                    continue;
+                }
+                let (key, rest) = hint.split_once(' ').unwrap_or((hint, ""));
+                spans.push(Span::styled(
+                    key.to_string(),
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!(" {rest}"),
+                    Style::default().fg(Color::Gray),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rendered), area);
 }
 
 /// フォーカスの有無で枠線の色を変える。
@@ -790,6 +904,76 @@ mod color_tests {
         for name in PROFILE_COLORS {
             assert!(parse_color(name).is_some(), "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    fn width_of(row: &[&str]) -> usize {
+        // 先頭の余白1桁 + ヒント + 区切り ` · `。
+        1 + row.iter().map(|h| h.width()).sum::<usize>() + 3 * row.len().saturating_sub(1)
+    }
+
+    const MANY: [&str; 12] = [
+        "↑↓/jk 移動",
+        "s サービス",
+        "r 更新",
+        "z ゾーン",
+        "n 作成",
+        "D 削除",
+        "P プラン変更",
+        "b 起動",
+        "x 停止",
+        "w 読取専用へ",
+        "? ヘルプ",
+        "q 終了",
+    ];
+
+    /// どの幅でも行が溢れないこと。溢れると端が黙って切れる。
+    #[test]
+    fn rows_never_exceed_the_terminal_width() {
+        for width in [40usize, 60, 80, 100, 140, 200] {
+            let rows = fit_hints(&MANY, width);
+            assert!(rows.len() <= HINT_MAX_ROWS, "幅 {width} で行が増えすぎた");
+            for row in &rows {
+                let cells = width_of(row);
+                assert!(cells <= width, "幅 {width} に {cells} 桁の行が入らない");
+            }
+        }
+    }
+
+    /// 狭くても `? ヘルプ` と `q 終了` は残ること。
+    /// これが消えると、隠れたキーの調べ方も抜け方も分からなくなる。
+    #[test]
+    fn the_help_key_always_survives() {
+        for width in [40usize, 60, 80, 120] {
+            let rows = fit_hints(&MANY, width);
+            let shown: Vec<&str> = rows.concat();
+            for keep in HINT_TAIL {
+                assert!(shown.contains(&keep), "幅 {width} で {keep} が消えた");
+            }
+        }
+    }
+
+    /// 削ったときは、削ったと分かる印を出すこと。
+    #[test]
+    fn dropping_hints_is_visible() {
+        let narrow = fit_hints(&MANY, 40).concat();
+        assert!(narrow.contains(&HINT_ELLIPSIS), "削ったのに印が無い");
+        // 全部入る幅では印を出さない。
+        let wide = fit_hints(&MANY, 200).concat();
+        assert!(!wide.contains(&HINT_ELLIPSIS));
+        assert_eq!(wide.len(), MANY.len());
+    }
+
+    /// 全部入るなら1行のままにすること。無駄に本体を狭めない。
+    #[test]
+    fn a_short_list_stays_on_one_line() {
+        let rows = fit_hints(&["? ヘルプ", "q 終了"], 80);
+        assert_eq!(rows.len(), 1);
     }
 }
 
