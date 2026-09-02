@@ -240,39 +240,37 @@ pub(super) fn draw_server_create_form(
     form: &ServerCreateForm,
     app: &crate::app::App,
 ) {
-    let plans = app.server_plan_choices();
-    let sizes = app.server.disk_sizes();
+    let choices = app.server_choices();
     let loading = app.server.plans.ready().is_none();
 
-    let cpus = crate::iaas::cpu_choices(&plans);
-    let memories = crate::iaas::memory_choices(&plans, form.cpu);
+    let cpus = crate::iaas::cpu_choices(&choices.plans);
+    let memories = crate::iaas::memory_choices(&choices.plans, form.cpu);
 
     // 選べる値と、その中で今どこにいるか。一覧が長いので位置が分かるようにする。
-    let at = |choices: &[u32], current: u32| choices.iter().position(|v| *v == current);
     let choice_row =
         |label: &str, text: String, pos: Option<usize>, total: usize, focused: bool| {
+            // スタートアップスクリプト名などは長い。折り返して行がずれないよう切る。
+            let text = clip(&text, CHOICE_TEXT_WIDTH);
             let shown = if focused {
                 format!("‹ {text} ›")
             } else {
                 format!("  {text}  ")
             };
+            let style = if focused {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
             let mut spans = vec![
                 Span::styled(
                     crate::ui::pad(label, 16),
                     if focused {
-                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                        style
                     } else {
                         Style::default().fg(DIM)
                     },
                 ),
-                Span::styled(
-                    crate::ui::pad(&shown, 28),
-                    if focused {
-                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    },
-                ),
+                Span::styled(crate::ui::pad(&shown, 28), style),
             ];
             if let Some(pos) = pos
                 && total > 1
@@ -292,12 +290,14 @@ pub(super) fn draw_server_create_form(
             "選べる値がありません".to_string()
         }
     };
+    let at = |values: &[u32], current: u32| values.iter().position(|v| *v == current);
 
     let mut lines: Vec<Line> = Vec::new();
-    for (i, label) in ServerCreateForm::LABELS.iter().enumerate() {
+    for (i, field) in form.fields(&choices).iter().enumerate() {
         let focused = form.field == i;
-        match i {
-            2 => lines.push(choice_row(
+        let label = field.label();
+        let row = match field {
+            ServerField::Cpu => choice_row(
                 label,
                 if cpus.is_empty() {
                     unknown()
@@ -307,8 +307,8 @@ pub(super) fn draw_server_create_form(
                 at(&cpus, form.cpu),
                 cpus.len(),
                 focused,
-            )),
-            3 => lines.push(choice_row(
+            ),
+            ServerField::Memory => choice_row(
                 label,
                 if memories.is_empty() {
                     unknown()
@@ -318,8 +318,8 @@ pub(super) fn draw_server_create_form(
                 at(&memories, form.memory_mb),
                 memories.len(),
                 focused,
-            )),
-            4 => lines.push(choice_row(
+            ),
+            ServerField::Os => choice_row(
                 label,
                 crate::iaas::OS_CHOICES[form.os.min(crate::iaas::OS_CHOICES.len() - 1)]
                     .label
@@ -327,19 +327,44 @@ pub(super) fn draw_server_create_form(
                 Some(form.os),
                 crate::iaas::OS_CHOICES.len(),
                 focused,
-            )),
-            5 => lines.push(choice_row(
+            ),
+            ServerField::DiskSize => choice_row(
                 label,
-                if sizes.is_empty() {
+                if choices.disk_sizes.is_empty() {
                     unknown()
                 } else {
                     format!("{} GB", form.disk_size_mb / 1024)
                 },
-                at(&sizes, form.disk_size_mb),
-                sizes.len(),
+                at(&choices.disk_sizes, form.disk_size_mb),
+                choices.disk_sizes.len(),
                 focused,
-            )),
-            9 => lines.push(choice_row(
+            ),
+            ServerField::Nic => choice_row(
+                label,
+                choices.nic(form.nic).label(),
+                Some(form.nic),
+                choices.nics.len(),
+                focused,
+            ),
+            ServerField::PacketFilter => choice_row(
+                label,
+                choices
+                    .packet_filter(form.packet_filter)
+                    .map_or_else(|| "なし".to_string(), |(_, name)| name),
+                Some(form.packet_filter),
+                choices.packet_filters.len(),
+                focused,
+            ),
+            ServerField::StartupScript => choice_row(
+                label,
+                choices
+                    .startup_script(form.startup_script)
+                    .map_or_else(|| "なし".to_string(), |s| s.name),
+                Some(form.startup_script),
+                choices.startup_scripts.len(),
+                focused,
+            ),
+            ServerField::Boot => choice_row(
                 label,
                 if form.boot_after_create {
                     "作成後に起動する".to_string()
@@ -349,9 +374,9 @@ pub(super) fn draw_server_create_form(
                 None,
                 0,
                 focused,
-            )),
+            ),
             // 公開鍵はそのまま出すと数百文字あって画面に収まらない。要約で出す。
-            _ if i == ServerCreateForm::SSH_KEY_FIELD => {
+            ServerField::SshKey => {
                 let shown = if form.ssh_public_key.trim().is_empty() {
                     String::new()
                 } else {
@@ -361,15 +386,12 @@ pub(super) fn draw_server_create_form(
                     }
                     .summary()
                 };
-                lines.push(input_line(label, &shown, focused, false));
+                input_line(label, &shown, focused, false)
             }
-            _ => lines.push(input_line(
-                label,
-                form.value(i),
-                focused,
-                i == ServerCreateForm::PASSWORD_FIELD,
-            )),
-        }
+            ServerField::Password => input_line(label, form.value(*field), focused, true),
+            _ => input_line(label, form.value(*field), focused, false),
+        };
+        lines.push(row);
     }
 
     lines.push(Line::raw(""));
@@ -377,6 +399,12 @@ pub(super) fn draw_server_create_form(
         "ホスト名を省くとサーバー名を使います。SSH公開鍵を入れるとパスワード認証を切ります。",
         Style::default().fg(DIM),
     )));
+    if matches!(choices.nic(form.nic), NicChoice::Switch(..)) {
+        lines.push(Line::from(Span::styled(
+            "スイッチにはDHCPが無いので、IPアドレスとマスク長は必須です。",
+            Style::default().fg(DIM),
+        )));
+    }
     lines.push(Line::from(Span::styled(
         "ディスクは作成した時点から、サーバーは起動した時点から課金されます。",
         Style::default().fg(DIM),
@@ -389,7 +417,7 @@ pub(super) fn draw_server_create_form(
         Span::raw(" 選択   "),
     ];
     // 公開鍵の欄にいるときだけ、鍵を選べることを出す。
-    if form.field == ServerCreateForm::SSH_KEY_FIELD {
+    if form.current(&choices) == ServerField::SshKey {
         hint.push(Span::styled(
             "Ctrl+K",
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
@@ -416,6 +444,9 @@ pub(super) fn draw_server_create_form(
         area,
     );
 }
+
+/// 選択式の欄に出せる値の幅。ラベルと位置表示を除いた残り。
+const CHOICE_TEXT_WIDTH: usize = 44;
 
 /// SSH 公開鍵の取得元と、取れた鍵の一覧。
 pub(super) fn draw_ssh_key_picker(frame: &mut Frame, back: &SshKeyReturn, stage: &SshKeyStage) {
@@ -577,6 +608,8 @@ pub(super) fn draw_disk_create_form(
 
     let choice_row =
         |label: &str, text: String, pos: Option<usize>, total: usize, focused: bool| {
+            // スタートアップスクリプト名などは長い。折り返して行がずれないよう切る。
+            let text = clip(&text, CHOICE_TEXT_WIDTH);
             let shown = if focused {
                 format!("‹ {text} ›")
             } else {

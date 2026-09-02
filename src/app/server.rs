@@ -6,13 +6,44 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    App, ConfirmAction, Loadable, Message, Overlay, Pane, ServerCreateForm, ServerPlanForm,
-    SshKeyReturn, SshKeySource, SshKeyStage, StatusKind, fmt_error, matches,
+    App, ConfirmAction, Loadable, Message, NicChoice, Overlay, Pane, ServerChoices,
+    ServerCreateForm, ServerPlanForm, SshKeyReturn, SshKeySource, SshKeyStage, StatusKind,
+    fmt_error, matches,
 };
+use crate::cloud_resources::CloudResource;
 use crate::iaas::{
-    DiskPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan, SshKey,
+    DiskPlan, NicPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan,
+    SshKey, StartupScript,
 };
 use crate::pubkey::PublicKey;
+use crate::switch::Switch;
+
+/// スイッチに繋ぐ NIC の指定。IP が無ければ作らせない。
+fn switch_nic(id: crate::sacloud::ResourceId, form: &ServerCreateForm) -> Option<NicPlan> {
+    let ip_address = form.ip_address.trim().to_string();
+    let mask_len: u32 = form.mask_len.trim().parse().ok()?;
+    if ip_address.is_empty() || !(1..=32).contains(&mask_len) {
+        return None;
+    }
+    Some(NicPlan::Switch {
+        id,
+        ip_address,
+        mask_len,
+        gateway: form.gateway.trim().to_string(),
+    })
+}
+
+/// 確認に出す NIC の説明。
+fn nic_summary(plan: &NicPlan, choice: &NicChoice) -> String {
+    match plan {
+        NicPlan::Switch {
+            ip_address,
+            mask_len,
+            ..
+        } => format!("{} ({ip_address}/{mask_len})", choice.label()),
+        _ => choice.label(),
+    }
+}
 
 /// 登録済みの鍵を一覧に出せる形にする。
 ///
@@ -37,6 +68,9 @@ pub struct ServerView {
     /// 作成フォームで使う選択肢。ゾーンごとに違うので都度引く。
     pub plans: Loadable<Vec<ServerPlan>>,
     pub disk_plans: Loadable<Vec<DiskPlan>>,
+    pub switches: Loadable<Vec<Switch>>,
+    pub packet_filters: Loadable<Vec<CloudResource>>,
+    pub startup_scripts: Loadable<Vec<StartupScript>>,
 }
 
 impl ServerView {
@@ -124,12 +158,57 @@ impl App {
         self.server.plans.ready().cloned().unwrap_or_default()
     }
 
+    /// 作成フォームで選べるもの一式。届いていないものは空になる。
+    pub fn server_choices(&self) -> ServerChoices {
+        // 共有セグメントを先頭、接続しないを末尾に置き、間にスイッチを並べる。
+        let mut nics = vec![NicChoice::Shared];
+        nics.extend(
+            self.server
+                .switches
+                .ready()
+                .into_iter()
+                .flatten()
+                .map(|s| NicChoice::Switch(s.id, s.name.clone())),
+        );
+        nics.push(NicChoice::None);
+
+        // 「なし」を先頭に置く。
+        let mut packet_filters = vec![None];
+        packet_filters.extend(
+            self.server
+                .packet_filters
+                .ready()
+                .into_iter()
+                .flatten()
+                .map(|f| Some((f.id, f.name.clone()))),
+        );
+        let mut startup_scripts = vec![None];
+        startup_scripts.extend(
+            self.server
+                .startup_scripts
+                .ready()
+                .into_iter()
+                .flatten()
+                .cloned()
+                .map(Some),
+        );
+
+        ServerChoices {
+            plans: self.server_plan_choices(),
+            disk_sizes: self.server.disk_sizes(),
+            nics,
+            packet_filters,
+            startup_scripts,
+        }
+    }
+
     fn open_server_create_form(&mut self) {
         if !self.require_write() {
             return;
         }
         // 選択肢はゾーンごとに違う。開くたびに引き直す。
         self.load_server_plans();
+        self.load_server_attachments();
         let mut form = ServerCreateForm {
             boot_after_create: true,
             ..ServerCreateForm::default()
@@ -168,6 +247,38 @@ impl App {
             let plans = client.list_server_plans(&zone).await.map_err(fmt_error);
             let disks = client.list_disk_plans(&zone).await.map_err(fmt_error);
             let _ = tx.send(Message::ServerPlans { plans, disks });
+        });
+    }
+
+    /// NIC の繋ぎ先・パケットフィルタ・スタートアップスクリプトの一覧を引く。
+    ///
+    /// どれも作成フォームでしか使わないので、フォームを開くときにまとめて引く。
+    fn load_server_attachments(&mut self) {
+        if !self.server.switches.is_idle() {
+            return;
+        }
+        self.server.switches = Loadable::Loading;
+        self.server.packet_filters = Loadable::Loading;
+        self.server.startup_scripts = Loadable::Loading;
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        tokio::spawn(async move {
+            let switches = client.list_switches(&zone).await.map_err(fmt_error);
+            let filters = client
+                .list_cloud_resources(
+                    &zone,
+                    crate::cloud_resources::CloudResourceKind::PacketFilter,
+                )
+                .await
+                .map_err(fmt_error);
+            let scripts = client.list_startup_scripts(&zone).await.map_err(fmt_error);
+            let _ = tx.send(Message::ServerAttachments {
+                switches,
+                filters,
+                scripts,
+            });
         });
     }
 
@@ -319,6 +430,26 @@ impl App {
         let disk_size_mb = form.disk_size_mb;
         let os = OS_CHOICES[form.os.min(OS_CHOICES.len() - 1)];
 
+        let choices = self.server_choices();
+        let nic = match choices.nic(form.nic) {
+            NicChoice::Shared => NicPlan::Shared,
+            NicChoice::None => NicPlan::None,
+            NicChoice::Switch(id, _) => {
+                // スイッチには DHCP が無いので、IP が無いと OS から通信できない。
+                let Some(plan) = switch_nic(id, &form) else {
+                    self.overlay = Some(Overlay::ServerCreateForm(form));
+                    self.set_status(
+                        "スイッチに繋ぐときは IPアドレスとマスク長を入れてください",
+                        StatusKind::Error,
+                    );
+                    return;
+                };
+                plan
+            }
+        };
+        let filter = choices.packet_filter(form.packet_filter);
+        let script = choices.startup_script(form.startup_script);
+
         let input = ServerCreateInput {
             name: name.clone(),
             description: form.description.trim().to_string(),
@@ -331,6 +462,9 @@ impl App {
             password: form.password.clone(),
             ssh_public_key: form.ssh_public_key.trim().to_string(),
             disable_password_auth: !form.ssh_public_key.trim().is_empty(),
+            nic: nic.clone(),
+            packet_filter_id: filter.as_ref().map(|(id, _)| *id),
+            startup_script_id: script.as_ref().map(|s| s.id),
             boot_after_create: form.boot_after_create,
         };
 
@@ -339,7 +473,8 @@ impl App {
             title: "サーバーの作成".to_string(),
             body: format!(
                 "サーバー「{}」を {} に作成します。\n\
-                 {} コア / {} GB / {} / ディスク {} GB（{}）\n\n\
+                 {} コア / {} GB / {} / ディスク {} GB（{}）\n\
+                 NIC: {}{}{}\n\n\
                  ディスクは作成した時点から、サーバーは起動した時点から課金されます。",
                 name,
                 self.zone,
@@ -352,6 +487,13 @@ impl App {
                 } else {
                     "作成後は停止のまま"
                 },
+                nic_summary(&nic, &choices.nic(form.nic)),
+                filter
+                    .map(|(_, n)| format!("　フィルタ: {n}"))
+                    .unwrap_or_default(),
+                script
+                    .map(|s| format!("　スクリプト: {}", s.name))
+                    .unwrap_or_default(),
             ),
             verify: None,
             typed: String::new(),
@@ -662,30 +804,24 @@ mod tests {
     /// 取り違えると左右キーで文字が消えたり、入力できなくなる。
     #[test]
     fn choice_fields_are_separated_from_text_fields() {
-        assert_eq!(ServerCreateForm::LABELS.len(), 10);
-        for i in ServerCreateForm::CHOICE_FIELDS {
-            assert!(ServerCreateForm::is_choice(i), "{i} は選択式のはず");
+        use crate::app::ServerField as F;
+        for field in [F::Cpu, F::Memory, F::Os, F::DiskSize, F::Nic, F::Boot] {
+            assert!(field.is_choice(), "{field:?} は選択式のはず");
             // 選択式の欄は文字列を持たない。
-            assert_eq!(ServerCreateForm::default().value(i), "");
+            assert_eq!(ServerCreateForm::default().value(field), "");
         }
-        for i in [0usize, 1, 6, 7, 8] {
-            assert!(!ServerCreateForm::is_choice(i), "{i} は入力式のはず");
+        for field in [
+            F::Name,
+            F::Description,
+            F::IpAddress,
+            F::MaskLen,
+            F::Gateway,
+            F::HostName,
+            F::Password,
+            F::SshKey,
+        ] {
+            assert!(!field.is_choice(), "{field:?} は入力式のはず");
         }
-        // 伏せ字と公開鍵の欄は入力式でなければならない。
-        assert!(!ServerCreateForm::is_choice(
-            ServerCreateForm::PASSWORD_FIELD
-        ));
-        assert!(!ServerCreateForm::is_choice(
-            ServerCreateForm::SSH_KEY_FIELD
-        ));
-        assert_eq!(
-            ServerCreateForm::LABELS[ServerCreateForm::PASSWORD_FIELD],
-            "パスワード"
-        );
-        assert_eq!(
-            ServerCreateForm::LABELS[ServerCreateForm::SSH_KEY_FIELD],
-            "SSH公開鍵"
-        );
     }
 
     /// プラン一覧が届いたら、まだ選んでいない欄が埋まること。

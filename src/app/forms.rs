@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::Loadable;
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::IamCredentials;
-use crate::iaas::{DiskPlan, ServerPlan, Zone};
+use crate::iaas::{DiskPlan, ServerPlan, StartupScript, Zone};
 use crate::monitoring::{
     AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule, LogMeasureRuleInput,
     LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput, NotificationRouting,
@@ -540,11 +540,120 @@ impl RagUploadForm {
     }
 }
 
+/// 作成フォームの既定のディスクサイズ（20GB）。
+const DEFAULT_DISK_SIZE_MB: u32 = 20480;
+
+/// サーバー作成フォームの入力欄。
+///
+/// NIC の繋ぎ先によって出る欄が変わるので、添字ではなくこの並びで扱う。
+/// 添字で分岐していると、欄を1つ足しただけで別の欄の処理がずれる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerField {
+    Name,
+    Description,
+    Cpu,
+    Memory,
+    Os,
+    DiskSize,
+    Nic,
+    IpAddress,
+    MaskLen,
+    Gateway,
+    PacketFilter,
+    StartupScript,
+    HostName,
+    Password,
+    SshKey,
+    Boot,
+}
+
+impl ServerField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "名前",
+            Self::Description => "説明",
+            Self::Cpu => "CPU",
+            Self::Memory => "メモリ",
+            Self::Os => "OS",
+            Self::DiskSize => "ディスクサイズ",
+            Self::Nic => "NIC",
+            Self::IpAddress => "IPアドレス",
+            Self::MaskLen => "マスク長",
+            Self::Gateway => "ゲートウェイ",
+            Self::PacketFilter => "パケットフィルタ",
+            Self::StartupScript => "スタートアップ",
+            Self::HostName => "ホスト名",
+            Self::Password => "パスワード",
+            Self::SshKey => "SSH公開鍵",
+            Self::Boot => "作成後に起動",
+        }
+    }
+
+    /// 左右キーで選ぶ欄か。文字が入らない欄でもある。
+    pub fn is_choice(self) -> bool {
+        matches!(
+            self,
+            Self::Cpu
+                | Self::Memory
+                | Self::Os
+                | Self::DiskSize
+                | Self::Nic
+                | Self::PacketFilter
+                | Self::StartupScript
+                | Self::Boot
+        )
+    }
+}
+
+/// eth0 の繋ぎ先。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NicChoice {
+    Shared,
+    Switch(ResourceId, String),
+    None,
+}
+
+impl NicChoice {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Shared => "共有セグメント".to_string(),
+            Self::Switch(_, name) => format!("スイッチ: {name}"),
+            Self::None => "接続しない".to_string(),
+        }
+    }
+}
+
+/// 作成フォームで選べるもの。ゾーンごとに違うのでまとめて受け取る。
+#[derive(Debug, Clone, Default)]
+pub struct ServerChoices {
+    pub plans: Vec<ServerPlan>,
+    pub disk_sizes: Vec<u32>,
+    /// 先頭が共有セグメント、末尾が「接続しない」。
+    pub nics: Vec<NicChoice>,
+    /// 先頭は「なし」を表す None。
+    pub packet_filters: Vec<Option<(ResourceId, String)>>,
+    pub startup_scripts: Vec<Option<StartupScript>>,
+}
+
+impl ServerChoices {
+    pub fn nic(&self, index: usize) -> NicChoice {
+        self.nics.get(index).cloned().unwrap_or(NicChoice::Shared)
+    }
+
+    pub fn packet_filter(&self, index: usize) -> Option<(ResourceId, String)> {
+        self.packet_filters.get(index).cloned().flatten()
+    }
+
+    pub fn startup_script(&self, index: usize) -> Option<StartupScript> {
+        self.startup_scripts.get(index).cloned().flatten()
+    }
+}
+
 /// サーバー作成フォーム。
 ///
-/// CPU・メモリ・OS・ディスクサイズは選択式、それ以外は入力式。
 /// 選べる値はゾーンごとにAPIから引くので、フォームは選んだ値そのものを持ち、
 /// 一覧の添字は持たない（一覧が入れ替わっても指すものがずれない）。
+/// ただし OS・NIC・フィルタ・スクリプトは一覧の並びが安定しているので添字で持つ。
 #[derive(Debug, Clone, Default)]
 pub struct ServerCreateForm {
     pub name: String,
@@ -552,61 +661,84 @@ pub struct ServerCreateForm {
     pub host_name: String,
     pub password: String,
     pub ssh_public_key: String,
+    pub ip_address: String,
+    pub mask_len: String,
+    pub gateway: String,
     /// コア数。プラン一覧が届くまでは 0。
     pub cpu: u32,
     pub memory_mb: u32,
-    /// OS だけは固定の一覧なので添字で持つ。
     pub os: usize,
     pub disk_size_mb: u32,
+    pub nic: usize,
+    pub packet_filter: usize,
+    pub startup_script: usize,
     pub boot_after_create: bool,
     pub field: usize,
 }
 
 impl ServerCreateForm {
-    /// 入力欄。選択式のものは値を持たないので、描画側で選択肢を出す。
-    pub const LABELS: [&'static str; 10] = [
-        "名前",
-        "説明",
-        "CPU",
-        "メモリ",
-        "OS",
-        "ディスクサイズ",
-        "ホスト名",
-        "パスワード",
-        "SSH公開鍵",
-        "作成後に起動",
-    ];
-    /// 値を選ぶ欄。左右キーで切り替える。
-    pub const CHOICE_FIELDS: [usize; 5] = [2, 3, 4, 5, 9];
-    /// 公開鍵の欄。ここでだけ取得元を選べる。
-    pub const SSH_KEY_FIELD: usize = 8;
-    /// 伏せ字にする欄。
-    pub const PASSWORD_FIELD: usize = 7;
+    /// 今出ている欄。NIC をスイッチに繋ぐときだけ IP の欄が増える。
+    pub fn fields(&self, choices: &ServerChoices) -> Vec<ServerField> {
+        let mut fields = vec![
+            ServerField::Name,
+            ServerField::Description,
+            ServerField::Cpu,
+            ServerField::Memory,
+            ServerField::Os,
+            ServerField::DiskSize,
+            ServerField::Nic,
+        ];
+        if matches!(choices.nic(self.nic), NicChoice::Switch(..)) {
+            // スイッチには DHCP が無いので、IP は自分で決める。
+            fields.extend([
+                ServerField::IpAddress,
+                ServerField::MaskLen,
+                ServerField::Gateway,
+            ]);
+        }
+        fields.extend([
+            ServerField::PacketFilter,
+            ServerField::StartupScript,
+            ServerField::HostName,
+            ServerField::Password,
+            ServerField::SshKey,
+            ServerField::Boot,
+        ]);
+        fields
+    }
 
-    pub fn value(&self, index: usize) -> &str {
-        match index {
-            0 => &self.name,
-            1 => &self.description,
-            6 => &self.host_name,
-            7 => &self.password,
-            8 => &self.ssh_public_key,
+    /// 今えらんでいる欄。範囲外なら先頭に戻す。
+    pub fn current(&self, choices: &ServerChoices) -> ServerField {
+        let fields = self.fields(choices);
+        fields.get(self.field).copied().unwrap_or(ServerField::Name)
+    }
+
+    pub fn value(&self, field: ServerField) -> &str {
+        match field {
+            ServerField::Name => &self.name,
+            ServerField::Description => &self.description,
+            ServerField::IpAddress => &self.ip_address,
+            ServerField::MaskLen => &self.mask_len,
+            ServerField::Gateway => &self.gateway,
+            ServerField::HostName => &self.host_name,
+            ServerField::Password => &self.password,
+            ServerField::SshKey => &self.ssh_public_key,
             _ => "",
         }
     }
 
-    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
-        match index {
-            0 => Some(&mut self.name),
-            1 => Some(&mut self.description),
-            6 => Some(&mut self.host_name),
-            7 => Some(&mut self.password),
-            8 => Some(&mut self.ssh_public_key),
+    fn value_mut(&mut self, field: ServerField) -> Option<&mut String> {
+        match field {
+            ServerField::Name => Some(&mut self.name),
+            ServerField::Description => Some(&mut self.description),
+            ServerField::IpAddress => Some(&mut self.ip_address),
+            ServerField::MaskLen => Some(&mut self.mask_len),
+            ServerField::Gateway => Some(&mut self.gateway),
+            ServerField::HostName => Some(&mut self.host_name),
+            ServerField::Password => Some(&mut self.password),
+            ServerField::SshKey => Some(&mut self.ssh_public_key),
             _ => None,
         }
-    }
-
-    pub fn is_choice(index: usize) -> bool {
-        Self::CHOICE_FIELDS.contains(&index)
     }
 
     /// ホスト名は省略時にサーバー名を使う。
@@ -639,9 +771,6 @@ impl ServerCreateForm {
         }
     }
 }
-
-/// 作成フォームの既定のディスクサイズ（20GB）。
-const DEFAULT_DISK_SIZE_MB: u32 = 20480;
 
 /// ディスクの作成フォーム。
 ///
@@ -898,10 +1027,7 @@ impl SshKeyReturn {
     /// 選んだ鍵を書き戻す。
     pub fn take_key(&mut self, key: &PublicKey) {
         match self {
-            Self::ServerCreate(form) => {
-                form.ssh_public_key = key.key.clone();
-                form.field = ServerCreateForm::SSH_KEY_FIELD;
-            }
+            Self::ServerCreate(form) => form.ssh_public_key = key.key.clone(),
             Self::Register(form) => {
                 form.public_key = key.key.clone();
                 // 名前が空なら、選んだ鍵の名前をそのまま使う。
@@ -1872,36 +1998,59 @@ pub(super) fn edit_iam_role_form(form: &mut IamRoleForm, key: KeyEvent) {
 pub(super) fn edit_server_create_form(
     form: &mut ServerCreateForm,
     key: KeyEvent,
-    plans: &[ServerPlan],
-    disk_sizes: &[u32],
+    choices: &ServerChoices,
 ) {
-    let fields = ServerCreateForm::LABELS.len();
+    let fields = form.fields(choices);
+    let count = fields.len();
+    let current = form.current(choices);
     match key.code {
-        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
-        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % count,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + count - 1) % count,
         // 選択式の欄は左右で切り替える。
         KeyCode::Left | KeyCode::Right => {
             let forward = key.code == KeyCode::Right;
-            match form.field {
-                2 => step_cpu(&mut form.cpu, &mut form.memory_mb, forward, plans),
-                3 => step_memory(form.cpu, &mut form.memory_mb, forward, plans),
-                4 => form.os = cycle(form.os, crate::iaas::OS_CHOICES.len(), forward),
-                5 => form.disk_size_mb = step(disk_sizes, form.disk_size_mb, forward),
-                9 => form.boot_after_create = !form.boot_after_create,
+            match current {
+                ServerField::Cpu => {
+                    step_cpu(&mut form.cpu, &mut form.memory_mb, forward, &choices.plans)
+                }
+                ServerField::Memory => {
+                    step_memory(form.cpu, &mut form.memory_mb, forward, &choices.plans)
+                }
+                ServerField::Os => form.os = cycle(form.os, crate::iaas::OS_CHOICES.len(), forward),
+                ServerField::DiskSize => {
+                    form.disk_size_mb = step(&choices.disk_sizes, form.disk_size_mb, forward)
+                }
+                ServerField::Nic => {
+                    form.nic = cycle(form.nic, choices.nics.len(), forward);
+                    // IP の欄が増減するので、選択位置を NIC の行に留める。
+                    form.field = form
+                        .fields(choices)
+                        .iter()
+                        .position(|f| *f == ServerField::Nic)
+                        .unwrap_or(form.field);
+                }
+                ServerField::PacketFilter => {
+                    form.packet_filter =
+                        cycle(form.packet_filter, choices.packet_filters.len(), forward)
+                }
+                ServerField::StartupScript => {
+                    form.startup_script =
+                        cycle(form.startup_script, choices.startup_scripts.len(), forward)
+                }
+                ServerField::Boot => form.boot_after_create = !form.boot_after_create,
                 _ => {}
             }
         }
         KeyCode::Backspace => {
-            if let Some(value) = form.value_mut(form.field) {
+            if let Some(value) = form.value_mut(current) {
                 value.pop();
             }
         }
-        KeyCode::Char(' ') if form.field == 9 => {
+        KeyCode::Char(' ') if current == ServerField::Boot => {
             form.boot_after_create = !form.boot_after_create;
         }
-        KeyCode::Char(c) if !ServerCreateForm::is_choice(form.field) => {
-            let field = form.field;
-            if let Some(value) = form.value_mut(field) {
+        KeyCode::Char(c) if !current.is_choice() => {
+            if let Some(value) = form.value_mut(current) {
                 value.push(c);
             }
         }
@@ -2543,55 +2692,114 @@ mod tests {
         assert_eq!(step(&[], 512, true), 512);
     }
 
+    /// 作成フォームの選択肢。スイッチとフィルタを1つずつ持たせる。
+    fn server_choices() -> ServerChoices {
+        ServerChoices {
+            plans: plans(),
+            disk_sizes: vec![20480, 40960],
+            nics: vec![
+                NicChoice::Shared,
+                NicChoice::Switch(ResourceId(7), "sw-01".to_string()),
+                NicChoice::None,
+            ],
+            packet_filters: vec![None, Some((ResourceId(8), "web".to_string()))],
+            startup_scripts: vec![None],
+        }
+    }
+
+    /// 欄の位置を名前で探す。添字を直に書くと欄を足したときに壊れる。
+    fn field_at(choices: &ServerChoices, form: &ServerCreateForm, want: ServerField) -> usize {
+        form.fields(choices)
+            .iter()
+            .position(|f| *f == want)
+            .unwrap_or_else(|| panic!("{want:?} の欄が無い"))
+    }
+
     /// コア数を変えると、その構成で選べるメモリへ寄る。
     /// 寄せないと存在しない組み合わせのまま作成に進んでしまう。
     #[test]
     fn changing_the_cpu_moves_the_memory_to_a_valid_pair() {
-        let plans = plans();
+        let choices = server_choices();
         let mut form = ServerCreateForm {
             cpu: 2,
             memory_mb: 4096,
-            field: 2,
             ..ServerCreateForm::default()
         };
+        form.field = field_at(&choices, &form, ServerField::Cpu);
         // 4 コアは 8GB しか選べない。
-        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        edit_server_create_form(&mut form, press(KeyCode::Right), &choices);
         assert_eq!((form.cpu, form.memory_mb), (4, 8192));
         // 1 コアに戻すと 2GB が一番近い。
-        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        edit_server_create_form(&mut form, press(KeyCode::Right), &choices);
         assert_eq!((form.cpu, form.memory_mb), (1, 2048));
     }
 
     /// メモリはそのコア数で選べるものだけを巡る。
     #[test]
     fn memory_only_cycles_within_the_chosen_cpu() {
-        let plans = plans();
+        let choices = server_choices();
         let mut form = ServerCreateForm {
             cpu: 1,
             memory_mb: 1024,
-            field: 3,
             ..ServerCreateForm::default()
         };
-        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        form.field = field_at(&choices, &form, ServerField::Memory);
+        edit_server_create_form(&mut form, press(KeyCode::Right), &choices);
         assert_eq!(form.memory_mb, 2048);
         // 1 コアは 2 通りしかないので折り返す。
-        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        edit_server_create_form(&mut form, press(KeyCode::Right), &choices);
         assert_eq!(form.memory_mb, 1024);
     }
 
     /// 選択式の欄では文字が入らないこと。入ると見えない値が混ざる。
     #[test]
     fn typing_does_nothing_on_a_choice_field() {
-        let plans = plans();
+        let choices = server_choices();
         let mut form = ServerCreateForm {
             cpu: 1,
             memory_mb: 1024,
-            field: 2,
             ..ServerCreateForm::default()
         };
-        edit_server_create_form(&mut form, press(KeyCode::Char('x')), &plans, &[]);
+        form.field = field_at(&choices, &form, ServerField::Cpu);
+        edit_server_create_form(&mut form, press(KeyCode::Char('x')), &choices);
         assert_eq!(form.name, "");
         assert_eq!(form.cpu, 1);
+    }
+
+    /// スイッチに繋ぐときだけ IP の欄が出ること。
+    /// 共有セグメントでは DHCP が効くので、出しても入れる意味がない。
+    #[test]
+    fn the_ip_fields_appear_only_for_a_switch() {
+        let choices = server_choices();
+        let mut form = ServerCreateForm::default();
+        let plain = form.fields(&choices);
+        assert!(!plain.contains(&ServerField::IpAddress));
+
+        form.field = field_at(&choices, &form, ServerField::Nic);
+        edit_server_create_form(&mut form, press(KeyCode::Right), &choices);
+        assert!(matches!(choices.nic(form.nic), NicChoice::Switch(..)));
+        let with_switch = form.fields(&choices);
+        assert!(with_switch.contains(&ServerField::IpAddress));
+        assert!(with_switch.contains(&ServerField::MaskLen));
+        assert!(with_switch.contains(&ServerField::Gateway));
+        // 欄が増えても、選択位置は NIC の行に残る。
+        assert_eq!(form.current(&choices), ServerField::Nic);
+
+        // 「接続しない」に進めると IP の欄はまた消える。
+        edit_server_create_form(&mut form, press(KeyCode::Right), &choices);
+        assert_eq!(choices.nic(form.nic), NicChoice::None);
+        assert!(!form.fields(&choices).contains(&ServerField::IpAddress));
+        assert_eq!(form.current(&choices), ServerField::Nic);
+    }
+
+    /// パケットフィルタとスタートアップスクリプトは「なし」が既定。
+    #[test]
+    fn attachments_default_to_none() {
+        let choices = server_choices();
+        let form = ServerCreateForm::default();
+        assert!(choices.packet_filter(form.packet_filter).is_none());
+        assert!(choices.startup_script(form.startup_script).is_none());
+        assert_eq!(choices.nic(form.nic), NicChoice::Shared);
     }
 
     fn disk_plans() -> Vec<DiskPlan> {
@@ -2712,7 +2920,6 @@ mod tests {
             panic!("呼び出し元が入れ替わった");
         };
         assert_eq!(form.ssh_public_key, key.key);
-        assert_eq!(form.field, ServerCreateForm::SSH_KEY_FIELD);
 
         // 登録フォームでは、名前が空なら鍵の名前を借りる。
         let mut back = SshKeyReturn::Register(SshKeyForm::default());

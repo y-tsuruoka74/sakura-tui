@@ -439,6 +439,61 @@ mod tests {
             .collect()
     }
 
+    /// NIC の繋ぎ先で送る中身が変わること。
+    #[test]
+    fn the_nic_plan_decides_what_the_server_connects_to() {
+        assert_eq!(
+            NicPlan::Shared.connected_switches(),
+            serde_json::json!([{ "Scope": "shared" }])
+        );
+        let on_switch = NicPlan::Switch {
+            id: ResourceId(9),
+            ip_address: "192.168.0.10".to_string(),
+            mask_len: 24,
+            gateway: "192.168.0.1".to_string(),
+        };
+        assert_eq!(
+            on_switch.connected_switches(),
+            serde_json::json!([{ "ID": 9 }])
+        );
+        // 繋がない場合も NIC 自体は作るので、空の要素を1つ送る。
+        assert_eq!(
+            NicPlan::None.connected_switches(),
+            serde_json::json!([null])
+        );
+    }
+
+    /// スイッチに繋ぐときだけ、ディスクの修正で IP を書き込むこと。
+    /// 共有セグメントは DHCP で降ってくるので書いてはいけない。
+    #[test]
+    fn only_a_switch_needs_the_ip_written_into_the_disk() {
+        assert!(NicPlan::Shared.disk_network_config().is_none());
+        assert!(NicPlan::None.disk_network_config().is_none());
+        let on_switch = NicPlan::Switch {
+            id: ResourceId(9),
+            ip_address: "192.168.0.10".to_string(),
+            mask_len: 24,
+            gateway: "192.168.0.1".to_string(),
+        };
+        assert_eq!(
+            on_switch.disk_network_config(),
+            Some(("192.168.0.10".to_string(), 24, "192.168.0.1".to_string()))
+        );
+    }
+
+    /// スタートアップスクリプトは Notes から拾うこと。
+    #[test]
+    fn startup_scripts_come_from_the_notes_list() {
+        let value = serde_json::json!({"Notes": [
+            {"ID": "1", "Name": "初期設定", "Class": "shell"},
+            {"ID": 2, "Name": "cloud-init", "Class": "yaml_cloud_config"}
+        ]});
+        let scripts = parse_startup_scripts(&value);
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0].name, "初期設定");
+        assert_eq!(scripts[1].class, "yaml_cloud_config");
+    }
+
     /// 公開鍵は本体が無いものを捨て、名前が空でも指紋で見分けられること。
     #[test]
     fn ssh_keys_drop_entries_without_a_key() {
@@ -721,6 +776,15 @@ pub struct DiskCreateInput {
     pub os_tags: Vec<String>,
 }
 
+/// スタートアップスクリプト（API 上は Note）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupScript {
+    pub id: ResourceId,
+    pub name: String,
+    /// `shell` / `yaml_cloud_config` など。
+    pub class: String,
+}
+
 /// アカウントに登録済みの SSH 公開鍵。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshKey {
@@ -810,8 +874,57 @@ pub struct ServerCreateInput {
     pub ssh_public_key: String,
     /// パスワード認証を止めるか。公開鍵を入れたときだけ意味がある。
     pub disable_password_auth: bool,
+    /// eth0 の接続先。
+    pub nic: NicPlan,
+    /// eth0 に付けるパケットフィルタ。作成後に別の呼び出しで付ける。
+    pub packet_filter_id: Option<ResourceId>,
+    /// ディスクの修正で流すスタートアップスクリプト。
+    pub startup_script_id: Option<ResourceId>,
     /// 作成後に起動するか。
     pub boot_after_create: bool,
+}
+
+/// eth0 をどこに繋ぐか。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum NicPlan {
+    /// 共有セグメント。IP は自動で割り当てられる。
+    #[default]
+    Shared,
+    /// スイッチ。IP は自分で決める必要がある。
+    Switch {
+        id: ResourceId,
+        ip_address: String,
+        mask_len: u32,
+        gateway: String,
+    },
+    /// どこにも繋がない。
+    None,
+}
+
+impl NicPlan {
+    /// サーバー作成に渡す `ConnectedSwitches`。
+    fn connected_switches(&self) -> serde_json::Value {
+        match self {
+            // 共有セグメントは eth0 にしか付けられない。
+            Self::Shared => json!([{ "Scope": "shared" }]),
+            Self::Switch { id, .. } => json!([{ "ID": id.0 }]),
+            // 空の要素で NIC だけ作る。
+            Self::None => json!([null]),
+        }
+    }
+
+    /// スイッチに繋ぐときは DHCP が無いので、ディスクの修正で IP を書き込む。
+    fn disk_network_config(&self) -> Option<(String, u32, String)> {
+        match self {
+            Self::Switch {
+                ip_address,
+                mask_len,
+                gateway,
+                ..
+            } if !ip_address.is_empty() => Some((ip_address.clone(), *mask_len, gateway.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// 作成の途中経過。失敗しても、どこまで作ったかを呼び出し側へ返す。
@@ -835,6 +948,16 @@ struct NakedProductServerPlan {
     generation: u32,
     #[serde(rename = "Availability", default, deserialize_with = "null_as_default")]
     availability: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedNote {
+    #[serde(rename = "ID")]
+    id: ResourceId,
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(rename = "Class", default, deserialize_with = "null_as_default")]
+    class: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -903,6 +1026,20 @@ fn parse_server_plans(value: &serde_json::Value) -> Vec<ServerPlan> {
     plans.sort_by_key(|p| (p.cpu, p.memory_mb, std::cmp::Reverse(p.generation)));
     plans.dedup_by_key(|p| (p.cpu, p.memory_mb));
     plans
+}
+
+fn parse_startup_scripts(value: &serde_json::Value) -> Vec<StartupScript> {
+    let raw: Vec<NakedNote> = value
+        .get("Notes")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    raw.into_iter()
+        .map(|n| StartupScript {
+            id: n.id,
+            name: n.name,
+            class: n.class,
+        })
+        .collect()
 }
 
 fn parse_ssh_keys(value: &serde_json::Value) -> Vec<SshKey> {
@@ -1091,12 +1228,56 @@ impl SacloudClient {
         if let Err(err) = self.wait_disk_ready(zone, disk_id).await {
             return (progress, Err(err));
         }
+        if let Some(filter_id) = input.packet_filter_id
+            && let Err(err) = self.attach_packet_filter(zone, server_id, filter_id).await
+        {
+            return (progress, Err(err));
+        }
         if input.boot_after_create
             && let Err(err) = self.power_action(zone, server_id, PowerAction::Boot).await
         {
             return (progress, Err(err));
         }
         (progress, Ok(server_id))
+    }
+
+    /// eth0 にパケットフィルタを付ける。
+    ///
+    /// フィルタは NIC 単位なので、サーバーを作ってから最初の NIC の ID を
+    /// 引いて付ける。NIC が無ければ何もしない。
+    async fn attach_packet_filter(
+        &self,
+        zone: &str,
+        server_id: ResourceId,
+        filter_id: ResourceId,
+    ) -> Result<()> {
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, &format!("server/{server_id}"), None)
+            .await?;
+        let Some(interface_id) = value
+            .pointer("/Server/Interfaces/0/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+        else {
+            return Ok(());
+        };
+        let _: serde_json::Value = self
+            .request_in_zone(
+                zone,
+                Method::PUT,
+                &format!("interface/{interface_id}/to/packetfilter/{filter_id}"),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// スタートアップスクリプト（Note）の一覧。
+    pub async fn list_startup_scripts(&self, zone: &str) -> Result<Vec<StartupScript>> {
+        let body = json!({ "Count": 1000, "Sort": ["Name"] });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, "note", Some(body))
+            .await?;
+        Ok(parse_startup_scripts(&value))
     }
 
     async fn create_server_only(
@@ -1115,8 +1296,7 @@ impl SacloudClient {
                     "Commitment": "standard",
                 },
                 "InterfaceDriver": "virtio",
-                // 共有セグメントは eth0 にしか付けられない。
-                "ConnectedSwitches": [{ "Scope": "shared" }],
+                "ConnectedSwitches": input.nic.connected_switches(),
             }
         });
         let value: serde_json::Value = self
@@ -1143,6 +1323,17 @@ impl SacloudClient {
         if !input.ssh_public_key.is_empty() {
             config["SSHKeys"] = json!([{ "PublicKey": input.ssh_public_key }]);
             config["DisablePWAuth"] = json!(input.disable_password_auth);
+        }
+        if let Some(id) = input.startup_script_id {
+            config["Notes"] = json!([{ "ID": id.0 }]);
+        }
+        // スイッチに繋いだ NIC は DHCP が無いので、ここで IP を焼き込む。
+        if let Some((ip, mask_len, gateway)) = input.nic.disk_network_config() {
+            config["UserIPAddress"] = json!(ip);
+            config["UserSubnet"] = json!({
+                "DefaultRoute": gateway,
+                "NetworkMaskLen": mask_len,
+            });
         }
         let body = json!({
             "Disk": {

@@ -203,6 +203,12 @@ pub enum Message {
         plans: Result<Vec<crate::iaas::ServerPlan>, String>,
         disks: Result<Vec<crate::iaas::DiskPlan>, String>,
     },
+    /// 作成フォームで NIC・フィルタ・スクリプトに選べるもの。
+    ServerAttachments {
+        switches: Result<Vec<crate::switch::Switch>, String>,
+        filters: Result<Vec<crate::cloud_resources::CloudResource>, String>,
+        scripts: Result<Vec<crate::iaas::StartupScript>, String>,
+    },
     SshKeyList {
         result: Result<Vec<crate::iaas::SshKey>, String>,
     },
@@ -1940,6 +1946,15 @@ impl App {
                 self.server.disk_plans = self.store_result(disks);
                 // フォームを開いたまま届くことがあるので、既定値をここで埋める。
                 self.server_plans_arrived();
+            }
+            Message::ServerAttachments {
+                switches,
+                filters,
+                scripts,
+            } => {
+                self.server.switches = self.store_result(switches);
+                self.server.packet_filters = self.store_result(filters);
+                self.server.startup_scripts = self.store_result(scripts);
             }
             Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
             Message::SshKeyList { result } => {
@@ -6127,14 +6142,13 @@ impl App {
                 // 公開鍵は長いので、貼り付けずに選べるようにする。
                 KeyCode::Char('k' | 'K')
                     if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && form.field == ServerCreateForm::SSH_KEY_FIELD =>
+                        && form.current(&self.server_choices()) == ServerField::SshKey =>
                 {
                     self.open_ssh_key_picker(SshKeyReturn::ServerCreate(form));
                 }
                 _ => {
-                    let plans = self.server_plan_choices();
-                    let sizes = self.server.disk_sizes();
-                    edit_server_create_form(&mut form, key, &plans, &sizes);
+                    let choices = self.server_choices();
+                    edit_server_create_form(&mut form, key, &choices);
                     self.overlay = Some(Overlay::ServerCreateForm(form));
                 }
             },
