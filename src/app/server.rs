@@ -5,14 +5,58 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
-use super::{App, ConfirmAction, Loadable, Message, Overlay, Pane, StatusKind, fmt_error, matches};
-use crate::iaas::{PowerAction, PowerStatus, Server};
+use super::{
+    App, ConfirmAction, Loadable, Message, Overlay, Pane, ServerCreateForm, SshKeySource,
+    SshKeyStage, StatusKind, fmt_error, matches,
+};
+use crate::iaas::{
+    DiskPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan, SshKey,
+};
+use crate::pubkey::PublicKey;
+
+/// 登録済みの鍵を一覧に出せる形にする。
+///
+/// 名前は空にできるので、その場合は見分けられるよう指紋を使う。
+fn sacloud_key_choice(key: SshKey) -> PublicKey {
+    let label = if key.name.trim().is_empty() {
+        key.fingerprint.clone()
+    } else {
+        key.name.clone()
+    };
+    PublicKey {
+        label,
+        key: key.public_key,
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct ServerView {
     /// ゾーンごとのサーバー一覧。
     pub servers: HashMap<String, Loadable<Vec<Server>>>,
     pub server_state: TableState,
+    /// 作成フォームで使う選択肢。ゾーンごとに違うので都度引く。
+    pub plans: Loadable<Vec<ServerPlan>>,
+    pub disk_plans: Loadable<Vec<DiskPlan>>,
+}
+
+impl ServerView {
+    /// 作成フォームで選べるディスクサイズ（MB）。SSD を既定にする。
+    pub fn disk_sizes(&self) -> Vec<u32> {
+        self.disk_plans
+            .ready()
+            .and_then(|plans| plans.iter().find(|p| p.is_ssd()))
+            .map(|p| p.sizes_mb.clone())
+            .unwrap_or_default()
+    }
+
+    /// SSD のプラン ID。まだ引けていなければ公式SDKと同じ既定値。
+    pub fn ssd_plan_id(&self) -> u32 {
+        self.disk_plans
+            .ready()
+            .and_then(|plans| plans.iter().find(|p| p.is_ssd()))
+            .map(|p| p.id)
+            .unwrap_or(4)
+    }
 }
 
 impl App {
@@ -75,8 +119,330 @@ impl App {
         self.load_servers(zone);
     }
 
+    /// 作成フォームで選べるプランの一覧。まだ届いていなければ空。
+    pub fn server_plan_choices(&self) -> Vec<ServerPlan> {
+        self.server.plans.ready().cloned().unwrap_or_default()
+    }
+
+    fn open_server_create_form(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        // 選択肢はゾーンごとに違う。開くたびに引き直す。
+        self.load_server_plans();
+        let mut form = ServerCreateForm {
+            boot_after_create: true,
+            ..ServerCreateForm::default()
+        };
+        // もう一覧が手元にあれば今すぐ埋める。無ければ届いた時に埋める。
+        form.apply_defaults(&self.server_plan_choices(), &self.server.disk_sizes());
+        self.overlay = Some(Overlay::ServerCreateForm(form));
+    }
+
+    /// プラン一覧が届いたときに、開いたままのフォームの既定値を埋める。
+    pub(super) fn server_plans_arrived(&mut self) {
+        let plans = self.server_plan_choices();
+        let sizes = self.server.disk_sizes();
+        match &mut self.overlay {
+            Some(Overlay::ServerCreateForm(form)) => form.apply_defaults(&plans, &sizes),
+            Some(Overlay::SshKeyPicker { form, .. }) => form.apply_defaults(&plans, &sizes),
+            _ => {}
+        }
+    }
+
+    fn load_server_plans(&mut self) {
+        if !self.server.plans.is_idle() && !self.server.disk_plans.is_idle() {
+            return;
+        }
+        self.server.plans = Loadable::Loading;
+        self.server.disk_plans = Loadable::Loading;
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        tokio::spawn(async move {
+            let plans = client.list_server_plans(&zone).await.map_err(fmt_error);
+            let disks = client.list_disk_plans(&zone).await.map_err(fmt_error);
+            let _ = tx.send(Message::ServerPlans { plans, disks });
+        });
+    }
+
+    /// 公開鍵を選ぶ画面を開く。作成フォームは預かって、選び終えたら戻す。
+    pub(super) fn open_ssh_key_picker(&mut self, form: ServerCreateForm) {
+        self.overlay = Some(Overlay::SshKeyPicker {
+            form: Box::new(form),
+            stage: SshKeyStage::Source { index: 0 },
+        });
+    }
+
+    /// 取得元が決まったので鍵を集める。
+    pub(super) fn choose_ssh_key_source(
+        &mut self,
+        form: Box<ServerCreateForm>,
+        source: SshKeySource,
+    ) {
+        match source {
+            // ユーザー名を聞かないと取りに行けない。
+            SshKeySource::Github => {
+                self.overlay = Some(Overlay::SshKeyPicker {
+                    form,
+                    stage: SshKeyStage::GithubUser {
+                        user: String::new(),
+                    },
+                });
+            }
+            // 手元のファイルなので待たせる必要がない。
+            SshKeySource::Local => match crate::pubkey::from_local_ssh_dir() {
+                Ok(keys) => self.show_ssh_keys(form, source.label().to_string(), keys),
+                Err(err) => self.close_ssh_key_picker(*form, fmt_error(err)),
+            },
+            SshKeySource::Sacloud => {
+                let from = source.label().to_string();
+                self.overlay = Some(Overlay::SshKeyPicker {
+                    form,
+                    stage: SshKeyStage::Loading { from: from.clone() },
+                });
+                self.inflight += 1;
+                let client = self.sacloud.clone();
+                let tx = self.tx.clone();
+                let zone = self.zone.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .list_ssh_keys(&zone)
+                        .await
+                        .map(|keys| keys.into_iter().map(sacloud_key_choice).collect())
+                        .map_err(fmt_error);
+                    let _ = tx.send(Message::SshKeys { from, result });
+                });
+            }
+        }
+    }
+
+    /// GitHub のユーザー名が決まったので取りに行く。
+    pub(super) fn submit_github_ssh_user(&mut self, form: Box<ServerCreateForm>, user: String) {
+        let from = format!("GitHub: {}", user.trim());
+        self.overlay = Some(Overlay::SshKeyPicker {
+            form,
+            stage: SshKeyStage::Loading { from: from.clone() },
+        });
+        self.inflight += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = crate::pubkey::from_github(&user).await.map_err(fmt_error);
+            let _ = tx.send(Message::SshKeys { from, result });
+        });
+    }
+
+    pub(super) fn ssh_keys_arrived(
+        &mut self,
+        from: String,
+        result: Result<Vec<PublicKey>, String>,
+    ) {
+        // 画面を閉じたあとに届くことがある。その場合は捨てる。
+        let Some(Overlay::SshKeyPicker { form, stage }) = self.overlay.take() else {
+            return;
+        };
+        // 待っているものと別の応答なら、今の画面をそのまま続ける。
+        if !matches!(&stage, SshKeyStage::Loading { from: waiting } if *waiting == from) {
+            self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+            return;
+        }
+        match result {
+            Ok(keys) => self.show_ssh_keys(form, from, keys),
+            Err(err) => self.close_ssh_key_picker(*form, err),
+        }
+    }
+
+    fn show_ssh_keys(&mut self, form: Box<ServerCreateForm>, from: String, keys: Vec<PublicKey>) {
+        if keys.is_empty() {
+            self.close_ssh_key_picker(*form, format!("{from}: 公開鍵が見つかりませんでした"));
+            return;
+        }
+        self.overlay = Some(Overlay::SshKeyPicker {
+            form,
+            stage: SshKeyStage::Keys {
+                from,
+                keys,
+                index: 0,
+            },
+        });
+    }
+
+    /// 鍵を諦めて作成フォームに戻す。
+    fn close_ssh_key_picker(&mut self, form: ServerCreateForm, err: String) {
+        self.overlay = Some(Overlay::ServerCreateForm(form));
+        self.set_status(err, StatusKind::Error);
+    }
+
+    /// 選んだ鍵をフォームに入れて戻す。
+    pub(super) fn take_ssh_key(&mut self, mut form: ServerCreateForm, key: &PublicKey) {
+        form.ssh_public_key = key.key.clone();
+        form.field = ServerCreateForm::SSH_KEY_FIELD;
+        let label = key.label.clone();
+        self.overlay = Some(Overlay::ServerCreateForm(form));
+        self.set_status(
+            format!("公開鍵「{label}」を入れました"),
+            StatusKind::Success,
+        );
+    }
+
+    pub(super) fn submit_server_create_form(&mut self, form: ServerCreateForm) {
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            self.overlay = Some(Overlay::ServerCreateForm(form));
+            self.set_status("名前を入力してください", StatusKind::Error);
+            return;
+        }
+        let plans = self.server_plan_choices();
+        if !crate::iaas::plan_exists(&plans, form.cpu, form.memory_mb) {
+            self.overlay = Some(Overlay::ServerCreateForm(form));
+            self.set_status(
+                "その CPU とメモリの組み合わせは選べません",
+                StatusKind::Error,
+            );
+            return;
+        }
+        let (cpu, memory_mb) = (form.cpu, form.memory_mb);
+        let sizes = self.server.disk_sizes();
+        if !sizes.contains(&form.disk_size_mb) {
+            self.overlay = Some(Overlay::ServerCreateForm(form));
+            self.set_status("ディスクサイズを選んでください", StatusKind::Error);
+            return;
+        }
+        let disk_size_mb = form.disk_size_mb;
+        let os = OS_CHOICES[form.os.min(OS_CHOICES.len() - 1)];
+
+        let input = ServerCreateInput {
+            name: name.clone(),
+            description: form.description.trim().to_string(),
+            cpu,
+            memory_mb,
+            os_tags: os.tags.iter().map(|t| t.to_string()).collect(),
+            disk_size_mb,
+            disk_plan_id: self.server.ssd_plan_id(),
+            host_name: form.effective_host_name().to_string(),
+            password: form.password.clone(),
+            ssh_public_key: form.ssh_public_key.trim().to_string(),
+            disable_password_auth: !form.ssh_public_key.trim().is_empty(),
+            boot_after_create: form.boot_after_create,
+        };
+
+        // ディスクは作成した時点から課金される。実行前に一度止める。
+        self.overlay = Some(Overlay::Confirm {
+            title: "サーバーの作成".to_string(),
+            body: format!(
+                "サーバー「{}」を {} に作成します。\n\
+                 {} コア / {} GB / {} / ディスク {} GB（{}）\n\n\
+                 ディスクは作成した時点から、サーバーは起動した時点から課金されます。",
+                name,
+                self.zone,
+                cpu,
+                memory_mb / 1024,
+                os.label,
+                disk_size_mb / 1024,
+                if form.boot_after_create {
+                    "作成後に起動する"
+                } else {
+                    "作成後は停止のまま"
+                },
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::CreateServer {
+                zone: self.zone.clone(),
+                input: Box::new(input),
+            },
+        });
+    }
+
+    pub(super) fn run_create_server(&mut self, zone: String, input: Box<ServerCreateInput>) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let name = input.name.clone();
+        self.set_status(
+            format!("サーバー「{name}」を作成しています…"),
+            StatusKind::Info,
+        );
+        tokio::spawn(async move {
+            let (progress, result) = client.create_server(&zone, &input).await;
+            let _ = tx.send(Message::ServerCreated {
+                name,
+                progress,
+                result: result.map(|_| ()).map_err(fmt_error),
+            });
+        });
+    }
+
+    fn confirm_delete_server(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(server) = self.selected_server() else {
+            return;
+        };
+        // 起動中は API 側で拒否されるので、叩く前に止める。
+        if server.power != PowerStatus::Down {
+            self.set_status(
+                format!(
+                    "{}: 起動中は削除できません。先に停止してください",
+                    server.name
+                ),
+                StatusKind::Error,
+            );
+            return;
+        }
+        let disks = if server.disk_names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n接続中のディスク({})も一緒に削除します。",
+                server.disk_names.join(", ")
+            )
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "サーバーの削除".to_string(),
+            body: format!(
+                "サーバー「{}」({}) を削除します。{}\n\
+                 元に戻せません。実行するにはサーバー名を入力してください。",
+                server.name, self.zone, disks
+            ),
+            verify: Some(server.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteServer {
+                zone: self.zone.clone(),
+                id: server.id,
+                name: server.name,
+            },
+        });
+    }
+
+    pub(super) fn run_delete_server(
+        &mut self,
+        zone: String,
+        id: crate::sacloud::ResourceId,
+        name: String,
+    ) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            // 接続中のディスクは単体では消せないので、まとめて指定する。
+            let result = match client.server_disk_ids(&zone, id).await {
+                Ok(disks) => client.delete_server(&zone, id, &disks).await,
+                Err(err) => Err(err),
+            };
+            let _ = tx.send(Message::ServerDeleted {
+                name,
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
     pub(super) fn on_key_server(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('n') => self.open_server_create_form(),
+            KeyCode::Char('D') => self.confirm_delete_server(),
             KeyCode::Char('b') => self.confirm_power(PowerAction::Boot),
             KeyCode::Char('x') => self.confirm_power(PowerAction::Shutdown),
             KeyCode::Char('X') => self.confirm_power(PowerAction::PowerOff),
@@ -162,5 +528,97 @@ impl App {
 
     pub(super) fn server_invalidate(&mut self) {
         self.server = ServerView::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ホスト名は省略時にサーバー名を使う。
+    #[test]
+    fn host_name_falls_back_to_the_server_name() {
+        let form = ServerCreateForm {
+            name: "web-01".to_string(),
+            ..ServerCreateForm::default()
+        };
+        assert_eq!(form.effective_host_name(), "web-01");
+
+        let explicit = ServerCreateForm {
+            name: "web-01".to_string(),
+            host_name: "custom".to_string(),
+            ..ServerCreateForm::default()
+        };
+        assert_eq!(explicit.effective_host_name(), "custom");
+    }
+
+    /// 選択式の欄と入力式の欄を取り違えないこと。
+    /// 取り違えると左右キーで文字が消えたり、入力できなくなる。
+    #[test]
+    fn choice_fields_are_separated_from_text_fields() {
+        assert_eq!(ServerCreateForm::LABELS.len(), 10);
+        for i in ServerCreateForm::CHOICE_FIELDS {
+            assert!(ServerCreateForm::is_choice(i), "{i} は選択式のはず");
+            // 選択式の欄は文字列を持たない。
+            assert_eq!(ServerCreateForm::default().value(i), "");
+        }
+        for i in [0usize, 1, 6, 7, 8] {
+            assert!(!ServerCreateForm::is_choice(i), "{i} は入力式のはず");
+        }
+        // 伏せ字と公開鍵の欄は入力式でなければならない。
+        assert!(!ServerCreateForm::is_choice(
+            ServerCreateForm::PASSWORD_FIELD
+        ));
+        assert!(!ServerCreateForm::is_choice(
+            ServerCreateForm::SSH_KEY_FIELD
+        ));
+        assert_eq!(
+            ServerCreateForm::LABELS[ServerCreateForm::PASSWORD_FIELD],
+            "パスワード"
+        );
+        assert_eq!(
+            ServerCreateForm::LABELS[ServerCreateForm::SSH_KEY_FIELD],
+            "SSH公開鍵"
+        );
+    }
+
+    /// プラン一覧が届いたら、まだ選んでいない欄が埋まること。
+    #[test]
+    fn defaults_are_filled_in_when_the_plan_list_arrives() {
+        let plans = vec![
+            ServerPlan {
+                name: "1c1g".to_string(),
+                cpu: 1,
+                memory_mb: 1024,
+                commitment: "standard".to_string(),
+                generation: 200,
+                availability: "available".to_string(),
+            },
+            ServerPlan {
+                name: "2c4g".to_string(),
+                cpu: 2,
+                memory_mb: 4096,
+                commitment: "standard".to_string(),
+                generation: 200,
+                availability: "available".to_string(),
+            },
+        ];
+        let mut form = ServerCreateForm::default();
+        form.apply_defaults(&plans, &[20480, 40960]);
+        assert_eq!((form.cpu, form.memory_mb), (1, 1024));
+        assert_eq!(form.disk_size_mb, 20480);
+
+        // 既に選んでいるものは上書きしない。
+        let mut chosen = ServerCreateForm {
+            cpu: 2,
+            memory_mb: 4096,
+            disk_size_mb: 40960,
+            ..ServerCreateForm::default()
+        };
+        chosen.apply_defaults(&plans, &[20480, 40960]);
+        assert_eq!(
+            (chosen.cpu, chosen.memory_mb, chosen.disk_size_mb),
+            (2, 4096, 40960)
+        );
     }
 }

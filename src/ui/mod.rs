@@ -563,7 +563,14 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         Service::Server => {
             hints.push("z ゾーン");
             if app.mode == Mode::Write {
-                hints.extend(["b 起動", "x 停止", "X 強制停止", "B 強制リセット"]);
+                hints.extend([
+                    "n 作成",
+                    "D 削除",
+                    "b 起動",
+                    "x 停止",
+                    "X 強制停止",
+                    "B 強制リセット",
+                ]);
             }
         }
         Service::Switch => {

@@ -373,6 +373,127 @@ impl SacloudClient {
 mod tests {
     use super::*;
 
+    /// プラン一覧は共有CPUの使えるものだけを出し、
+    /// 同じ構成が世代違いで並ぶのを1つに畳む。
+    #[test]
+    fn server_plans_are_deduplicated_by_size() {
+        let value = serde_json::json!({"ServerPlans": [
+            {"Name": "旧2c4g", "CPU": 2, "MemoryMB": 4096,
+             "Commitment": "standard", "Generation": 100, "Availability": "available"},
+            {"Name": "新2c4g", "CPU": 2, "MemoryMB": 4096,
+             "Commitment": "standard", "Generation": 200, "Availability": "available"},
+            {"Name": "1c1g", "CPU": 1, "MemoryMB": 1024,
+             "Commitment": "standard", "Generation": 200, "Availability": "available"},
+            {"Name": "専有", "CPU": 4, "MemoryMB": 8192,
+             "Commitment": "dedicatedcpu", "Generation": 200, "Availability": "available"},
+            {"Name": "販売終了", "CPU": 8, "MemoryMB": 16384,
+             "Commitment": "standard", "Generation": 200, "Availability": "discontinued"}
+        ]});
+        let plans = parse_server_plans(&value);
+        let labels: Vec<String> = plans.iter().map(ServerPlan::label).collect();
+        assert_eq!(labels, vec!["1 コア / 1 GB", "2 コア / 4 GB"]);
+        // 畳むときは新しい世代を残す。
+        assert_eq!(plans[1].generation, 200);
+    }
+
+    /// コア数とメモリを別々に選べるよう、重複なく取り出せること。
+    #[test]
+    fn plan_choices_are_split_into_cpu_and_memory() {
+        let plans = sample_plans();
+        assert_eq!(cpu_choices(&plans), vec![1, 2, 4]);
+        assert_eq!(memory_choices(&plans, 2), vec![2048, 4096]);
+        // 無いコア数を聞かれても落ちない。
+        assert!(memory_choices(&plans, 3).is_empty());
+    }
+
+    /// コア数を変えたとき、その構成にあるメモリのうち一番近いものを返すこと。
+    /// そのまま持ち越すと存在しない組み合わせで作成してしまう。
+    #[test]
+    fn memory_snaps_to_what_the_cpu_actually_offers() {
+        let plans = sample_plans();
+        assert_eq!(nearest_memory(&plans, 4, 2048), 8192);
+        assert_eq!(nearest_memory(&plans, 1, 4096), 2048);
+        // 選べるものが無ければ希望のまま返す。
+        assert_eq!(nearest_memory(&plans, 3, 4096), 4096);
+    }
+
+    #[test]
+    fn plan_exists_checks_the_pair_not_each_side() {
+        let plans = sample_plans();
+        assert!(plan_exists(&plans, 2, 4096));
+        // 2 コアも 8GB もあるが、その組み合わせは無い。
+        assert!(!plan_exists(&plans, 2, 8192));
+    }
+
+    fn sample_plans() -> Vec<ServerPlan> {
+        [(1, 1024), (1, 2048), (2, 2048), (2, 4096), (4, 8192)]
+            .into_iter()
+            .map(|(cpu, memory_mb)| ServerPlan {
+                name: String::new(),
+                cpu,
+                memory_mb,
+                commitment: "standard".to_string(),
+                generation: 200,
+                availability: "available".to_string(),
+            })
+            .collect()
+    }
+
+    /// 公開鍵は本体が無いものを捨て、名前が空でも指紋で見分けられること。
+    #[test]
+    fn ssh_keys_drop_entries_without_a_key() {
+        let value = serde_json::json!({"SSHKeys": [
+            {"ID": "1", "Name": "手元", "PublicKey": "ssh-ed25519 AAAA...\n",
+             "Fingerprint": "aa:bb"},
+            {"ID": 2, "Name": "", "PublicKey": "", "Fingerprint": "cc:dd"}
+        ]});
+        let keys = parse_ssh_keys(&value);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "手元");
+        // 前後の空白は落として1行にする。
+        assert_eq!(keys[0].public_key, "ssh-ed25519 AAAA...");
+    }
+
+    /// ディスクプランは SSD と HDD だけを拾い、使えるサイズだけを残す。
+    #[test]
+    fn disk_plans_keep_only_available_sizes() {
+        let value = serde_json::json!({"DiskPlans": [
+            {"ID": 4, "Name": "SSD", "Size": [
+                {"SizeMB": 20480, "Availability": "available"},
+                {"SizeMB": 40960, "Availability": "available"},
+                {"SizeMB": 102400, "Availability": "discontinued"}
+            ]},
+            {"ID": 2, "Name": "HDD", "Size": [{"SizeMB": 40960, "Availability": "available"}]},
+            {"ID": 99, "Name": "未知", "Size": []}
+        ]});
+        let plans = parse_disk_plans(&value);
+        assert_eq!(plans.len(), 2);
+        assert!(plans[0].is_ssd());
+        assert_eq!(plans[0].sizes_mb, vec![20480, 40960]);
+        assert!(!plans[1].is_ssd());
+    }
+
+    /// OS の選択肢は公式SDKのタグ条件をそのまま持つ。
+    /// 綴りを間違えるとテンプレートが引けなくなる。
+    #[test]
+    fn os_choices_carry_the_sdk_tags() {
+        assert_eq!(OS_CHOICES.len(), 6);
+        let ubuntu = OS_CHOICES[0];
+        assert_eq!(ubuntu.tags, &["current-stable", "distro-ubuntu"]);
+        // 版を固定する選択肢は単独タグ。
+        let pinned = OS_CHOICES[5];
+        assert_eq!(pinned.tags, &["ubuntu-24.04-latest"]);
+    }
+
+    /// 途中で失敗しても、そこまでに作ったものが分かること。
+    #[test]
+    fn progress_records_what_was_created() {
+        let mut progress = ServerCreateProgress::default();
+        assert!(progress.server_id.is_none() && progress.disk_id.is_none());
+        progress.server_id = Some(ResourceId(1));
+        assert!(progress.disk_id.is_none());
+    }
+
     #[test]
     fn parses_server_list() {
         let body = r#"{
@@ -512,5 +633,542 @@ mod zone_list_tests {
                 assert!(zone.label().contains(&zone.name));
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// サーバーの作成
+// ---------------------------------------------------------------------------
+
+/// ディスクプランの ID。公式ドキュメントには無く、公式SDKが持っている値。
+const DISK_PLAN_SSD: u32 = 4;
+const DISK_PLAN_HDD: u32 = 2;
+
+/// ディスクのコピー完了を待つ間隔と上限。公式SDKに合わせる。
+const DISK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const DISK_POLL_MAX: usize = 240;
+
+/// サーバープラン 1 件。`/product/server` から引く。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerPlan {
+    pub name: String,
+    pub cpu: u32,
+    pub memory_mb: u32,
+    /// `standard` / `dedicatedcpu`。
+    pub commitment: String,
+    pub generation: u32,
+    pub availability: String,
+}
+
+impl ServerPlan {
+    pub fn label(&self) -> String {
+        format!("{} コア / {} GB", self.cpu, self.memory_mb / 1024)
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.availability.is_empty() || self.availability == "available"
+    }
+}
+
+/// プラン一覧から選べるコア数を昇順で取り出す。
+///
+/// プランは100通り以上あるので、一覧をそのまま送るとフォームで選べない。
+/// コア数とメモリに分けて絞り込めるようにする。
+pub fn cpu_choices(plans: &[ServerPlan]) -> Vec<u32> {
+    let mut cpus: Vec<u32> = plans.iter().map(|p| p.cpu).collect();
+    cpus.sort_unstable();
+    cpus.dedup();
+    cpus
+}
+
+/// そのコア数と組み合わせられるメモリ（MB）を昇順で取り出す。
+pub fn memory_choices(plans: &[ServerPlan], cpu: u32) -> Vec<u32> {
+    let mut mem: Vec<u32> = plans
+        .iter()
+        .filter(|p| p.cpu == cpu)
+        .map(|p| p.memory_mb)
+        .collect();
+    mem.sort_unstable();
+    mem.dedup();
+    mem
+}
+
+/// コア数を変えたとき、その構成で選べるメモリのうち希望に一番近いものを返す。
+///
+/// コア数ごとに選べるメモリが違うので、そのまま持ち越すと存在しない組み合わせになる。
+pub fn nearest_memory(plans: &[ServerPlan], cpu: u32, want_mb: u32) -> u32 {
+    memory_choices(plans, cpu)
+        .into_iter()
+        .min_by_key(|m| m.abs_diff(want_mb))
+        .unwrap_or(want_mb)
+}
+
+/// その組み合わせのプランが実際にあるか。
+pub fn plan_exists(plans: &[ServerPlan], cpu: u32, memory_mb: u32) -> bool {
+    plans
+        .iter()
+        .any(|p| p.cpu == cpu && p.memory_mb == memory_mb)
+}
+
+/// アカウントに登録済みの SSH 公開鍵。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshKey {
+    pub id: ResourceId,
+    pub name: String,
+    pub public_key: String,
+    pub fingerprint: String,
+}
+
+/// ディスクプランと、そのプランで選べるサイズ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskPlan {
+    pub id: u32,
+    pub name: String,
+    /// 選べるサイズ（MB）。ここに無い値は指定できない。
+    pub sizes_mb: Vec<u32>,
+}
+
+impl DiskPlan {
+    pub fn is_ssd(&self) -> bool {
+        self.id == DISK_PLAN_SSD
+    }
+}
+
+/// OS テンプレート（パブリックアーカイブ）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsTemplate {
+    pub id: ResourceId,
+    pub name: String,
+    pub size_mb: u32,
+}
+
+/// `--os-type` 相当の選択肢。公式SDKのタグ条件をそのまま持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsChoice {
+    pub label: &'static str,
+    /// AND 条件で使うタグ。
+    pub tags: &'static [&'static str],
+}
+
+/// 画面に出す OS の選択肢。
+///
+/// `current-stable` と `distro-*` の AND でその配布物の最新安定版が引ける。
+pub const OS_CHOICES: [OsChoice; 6] = [
+    OsChoice {
+        label: "Ubuntu (最新安定版)",
+        tags: &["current-stable", "distro-ubuntu"],
+    },
+    OsChoice {
+        label: "Rocky Linux (最新安定版)",
+        tags: &["current-stable", "distro-rocky"],
+    },
+    OsChoice {
+        label: "AlmaLinux (最新安定版)",
+        tags: &["current-stable", "distro-alma"],
+    },
+    OsChoice {
+        label: "Debian (最新安定版)",
+        tags: &["current-stable", "distro-debian"],
+    },
+    OsChoice {
+        label: "MIRACLE LINUX (最新安定版)",
+        tags: &["current-stable", "distro-miracle"],
+    },
+    OsChoice {
+        label: "Ubuntu 24.04",
+        tags: &["ubuntu-24.04-latest"],
+    },
+];
+
+/// サーバー作成の入力。
+#[derive(Debug, Clone, Default)]
+pub struct ServerCreateInput {
+    pub name: String,
+    pub description: String,
+    pub cpu: u32,
+    pub memory_mb: u32,
+    /// OS テンプレートを引くためのタグ。空ならディスクを作らない。
+    pub os_tags: Vec<String>,
+    pub disk_size_mb: u32,
+    pub disk_plan_id: u32,
+    pub host_name: String,
+    pub password: String,
+    /// 公開鍵。空なら送らない。
+    pub ssh_public_key: String,
+    /// パスワード認証を止めるか。公開鍵を入れたときだけ意味がある。
+    pub disable_password_auth: bool,
+    /// 作成後に起動するか。
+    pub boot_after_create: bool,
+}
+
+/// 作成の途中経過。失敗しても、どこまで作ったかを呼び出し側へ返す。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerCreateProgress {
+    pub server_id: Option<ResourceId>,
+    pub disk_id: Option<ResourceId>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedProductServerPlan {
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(rename = "CPU", default, deserialize_with = "null_as_default")]
+    cpu: u32,
+    #[serde(rename = "MemoryMB", default, deserialize_with = "null_as_default")]
+    memory_mb: u32,
+    #[serde(rename = "Commitment", default, deserialize_with = "null_as_default")]
+    commitment: String,
+    #[serde(rename = "Generation", default, deserialize_with = "null_as_default")]
+    generation: u32,
+    #[serde(rename = "Availability", default, deserialize_with = "null_as_default")]
+    availability: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedSshKey {
+    #[serde(rename = "ID")]
+    id: ResourceId,
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(rename = "PublicKey", default, deserialize_with = "null_as_default")]
+    public_key: String,
+    #[serde(rename = "Fingerprint", default, deserialize_with = "null_as_default")]
+    fingerprint: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedDiskPlan {
+    #[serde(rename = "ID", default, deserialize_with = "null_as_default")]
+    id: u32,
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(rename = "Size", default, deserialize_with = "null_as_default")]
+    size: Vec<NakedDiskSize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedDiskSize {
+    #[serde(rename = "SizeMB", default, deserialize_with = "null_as_default")]
+    size_mb: u32,
+    #[serde(rename = "Availability", default, deserialize_with = "null_as_default")]
+    availability: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedArchive {
+    #[serde(rename = "ID")]
+    id: ResourceId,
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
+    #[serde(rename = "SizeMB", default, deserialize_with = "null_as_default")]
+    size_mb: u32,
+}
+
+fn parse_server_plans(value: &serde_json::Value) -> Vec<ServerPlan> {
+    let raw: Vec<NakedProductServerPlan> = value
+        .get("ServerPlans")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let mut plans: Vec<ServerPlan> = raw
+        .into_iter()
+        .map(|p| ServerPlan {
+            name: p.name,
+            cpu: p.cpu,
+            memory_mb: p.memory_mb,
+            commitment: p.commitment,
+            generation: p.generation,
+            availability: p.availability,
+        })
+        // 共有CPUの、今使えるプランだけを出す。
+        .filter(|p| p.commitment == "standard" && p.is_available())
+        .collect();
+    // 同じ構成が世代違いで複数あるので、コア・メモリで1つに畳む。
+    plans.sort_by_key(|p| (p.cpu, p.memory_mb, std::cmp::Reverse(p.generation)));
+    plans.dedup_by_key(|p| (p.cpu, p.memory_mb));
+    plans
+}
+
+fn parse_ssh_keys(value: &serde_json::Value) -> Vec<SshKey> {
+    let raw: Vec<NakedSshKey> = value
+        .get("SSHKeys")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    raw.into_iter()
+        .filter(|k| !k.public_key.trim().is_empty())
+        .map(|k| SshKey {
+            id: k.id,
+            name: k.name,
+            public_key: k.public_key.trim().to_string(),
+            fingerprint: k.fingerprint,
+        })
+        .collect()
+}
+
+fn parse_disk_plans(value: &serde_json::Value) -> Vec<DiskPlan> {
+    let raw: Vec<NakedDiskPlan> = value
+        .get("DiskPlans")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    raw.into_iter()
+        .map(|p| DiskPlan {
+            id: p.id,
+            name: p.name,
+            sizes_mb: p
+                .size
+                .into_iter()
+                .filter(|s| s.availability.is_empty() || s.availability == "available")
+                .map(|s| s.size_mb)
+                .collect(),
+        })
+        .filter(|p| p.id == DISK_PLAN_SSD || p.id == DISK_PLAN_HDD)
+        .collect()
+}
+
+impl SacloudClient {
+    /// 選べるサーバープラン。
+    pub async fn list_server_plans(&self, zone: &str) -> Result<Vec<ServerPlan>> {
+        let body = json!({ "Count": 1000, "Sort": ["-Generation"] });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, "product/server", Some(body))
+            .await?;
+        Ok(parse_server_plans(&value))
+    }
+
+    /// 選べるディスクプランとサイズ。
+    pub async fn list_disk_plans(&self, zone: &str) -> Result<Vec<DiskPlan>> {
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, "product/disk", None)
+            .await?;
+        Ok(parse_disk_plans(&value))
+    }
+
+    /// アカウントに登録済みの SSH 公開鍵。
+    ///
+    /// 鍵はゾーンをまたいで共通だが、API はゾーン付きのパスにしかないので
+    /// 表示中のゾーンに聞く。
+    pub async fn list_ssh_keys(&self, zone: &str) -> Result<Vec<SshKey>> {
+        let body = json!({ "Count": 1000, "Sort": ["Name"] });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, "sshkey", Some(body))
+            .await?;
+        Ok(parse_ssh_keys(&value))
+    }
+
+    /// タグから OS テンプレートを1件引く。
+    ///
+    /// 公式SDKと同じく、タグの AND 条件と `Scope: shared` で絞って先頭を採る。
+    pub async fn find_os_template(&self, zone: &str, tags: &[String]) -> Result<OsTemplate> {
+        // 入れ子の配列にすると AND 条件になる。
+        let body = json!({
+            "Filter": { "Tags.Name": [tags], "Scope": ["shared"] },
+            "Count": 1,
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, "archive", Some(body))
+            .await?;
+        let archives: Vec<NakedArchive> = value
+            .get("Archives")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let archive = archives.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!(
+                "該当するOSテンプレートが見つかりませんでした: {}",
+                tags.join(", ")
+            )
+        })?;
+        Ok(OsTemplate {
+            id: archive.id,
+            name: archive.name,
+            size_mb: archive.size_mb,
+        })
+    }
+}
+
+impl SacloudClient {
+    /// サーバーを作る。
+    ///
+    /// 途中で失敗しても、そこまでに作ったものの ID を返す。呼び出し側が
+    /// 後始末を案内できるようにするため、`Result` ではなく途中経過を添える。
+    ///
+    /// 手順は公式SDKに合わせた。ディスクは作成・修正・サーバー接続を
+    /// 1 回の POST で済ませ、コピー完了を待ってから起動する。
+    pub async fn create_server(
+        &self,
+        zone: &str,
+        input: &ServerCreateInput,
+    ) -> (ServerCreateProgress, Result<ResourceId>) {
+        let mut progress = ServerCreateProgress::default();
+
+        let server_id = match self.create_server_only(zone, input).await {
+            Ok(id) => id,
+            Err(err) => return (progress, Err(err)),
+        };
+        progress.server_id = Some(server_id);
+
+        // OS を選んでいなければディスクは作らない。
+        if input.os_tags.is_empty() {
+            return (progress, Ok(server_id));
+        }
+
+        let template = match self.find_os_template(zone, &input.os_tags).await {
+            Ok(t) => t,
+            Err(err) => return (progress, Err(err)),
+        };
+        let disk_id = match self
+            .create_disk_for_server(zone, input, server_id, template.id)
+            .await
+        {
+            Ok(id) => id,
+            Err(err) => return (progress, Err(err)),
+        };
+        progress.disk_id = Some(disk_id);
+
+        if let Err(err) = self.wait_disk_ready(zone, disk_id).await {
+            return (progress, Err(err));
+        }
+        if input.boot_after_create
+            && let Err(err) = self.power_action(zone, server_id, PowerAction::Boot).await
+        {
+            return (progress, Err(err));
+        }
+        (progress, Ok(server_id))
+    }
+
+    async fn create_server_only(
+        &self,
+        zone: &str,
+        input: &ServerCreateInput,
+    ) -> Result<ResourceId> {
+        // プランは 2025 年の仕様変更で ID 指定が廃止され、CPU とメモリを直接渡す。
+        let body = json!({
+            "Server": {
+                "Name": input.name,
+                "Description": input.description,
+                "ServerPlan": {
+                    "CPU": input.cpu,
+                    "MemoryMB": input.memory_mb,
+                    "Commitment": "standard",
+                },
+                "InterfaceDriver": "virtio",
+                // 共有セグメントは eth0 にしか付けられない。
+                "ConnectedSwitches": [{ "Scope": "shared" }],
+            }
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "server", Some(body))
+            .await?;
+        value
+            .pointer("/Server/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("サーバーの作成応答にIDがありませんでした"))
+    }
+
+    async fn create_disk_for_server(
+        &self,
+        zone: &str,
+        input: &ServerCreateInput,
+        server_id: ResourceId,
+        archive_id: ResourceId,
+    ) -> Result<ResourceId> {
+        let mut config = json!({
+            "Background": true,
+            "HostName": input.host_name,
+            "Password": input.password,
+        });
+        if !input.ssh_public_key.is_empty() {
+            config["SSHKeys"] = json!([{ "PublicKey": input.ssh_public_key }]);
+            config["DisablePWAuth"] = json!(input.disable_password_auth);
+        }
+        let body = json!({
+            "Disk": {
+                "Name": format!("{}-disk", input.name),
+                "Plan": { "ID": input.disk_plan_id },
+                "SizeMB": input.disk_size_mb,
+                "Connection": "virtio",
+                "SourceArchive": { "ID": archive_id.0 },
+                // ここでサーバーへの接続まで済ませる。
+                "Server": { "ID": server_id.0 },
+            },
+            "Config": config,
+            "BootAtAvailable": false,
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "disk", Some(body))
+            .await?;
+        value
+            .pointer("/Disk/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("ディスクの作成応答にIDがありませんでした"))
+    }
+
+    /// ディスクのコピーが終わるまで待つ。
+    pub async fn wait_disk_ready(&self, zone: &str, id: ResourceId) -> Result<()> {
+        for _ in 0..DISK_POLL_MAX {
+            let (availability, _) = self.disk_progress(zone, id).await?;
+            match availability.as_str() {
+                "available" => return Ok(()),
+                "failed" => anyhow::bail!("ディスクの作成に失敗しました"),
+                _ => {}
+            }
+            tokio::time::sleep(DISK_POLL_INTERVAL).await;
+        }
+        anyhow::bail!("ディスクの作成が時間内に終わりませんでした")
+    }
+
+    /// ディスクの状態と、コピーの進み具合（0.0〜1.0）。
+    pub async fn disk_progress(&self, zone: &str, id: ResourceId) -> Result<(String, f64)> {
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, &format!("disk/{id}"), None)
+            .await?;
+        let availability = value
+            .pointer("/Disk/Availability")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let migrated = value
+            .pointer("/Disk/MigratedMB")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let total = value
+            .pointer("/Disk/SizeMB")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let ratio = if total > 0.0 { migrated / total } else { 0.0 };
+        Ok((availability, ratio.clamp(0.0, 1.0)))
+    }
+
+    /// サーバーを消す。接続中のディスクも一緒に消す。
+    ///
+    /// 起動中は消せないので、呼び出し側で停止を確認しておくこと。
+    pub async fn delete_server(
+        &self,
+        zone: &str,
+        id: ResourceId,
+        disk_ids: &[ResourceId],
+    ) -> Result<()> {
+        let with_disk: Vec<u64> = disk_ids.iter().map(|d| d.0).collect();
+        let body = json!({ "WithDisk": with_disk });
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::DELETE, &format!("server/{id}"), Some(body))
+            .await?;
+        Ok(())
+    }
+
+    /// サーバーに繋がっているディスクの ID。削除のときに使う。
+    pub async fn server_disk_ids(&self, zone: &str, id: ResourceId) -> Result<Vec<ResourceId>> {
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, &format!("server/{id}"), None)
+            .await?;
+        Ok(value
+            .pointer("/Server/Disks")
+            .and_then(serde_json::Value::as_array)
+            .map(|disks| {
+                disks
+                    .iter()
+                    .filter_map(|d| d.get("ID"))
+                    .filter_map(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }

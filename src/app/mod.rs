@@ -195,6 +195,24 @@ pub enum Message {
     RagDocumentUpdated {
         result: Result<RagDocument, String>,
     },
+    ServerPlans {
+        plans: Result<Vec<crate::iaas::ServerPlan>, String>,
+        disks: Result<Vec<crate::iaas::DiskPlan>, String>,
+    },
+    /// 作成フォームに入れる SSH 公開鍵。取得元ごとに非同期で引く。
+    SshKeys {
+        from: String,
+        result: Result<Vec<crate::pubkey::PublicKey>, String>,
+    },
+    ServerDeleted {
+        name: String,
+        result: Result<(), String>,
+    },
+    ServerCreated {
+        name: String,
+        progress: crate::iaas::ServerCreateProgress,
+        result: Result<(), String>,
+    },
     IamAction {
         label: String,
         result: Result<(), String>,
@@ -730,6 +748,16 @@ pub enum StatusKind {
 /// 確認ダイアログで実行する操作。
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
+    DeleteServer {
+        zone: String,
+        id: ResourceId,
+        name: String,
+    },
+    CreateServer {
+        zone: String,
+        /// 入力一式。列挙体が肥大しないよう箱に入れる。
+        input: Box<crate::iaas::ServerCreateInput>,
+    },
     DeleteRagDocument {
         id: String,
         name: String,
@@ -898,6 +926,12 @@ pub enum Overlay {
     IamRoleForm(IamRoleForm),
     SwitchForm(SwitchForm),
     RagUploadForm(RagUploadForm),
+    ServerCreateForm(ServerCreateForm),
+    /// SSH 公開鍵の取得元と一覧。作成フォームに戻すため、フォームごと預かる。
+    SshKeyPicker {
+        form: Box<ServerCreateForm>,
+        stage: SshKeyStage,
+    },
     RagEditForm(RagEditForm),
     DnsRecordForm(DnsRecordForm),
     DnsZoneForm(DnsZoneForm),
@@ -1795,6 +1829,69 @@ impl App {
                         scroll: 0,
                     });
                     self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::ServerDeleted { name, result } => match result {
+                Ok(()) => {
+                    self.set_status(
+                        format!("サーバー「{name}」を削除しました"),
+                        StatusKind::Success,
+                    );
+                    self.server_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "サーバーの削除に失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::ServerPlans { plans, disks } => {
+                self.server.plans = self.store_result(plans);
+                self.server.disk_plans = self.store_result(disks);
+                // フォームを開いたまま届くことがあるので、既定値をここで埋める。
+                self.server_plans_arrived();
+            }
+            Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
+            Message::ServerCreated {
+                name,
+                progress,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(
+                        format!("サーバー「{name}」を作成しました"),
+                        StatusKind::Success,
+                    );
+                    self.server_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    // 途中まで作られている場合は、何が残ったかを必ず伝える。
+                    let leftovers = match (progress.server_id, progress.disk_id) {
+                        (None, _) => String::new(),
+                        (Some(server), None) => {
+                            format!(
+                                "\n\nサーバー({server})は作成済みです。不要なら削除してください。"
+                            )
+                        }
+                        (Some(server), Some(disk)) => format!(
+                            "\n\nサーバー({server})とディスク({disk})は作成済みです。\n\
+                             ディスクは残したままだと課金が続きます。不要なら削除してください。"
+                        ),
+                    };
+                    self.overlay = Some(Overlay::Message {
+                        title: "サーバーの作成に失敗しました".to_string(),
+                        body: format!("{err}{leftovers}"),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                    self.server_invalidate();
                 }
             },
             Message::RagDocumentUpdated { result } => match result {
@@ -5202,6 +5299,10 @@ impl App {
                     Err(err) => self.set_status(fmt_error(err), StatusKind::Error),
                 }
             }
+            ConfirmAction::CreateServer { zone, input } => self.run_create_server(zone, input),
+            ConfirmAction::DeleteServer { zone, id, name } => {
+                self.run_delete_server(zone, id, name)
+            }
             ConfirmAction::DeleteRagDocument { id, name } => self.run_delete_rag_document(id, name),
             ConfirmAction::UnveilSecret { vault, name } => self.run_unveil(vault, name),
             ConfirmAction::DeleteVault { id, name } => self.run_delete_vault(id, name),
@@ -5807,6 +5908,64 @@ impl App {
                     edit_rag_edit_form(&mut form, key);
                     self.overlay = Some(Overlay::RagEditForm(form));
                 }
+            },
+            Overlay::ServerCreateForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_server_create_form(form),
+                // 公開鍵は長いので、貼り付けずに選べるようにする。
+                KeyCode::Char('k' | 'K')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && form.field == ServerCreateForm::SSH_KEY_FIELD =>
+                {
+                    self.open_ssh_key_picker(form);
+                }
+                _ => {
+                    let plans = self.server_plan_choices();
+                    let sizes = self.server.disk_sizes();
+                    edit_server_create_form(&mut form, key, &plans, &sizes);
+                    self.overlay = Some(Overlay::ServerCreateForm(form));
+                }
+            },
+            Overlay::SshKeyPicker { form, mut stage } => match (&mut stage, key.code) {
+                // 一覧からは取得元へ、取得元からは作成フォームへ戻る。
+                (SshKeyStage::Source { .. }, KeyCode::Esc) => {
+                    self.overlay = Some(Overlay::ServerCreateForm(*form));
+                }
+                (_, KeyCode::Esc) => {
+                    self.overlay = Some(Overlay::SshKeyPicker {
+                        form,
+                        stage: SshKeyStage::Source { index: 0 },
+                    });
+                }
+                (SshKeyStage::Source { index }, KeyCode::Enter) => {
+                    let source = SshKeySource::ALL[*index];
+                    self.choose_ssh_key_source(form, source);
+                }
+                (SshKeyStage::Keys { keys, index, .. }, KeyCode::Enter) => {
+                    let key = keys[*index].clone();
+                    self.take_ssh_key(*form, &key);
+                }
+                (SshKeyStage::GithubUser { user }, KeyCode::Enter) => {
+                    let user = user.clone();
+                    self.submit_github_ssh_user(form, user);
+                }
+                (SshKeyStage::GithubUser { user }, KeyCode::Backspace) => {
+                    user.pop();
+                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                }
+                (SshKeyStage::GithubUser { user }, KeyCode::Char(c)) => {
+                    user.push(c);
+                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                }
+                (_, KeyCode::Down | KeyCode::Char('j')) => {
+                    stage.move_selection(true);
+                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                }
+                (_, KeyCode::Up | KeyCode::Char('k')) => {
+                    stage.move_selection(false);
+                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                }
+                _ => self.overlay = Some(Overlay::SshKeyPicker { form, stage }),
             },
             Overlay::RagUploadForm(mut form) => match key.code {
                 KeyCode::Esc => {}

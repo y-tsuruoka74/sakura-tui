@@ -21,10 +21,11 @@ use crate::app::{
     LogRoutingFormMode, LoginForm, MetricsRoutingForm, MetricsRoutingFormMode,
     NotificationRoutingForm, NotificationRoutingFormMode, NotificationTargetForm,
     NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage, RagEditForm, RagUploadForm,
-    RegistryForm, RegistryFormMode, SecretForm, SecretFormMode, SimpleMonitorForm,
-    SimpleMonitorFormMode, StatusKind, StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm,
-    StorageFormMode, StorageRetentionForm, SwitchForm, SwitchFormMode, UserForm, UserFormMode,
-    VaultForm, VaultFormMode,
+    RegistryForm, RegistryFormMode, SecretForm, SecretFormMode, ServerCreateForm,
+    SimpleMonitorForm, SimpleMonitorFormMode, SshKeySource, SshKeyStage, StatusKind,
+    StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm, StorageFormMode,
+    StorageRetentionForm, SwitchForm, SwitchFormMode, UserForm, UserFormMode, VaultForm,
+    VaultFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -56,6 +57,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::IamRoleForm(form) => draw_iam_role_form(frame, form),
         Overlay::SwitchForm(form) => draw_switch_form(frame, form),
         Overlay::RagUploadForm(form) => draw_rag_upload_form(frame, form),
+        Overlay::ServerCreateForm(form) => draw_server_create_form(frame, form, app),
+        Overlay::SshKeyPicker { stage, .. } => draw_ssh_key_picker(frame, stage),
         Overlay::RagEditForm(form) => draw_rag_edit_form(frame, form),
         Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
         Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),

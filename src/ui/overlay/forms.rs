@@ -234,6 +234,302 @@ pub(super) fn draw_switch_form(frame: &mut Frame, form: &SwitchForm) {
     );
 }
 
+/// サーバー作成フォーム。選択式の欄は今選ばれているものと、一覧の中の位置を出す。
+pub(super) fn draw_server_create_form(
+    frame: &mut Frame,
+    form: &ServerCreateForm,
+    app: &crate::app::App,
+) {
+    let plans = app.server_plan_choices();
+    let sizes = app.server.disk_sizes();
+    let loading = app.server.plans.ready().is_none();
+
+    let cpus = crate::iaas::cpu_choices(&plans);
+    let memories = crate::iaas::memory_choices(&plans, form.cpu);
+
+    // 選べる値と、その中で今どこにいるか。一覧が長いので位置が分かるようにする。
+    let at = |choices: &[u32], current: u32| choices.iter().position(|v| *v == current);
+    let choice_row =
+        |label: &str, text: String, pos: Option<usize>, total: usize, focused: bool| {
+            let shown = if focused {
+                format!("‹ {text} ›")
+            } else {
+                format!("  {text}  ")
+            };
+            let mut spans = vec![
+                Span::styled(
+                    crate::ui::pad(label, 16),
+                    if focused {
+                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM)
+                    },
+                ),
+                Span::styled(
+                    crate::ui::pad(&shown, 28),
+                    if focused {
+                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    },
+                ),
+            ];
+            if let Some(pos) = pos
+                && total > 1
+            {
+                spans.push(Span::styled(
+                    format!("{}/{total}", pos + 1),
+                    Style::default().fg(DIM),
+                ));
+            }
+            Line::from(spans)
+        };
+
+    let unknown = || {
+        if loading {
+            "読み込み中…".to_string()
+        } else {
+            "選べる値がありません".to_string()
+        }
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, label) in ServerCreateForm::LABELS.iter().enumerate() {
+        let focused = form.field == i;
+        match i {
+            2 => lines.push(choice_row(
+                label,
+                if cpus.is_empty() {
+                    unknown()
+                } else {
+                    format!("{} コア", form.cpu)
+                },
+                at(&cpus, form.cpu),
+                cpus.len(),
+                focused,
+            )),
+            3 => lines.push(choice_row(
+                label,
+                if memories.is_empty() {
+                    unknown()
+                } else {
+                    format!("{} GB", form.memory_mb / 1024)
+                },
+                at(&memories, form.memory_mb),
+                memories.len(),
+                focused,
+            )),
+            4 => lines.push(choice_row(
+                label,
+                crate::iaas::OS_CHOICES[form.os.min(crate::iaas::OS_CHOICES.len() - 1)]
+                    .label
+                    .to_string(),
+                Some(form.os),
+                crate::iaas::OS_CHOICES.len(),
+                focused,
+            )),
+            5 => lines.push(choice_row(
+                label,
+                if sizes.is_empty() {
+                    unknown()
+                } else {
+                    format!("{} GB", form.disk_size_mb / 1024)
+                },
+                at(&sizes, form.disk_size_mb),
+                sizes.len(),
+                focused,
+            )),
+            9 => lines.push(choice_row(
+                label,
+                if form.boot_after_create {
+                    "作成後に起動する".to_string()
+                } else {
+                    "作成後は停止のまま".to_string()
+                },
+                None,
+                0,
+                focused,
+            )),
+            // 公開鍵はそのまま出すと数百文字あって画面に収まらない。要約で出す。
+            _ if i == ServerCreateForm::SSH_KEY_FIELD => {
+                let shown = if form.ssh_public_key.trim().is_empty() {
+                    String::new()
+                } else {
+                    crate::pubkey::PublicKey {
+                        label: String::new(),
+                        key: form.ssh_public_key.clone(),
+                    }
+                    .summary()
+                };
+                lines.push(input_line(label, &shown, focused, false));
+            }
+            _ => lines.push(input_line(
+                label,
+                form.value(i),
+                focused,
+                i == ServerCreateForm::PASSWORD_FIELD,
+            )),
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "ホスト名を省くとサーバー名を使います。SSH公開鍵を入れるとパスワード認証を切ります。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "ディスクは作成した時点から、サーバーは起動した時点から課金されます。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    let mut hint = vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 選択   "),
+    ];
+    // 公開鍵の欄にいるときだけ、鍵を選べることを出す。
+    if form.field == ServerCreateForm::SSH_KEY_FIELD {
+        hint.push(Span::styled(
+            "Ctrl+K",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ));
+        hint.push(Span::raw(" 公開鍵を選ぶ   "));
+    }
+    hint.extend([
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 確認へ   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]);
+    lines.push(Line::from(hint));
+
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("サーバーの作成", accent())),
+        area,
+    );
+}
+
+/// SSH 公開鍵の取得元と、取れた鍵の一覧。
+pub(super) fn draw_ssh_key_picker(frame: &mut Frame, stage: &SshKeyStage) {
+    let mut lines: Vec<Line> = Vec::new();
+    let title;
+
+    match stage {
+        SshKeyStage::Source { index } => {
+            title = "公開鍵の取得元".to_string();
+            for (i, source) in SshKeySource::ALL.iter().enumerate() {
+                lines.push(selectable_line(
+                    source.label(),
+                    source.detail(),
+                    i == *index,
+                ));
+            }
+            lines.push(Line::raw(""));
+            lines.push(picker_hint("選ぶ"));
+        }
+        SshKeyStage::GithubUser { user } => {
+            title = "GitHub のユーザー名".to_string();
+            lines.push(input_line("ユーザー名", user, true, false));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "github.com/<名前>.keys で公開されている鍵を読みます。",
+                Style::default().fg(DIM),
+            )));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" 取得   "),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" 戻る"),
+            ]));
+        }
+        SshKeyStage::Loading { from } => {
+            title = "公開鍵".to_string();
+            lines.push(Line::from(Span::styled(
+                format!("{from} から取得しています…"),
+                Style::default().fg(DIM),
+            )));
+        }
+        SshKeyStage::Keys { from, keys, index } => {
+            title = format!("公開鍵 — {from}");
+            for (i, key) in keys.iter().enumerate() {
+                lines.push(selectable_line(&key.label, &key.summary(), i == *index));
+            }
+            lines.push(Line::raw(""));
+            lines.push(picker_hint("入れる"));
+        }
+    }
+
+    let width = SSH_KEY_PICKER_WIDTH;
+    let area = centered(frame, width, dialog_height(&lines, width));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+/// 公開鍵の一覧を出すダイアログの幅。
+///
+/// 鍵の名前とコメントを1行に並べるので、他のフォームより広く取る。
+const SSH_KEY_PICKER_WIDTH: u16 = 84;
+const SSH_KEY_MARKER_WIDTH: usize = 3;
+const SSH_KEY_LABEL_WIDTH: usize = 26;
+/// コメントに使える幅。枠に収まる分だけを残す。
+const SSH_KEY_DETAIL_WIDTH: usize = SSH_KEY_PICKER_WIDTH as usize
+    - super::DIALOG_PADDING as usize
+    - SSH_KEY_MARKER_WIDTH
+    - SSH_KEY_LABEL_WIDTH;
+
+/// 一覧の1行。選ばれているものに ▸ を付ける。
+///
+/// 名前もコメントも長さが読めないので、折り返して行がずれないよう幅で切る。
+fn selectable_line(label: &str, detail: &str, selected: bool) -> Line<'static> {
+    let style = if selected {
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::styled(if selected { " ▸ " } else { "   " }, style),
+        Span::styled(
+            crate::ui::pad(&clip(label, SSH_KEY_LABEL_WIDTH), SSH_KEY_LABEL_WIDTH),
+            style,
+        ),
+        Span::styled(clip(detail, SSH_KEY_DETAIL_WIDTH), Style::default().fg(DIM)),
+    ])
+}
+
+/// 表示セル数で切り詰める。切ったことが分かるよう末尾に … を付ける。
+fn clip(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if out.width() + c.to_string().width() > width.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 pub(super) fn draw_rag_edit_form(frame: &mut Frame, form: &RagEditForm) {
     let mut lines: Vec<Line> = RagEditForm::LABELS
         .iter()
@@ -1085,4 +1381,35 @@ pub(super) fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
             .block(dialog("レジストリへログイン", accent())),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 長い名前で行が折り返さないこと。折り返すと一覧の行がずれる。
+    #[test]
+    fn clipping_keeps_a_row_within_its_column() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(clip("short", 10), "short");
+        assert_eq!(clip("0123456789abc", 10), "012345678…");
+        // 全角でも桁数ではなく表示幅で数える。
+        let clipped = clip("社用パソコンの公開鍵です", 10);
+        assert!(clipped.width() <= 10, "{clipped} が 10 桁を超えた");
+        assert!(clipped.ends_with('…'));
+    }
+
+    /// 公開鍵の1行が枠に収まること。溢れると折り返して一覧の行がずれる。
+    #[test]
+    fn a_key_row_fits_inside_the_dialog() {
+        use unicode_width::UnicodeWidthStr;
+        let line = selectable_line(
+            "とても長い名前の公開鍵ファイル.pub",
+            "ssh-ed25519 …162vD11s7JNX  y-tsuruoka74@github.com",
+            true,
+        );
+        let cells: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        let inner = SSH_KEY_PICKER_WIDTH as usize - super::super::DIALOG_PADDING as usize;
+        assert!(cells <= inner, "{cells} 桁は {inner} 桁に収まらない");
+    }
 }

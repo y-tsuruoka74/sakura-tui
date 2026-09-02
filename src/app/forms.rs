@@ -7,12 +7,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::IamCredentials;
-use crate::iaas::Zone;
+use crate::iaas::{ServerPlan, Zone};
 use crate::monitoring::{
     AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule, LogMeasureRuleInput,
     LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput, NotificationRouting,
     NotificationTarget, Publisher, Storage, StorageAccessKey, StorageKind,
 };
+use crate::pubkey::PublicKey;
 use crate::sacloud::{ContainerRegistry, Permission, ResourceId};
 use crate::secretmanager::Vault;
 use crate::switch::Switch;
@@ -535,6 +536,172 @@ impl RagUploadForm {
 
     pub(super) fn tag_list(&self) -> Vec<String> {
         split_tags(&self.tags)
+    }
+}
+
+/// サーバー作成フォーム。
+///
+/// CPU・メモリ・OS・ディスクサイズは選択式、それ以外は入力式。
+/// 選べる値はゾーンごとにAPIから引くので、フォームは選んだ値そのものを持ち、
+/// 一覧の添字は持たない（一覧が入れ替わっても指すものがずれない）。
+#[derive(Debug, Clone, Default)]
+pub struct ServerCreateForm {
+    pub name: String,
+    pub description: String,
+    pub host_name: String,
+    pub password: String,
+    pub ssh_public_key: String,
+    /// コア数。プラン一覧が届くまでは 0。
+    pub cpu: u32,
+    pub memory_mb: u32,
+    /// OS だけは固定の一覧なので添字で持つ。
+    pub os: usize,
+    pub disk_size_mb: u32,
+    pub boot_after_create: bool,
+    pub field: usize,
+}
+
+impl ServerCreateForm {
+    /// 入力欄。選択式のものは値を持たないので、描画側で選択肢を出す。
+    pub const LABELS: [&'static str; 10] = [
+        "名前",
+        "説明",
+        "CPU",
+        "メモリ",
+        "OS",
+        "ディスクサイズ",
+        "ホスト名",
+        "パスワード",
+        "SSH公開鍵",
+        "作成後に起動",
+    ];
+    /// 値を選ぶ欄。左右キーで切り替える。
+    pub const CHOICE_FIELDS: [usize; 5] = [2, 3, 4, 5, 9];
+    /// 公開鍵の欄。ここでだけ取得元を選べる。
+    pub const SSH_KEY_FIELD: usize = 8;
+    /// 伏せ字にする欄。
+    pub const PASSWORD_FIELD: usize = 7;
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            6 => &self.host_name,
+            7 => &self.password,
+            8 => &self.ssh_public_key,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            6 => Some(&mut self.host_name),
+            7 => Some(&mut self.password),
+            8 => Some(&mut self.ssh_public_key),
+            _ => None,
+        }
+    }
+
+    pub fn is_choice(index: usize) -> bool {
+        Self::CHOICE_FIELDS.contains(&index)
+    }
+
+    /// ホスト名は省略時にサーバー名を使う。
+    pub fn effective_host_name(&self) -> &str {
+        if self.host_name.is_empty() {
+            &self.name
+        } else {
+            &self.host_name
+        }
+    }
+
+    /// プラン一覧とディスクサイズが届いた時点で、まだ選んでいない欄を埋める。
+    ///
+    /// 一覧は非同期に届くので、フォームを開いた時点では空のことがある。
+    pub fn apply_defaults(&mut self, plans: &[ServerPlan], disk_sizes: &[u32]) {
+        if self.cpu == 0
+            && let Some(plan) = plans.first()
+        {
+            self.cpu = plan.cpu;
+            self.memory_mb = plan.memory_mb;
+        }
+        if self.disk_size_mb == 0 {
+            // 既定は 20GB。無ければ一番小さいもの。
+            self.disk_size_mb = disk_sizes
+                .iter()
+                .copied()
+                .find(|mb| *mb == DEFAULT_DISK_SIZE_MB)
+                .or_else(|| disk_sizes.first().copied())
+                .unwrap_or(0);
+        }
+    }
+}
+
+/// 作成フォームの既定のディスクサイズ（20GB）。
+const DEFAULT_DISK_SIZE_MB: u32 = 20480;
+
+/// SSH 公開鍵の取得元。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshKeySource {
+    /// さくらのクラウドに登録済みの鍵。
+    Sacloud,
+    /// 手元の `~/.ssh/*.pub`。
+    Local,
+    /// GitHub が公開している鍵。
+    Github,
+}
+
+impl SshKeySource {
+    pub const ALL: [SshKeySource; 3] = [Self::Sacloud, Self::Local, Self::Github];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sacloud => "さくらのクラウドに登録済みの公開鍵",
+            Self::Local => "このパソコンの公開鍵",
+            Self::Github => "GitHub のユーザー名から",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Sacloud => "アカウントの SSH 公開鍵",
+            Self::Local => "~/.ssh/*.pub",
+            Self::Github => "github.com/<名前>.keys",
+        }
+    }
+}
+
+/// 公開鍵を選ぶ画面の進み具合。
+#[derive(Debug, Clone)]
+pub enum SshKeyStage {
+    /// どこから取るかを選ぶ。
+    Source { index: usize },
+    /// GitHub のユーザー名を入れる。
+    GithubUser { user: String },
+    /// 取得を待っている。
+    Loading { from: String },
+    /// 取れた鍵から選ぶ。
+    Keys {
+        from: String,
+        keys: Vec<PublicKey>,
+        index: usize,
+    },
+}
+
+impl SshKeyStage {
+    /// 一覧の選択位置を上下に動かす。一覧でなければ何もしない。
+    pub fn move_selection(&mut self, forward: bool) {
+        let (index, len) = match self {
+            Self::Source { index } => (index, SshKeySource::ALL.len()),
+            Self::Keys { keys, index, .. } => {
+                let len = keys.len();
+                (index, len)
+            }
+            _ => return,
+        };
+        *index = cycle(*index, len, forward);
     }
 }
 
@@ -1387,6 +1554,89 @@ pub(super) fn edit_iam_role_form(form: &mut IamRoleForm, key: KeyEvent) {
     }
 }
 
+/// サーバー作成フォームのキー入力。
+///
+/// 選べる値はゾーンごとに違うので、一覧をそのまま受け取って隣の値へ動かす。
+pub(super) fn edit_server_create_form(
+    form: &mut ServerCreateForm,
+    key: KeyEvent,
+    plans: &[ServerPlan],
+    disk_sizes: &[u32],
+) {
+    let fields = ServerCreateForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        // 選択式の欄は左右で切り替える。
+        KeyCode::Left | KeyCode::Right => {
+            let forward = key.code == KeyCode::Right;
+            match form.field {
+                2 => {
+                    form.cpu = step(&crate::iaas::cpu_choices(plans), form.cpu, forward);
+                    // コア数ごとに選べるメモリが違うので、近いものへ寄せ直す。
+                    form.memory_mb = crate::iaas::nearest_memory(plans, form.cpu, form.memory_mb);
+                }
+                3 => {
+                    let choices = crate::iaas::memory_choices(plans, form.cpu);
+                    form.memory_mb = step(&choices, form.memory_mb, forward);
+                }
+                4 => form.os = cycle(form.os, crate::iaas::OS_CHOICES.len(), forward),
+                5 => form.disk_size_mb = step(disk_sizes, form.disk_size_mb, forward),
+                9 => form.boot_after_create = !form.boot_after_create,
+                _ => {}
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(' ') if form.field == 9 => {
+            form.boot_after_create = !form.boot_after_create;
+        }
+        KeyCode::Char(c) if !ServerCreateForm::is_choice(form.field) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 昇順に並んだ選択肢の中で、今の値の隣へ動かす。
+///
+/// 今の値が一覧に無ければ一番近いものから動かす。コア数を変えたあとの
+/// メモリのように、一覧そのものが入れ替わることがあるため。
+fn step(choices: &[u32], current: u32, forward: bool) -> u32 {
+    if choices.is_empty() {
+        return current;
+    }
+    let at = choices
+        .iter()
+        .position(|v| *v == current)
+        .unwrap_or_else(|| {
+            choices
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, v)| v.abs_diff(current))
+                .map_or(0, |(i, _)| i)
+        });
+    choices[cycle(at, choices.len(), forward)]
+}
+
+/// 選択肢を巡回させる。空なら 0 のまま。
+fn cycle(current: usize, len: usize, forward: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if forward {
+        (current + 1) % len
+    } else {
+        (current + len - 1) % len
+    }
+}
+
 pub(super) fn edit_rag_edit_form(form: &mut RagEditForm, key: KeyEvent) {
     let fields = RagEditForm::LABELS.len();
     match key.code {
@@ -1920,5 +2170,128 @@ pub(super) fn edit_login_form(form: &mut LoginForm, key: KeyEvent) {
             _ => {}
         },
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn plans() -> Vec<ServerPlan> {
+        [(1, 1024), (1, 2048), (2, 2048), (2, 4096), (4, 8192)]
+            .into_iter()
+            .map(|(cpu, memory_mb)| ServerPlan {
+                name: format!("{cpu}c{}g", memory_mb / 1024),
+                cpu,
+                memory_mb,
+                commitment: "standard".to_string(),
+                generation: 200,
+                availability: "available".to_string(),
+            })
+            .collect()
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    /// 選択肢は端で折り返す。一覧が長いとき、最大値へは ← 一回で届く。
+    #[test]
+    fn stepping_wraps_around_at_both_ends() {
+        let choices = [1, 2, 4, 8];
+        assert_eq!(step(&choices, 2, true), 4);
+        assert_eq!(step(&choices, 8, true), 1);
+        assert_eq!(step(&choices, 1, false), 8);
+    }
+
+    /// 一覧に無い値からでも、一番近いところから動き出す。
+    #[test]
+    fn stepping_starts_from_the_nearest_value() {
+        let choices = [1024, 4096, 8192];
+        assert_eq!(step(&choices, 3072, true), 8192);
+        assert_eq!(step(&choices, 3072, false), 1024);
+        // 一覧が空なら動かない。
+        assert_eq!(step(&[], 512, true), 512);
+    }
+
+    /// コア数を変えると、その構成で選べるメモリへ寄る。
+    /// 寄せないと存在しない組み合わせのまま作成に進んでしまう。
+    #[test]
+    fn changing_the_cpu_moves_the_memory_to_a_valid_pair() {
+        let plans = plans();
+        let mut form = ServerCreateForm {
+            cpu: 2,
+            memory_mb: 4096,
+            field: 2,
+            ..ServerCreateForm::default()
+        };
+        // 4 コアは 8GB しか選べない。
+        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        assert_eq!((form.cpu, form.memory_mb), (4, 8192));
+        // 1 コアに戻すと 2GB が一番近い。
+        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        assert_eq!((form.cpu, form.memory_mb), (1, 2048));
+    }
+
+    /// メモリはそのコア数で選べるものだけを巡る。
+    #[test]
+    fn memory_only_cycles_within_the_chosen_cpu() {
+        let plans = plans();
+        let mut form = ServerCreateForm {
+            cpu: 1,
+            memory_mb: 1024,
+            field: 3,
+            ..ServerCreateForm::default()
+        };
+        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        assert_eq!(form.memory_mb, 2048);
+        // 1 コアは 2 通りしかないので折り返す。
+        edit_server_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
+        assert_eq!(form.memory_mb, 1024);
+    }
+
+    /// 選択式の欄では文字が入らないこと。入ると見えない値が混ざる。
+    #[test]
+    fn typing_does_nothing_on_a_choice_field() {
+        let plans = plans();
+        let mut form = ServerCreateForm {
+            cpu: 1,
+            memory_mb: 1024,
+            field: 2,
+            ..ServerCreateForm::default()
+        };
+        edit_server_create_form(&mut form, press(KeyCode::Char('x')), &plans, &[]);
+        assert_eq!(form.name, "");
+        assert_eq!(form.cpu, 1);
+    }
+
+    /// 一覧の選択位置は上下で折り返す。
+    #[test]
+    fn the_key_picker_wraps_its_selection() {
+        let mut stage = SshKeyStage::Source { index: 0 };
+        stage.move_selection(false);
+        let SshKeyStage::Source { index } = stage else {
+            panic!("取得元の選択が別の状態になった");
+        };
+        assert_eq!(index, SshKeySource::ALL.len() - 1);
+    }
+
+    /// 名前の入力中は上下キーで選択位置が動かないこと。
+    #[test]
+    fn the_key_picker_ignores_selection_while_typing() {
+        let mut stage = SshKeyStage::GithubUser {
+            user: "octocat".to_string(),
+        };
+        stage.move_selection(true);
+        let SshKeyStage::GithubUser { user } = stage else {
+            panic!("入力中に別の状態になった");
+        };
+        assert_eq!(user, "octocat");
     }
 }
