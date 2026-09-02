@@ -18,6 +18,7 @@ mod registries;
 mod security_control;
 mod seg;
 mod server;
+mod ssh_key;
 mod switch;
 
 use ratatui::Frame;
@@ -258,6 +259,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::AiEngine => ai_engine::draw(frame, area, app),
         Service::Dedicated => dedicated::draw(frame, area, app),
         Service::Server => server::draw(frame, area, app),
+        Service::SshKey => ssh_key::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
         Service::Disk
         | Service::Archive
@@ -559,6 +561,11 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 "Esc 月一覧へ"
             });
             hints.push("Tab タブ");
+        }
+        Service::SshKey => {
+            if app.mode == Mode::Write {
+                hints.extend(["n 登録", "E 編集", "D 削除"]);
+            }
         }
         Service::Server => {
             hints.push("z ゾーン");

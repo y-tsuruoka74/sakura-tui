@@ -97,6 +97,7 @@ pub enum Service {
     ApiGateway,
     AutoScale,
     Server,
+    SshKey,
     Switch,
     Disk,
     Internet,
@@ -144,9 +145,10 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 43] = [
+    pub const ALL: [Service; 44] = [
         // コンピュート
         Service::Server,
+        Service::SshKey,
         // コンテナ・アプリ実行
         Service::Registry,
         Service::AppRun,
@@ -289,6 +291,15 @@ impl Service {
                 arg_name: "autoscale",
                 countable_label: None,
                 count_label: Some("設定"),
+                zoned: false,
+            },
+            Service::SshKey => ServiceMeta {
+                category: Category::Compute,
+                title: "SSH公開鍵",
+                arg_name: "ssh-key",
+                countable_label: Some("公開鍵"),
+                count_label: Some("件"),
+                // アカウント共通で、ゾーンを切り替えても同じものが見える。
                 zoned: false,
             },
             Service::Switch => ServiceMeta {

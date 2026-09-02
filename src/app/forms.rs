@@ -855,6 +855,9 @@ pub enum SshKeySource {
 
 impl SshKeySource {
     pub const ALL: [SshKeySource; 3] = [Self::Sacloud, Self::Local, Self::Github];
+    /// 登録フォームから開いたときの一覧。
+    /// 登録済みの鍵をもう一度登録しても意味がないので外す。
+    pub const WITHOUT_SACLOUD: [SshKeySource; 2] = [Self::Local, Self::Github];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -869,6 +872,43 @@ impl SshKeySource {
             Self::Sacloud => "アカウントの SSH 公開鍵",
             Self::Local => "~/.ssh/*.pub",
             Self::Github => "github.com/<名前>.keys",
+        }
+    }
+}
+
+/// 公開鍵を選び終わったあとに戻る先。
+///
+/// 選択画面はオーバーレイの枠を1つしか使えないので、呼び出し元のフォームを
+/// そのまま預かって戻す。
+#[derive(Debug, Clone)]
+pub enum SshKeyReturn {
+    ServerCreate(ServerCreateForm),
+    Register(SshKeyForm),
+}
+
+impl SshKeyReturn {
+    /// この呼び出し元で選べる取得元。
+    pub fn sources(&self) -> &'static [SshKeySource] {
+        match self {
+            Self::ServerCreate(_) => &SshKeySource::ALL,
+            Self::Register(_) => &SshKeySource::WITHOUT_SACLOUD,
+        }
+    }
+
+    /// 選んだ鍵を書き戻す。
+    pub fn take_key(&mut self, key: &PublicKey) {
+        match self {
+            Self::ServerCreate(form) => {
+                form.ssh_public_key = key.key.clone();
+                form.field = ServerCreateForm::SSH_KEY_FIELD;
+            }
+            Self::Register(form) => {
+                form.public_key = key.key.clone();
+                // 名前が空なら、選んだ鍵の名前をそのまま使う。
+                if form.name.trim().is_empty() {
+                    form.name = key.label.clone();
+                }
+            }
         }
     }
 }
@@ -892,9 +932,9 @@ pub enum SshKeyStage {
 
 impl SshKeyStage {
     /// 一覧の選択位置を上下に動かす。一覧でなければ何もしない。
-    pub fn move_selection(&mut self, forward: bool) {
+    pub fn move_selection(&mut self, forward: bool, sources: usize) {
         let (index, len) = match self {
-            Self::Source { index } => (index, SshKeySource::ALL.len()),
+            Self::Source { index } => (index, sources),
             Self::Keys { keys, index, .. } => {
                 let len = keys.len();
                 (index, len)
@@ -902,6 +942,78 @@ impl SshKeyStage {
             _ => return,
         };
         *index = cycle(*index, len, forward);
+    }
+}
+
+/// SSH 公開鍵の登録・編集フォーム。
+///
+/// 鍵そのものは登録後に変えられないので、編集では名前と説明だけを扱う。
+#[derive(Debug, Clone, Default)]
+pub struct SshKeyForm {
+    pub mode: SshKeyFormMode,
+    pub id: Option<ResourceId>,
+    pub name: String,
+    pub description: String,
+    pub public_key: String,
+    pub field: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SshKeyFormMode {
+    #[default]
+    Add,
+    Edit,
+}
+
+impl SshKeyForm {
+    const ADD_LABELS: [&'static str; 3] = ["名前", "説明", "公開鍵"];
+    const EDIT_LABELS: [&'static str; 2] = ["名前", "説明"];
+    /// 公開鍵の欄。ここでだけ取得元を選べる。
+    pub const PUBLIC_KEY_FIELD: usize = 2;
+
+    pub fn labels(&self) -> &'static [&'static str] {
+        match self.mode {
+            SshKeyFormMode::Add => &Self::ADD_LABELS,
+            SshKeyFormMode::Edit => &Self::EDIT_LABELS,
+        }
+    }
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            2 => &self.public_key,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            2 => Some(&mut self.public_key),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn edit_ssh_key_form(form: &mut SshKeyForm, key: KeyEvent) {
+    let fields = form.labels().len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2566,11 +2678,73 @@ mod tests {
     #[test]
     fn the_key_picker_wraps_its_selection() {
         let mut stage = SshKeyStage::Source { index: 0 };
-        stage.move_selection(false);
+        stage.move_selection(false, SshKeySource::ALL.len());
         let SshKeyStage::Source { index } = stage else {
             panic!("取得元の選択が別の状態になった");
         };
         assert_eq!(index, SshKeySource::ALL.len() - 1);
+    }
+
+    /// 登録フォームからは、登録済みの鍵を取得元に出さないこと。
+    /// 出しても、すでにある鍵をもう一度登録することになる。
+    #[test]
+    fn the_register_form_hides_the_already_registered_source() {
+        let from_server = SshKeyReturn::ServerCreate(ServerCreateForm::default());
+        assert_eq!(from_server.sources().len(), 3);
+        assert!(from_server.sources().contains(&SshKeySource::Sacloud));
+
+        let from_register = SshKeyReturn::Register(SshKeyForm::default());
+        assert_eq!(from_register.sources().len(), 2);
+        assert!(!from_register.sources().contains(&SshKeySource::Sacloud));
+    }
+
+    /// 選んだ鍵は呼び出し元ごとに違う欄へ入ること。
+    #[test]
+    fn a_chosen_key_goes_back_to_the_form_that_asked_for_it() {
+        let key = PublicKey {
+            label: "id_ed25519.pub".to_string(),
+            key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample1".to_string(),
+        };
+
+        let mut back = SshKeyReturn::ServerCreate(ServerCreateForm::default());
+        back.take_key(&key);
+        let SshKeyReturn::ServerCreate(form) = back else {
+            panic!("呼び出し元が入れ替わった");
+        };
+        assert_eq!(form.ssh_public_key, key.key);
+        assert_eq!(form.field, ServerCreateForm::SSH_KEY_FIELD);
+
+        // 登録フォームでは、名前が空なら鍵の名前を借りる。
+        let mut back = SshKeyReturn::Register(SshKeyForm::default());
+        back.take_key(&key);
+        let SshKeyReturn::Register(form) = back else {
+            panic!("呼び出し元が入れ替わった");
+        };
+        assert_eq!(form.public_key, key.key);
+        assert_eq!(form.name, "id_ed25519.pub");
+
+        // すでに名前が入っていれば触らない。
+        let mut back = SshKeyReturn::Register(SshKeyForm {
+            name: "自分でつけた名前".to_string(),
+            ..SshKeyForm::default()
+        });
+        back.take_key(&key);
+        let SshKeyReturn::Register(form) = back else {
+            panic!("呼び出し元が入れ替わった");
+        };
+        assert_eq!(form.name, "自分でつけた名前");
+    }
+
+    /// 編集では鍵の欄を出さないこと。鍵そのものは API で変えられない。
+    #[test]
+    fn editing_a_key_only_offers_the_name_and_description() {
+        let add = SshKeyForm::default();
+        assert_eq!(add.labels().len(), 3);
+        let edit = SshKeyForm {
+            mode: SshKeyFormMode::Edit,
+            ..SshKeyForm::default()
+        };
+        assert_eq!(edit.labels(), ["名前", "説明"]);
     }
 
     /// 名前の入力中は上下キーで選択位置が動かないこと。
@@ -2579,7 +2753,7 @@ mod tests {
         let mut stage = SshKeyStage::GithubUser {
             user: "octocat".to_string(),
         };
-        stage.move_selection(true);
+        stage.move_selection(true, SshKeySource::ALL.len());
         let SshKeyStage::GithubUser { user } = stage else {
             panic!("入力中に別の状態になった");
         };

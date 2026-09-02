@@ -418,18 +418,20 @@ pub(super) fn draw_server_create_form(
 }
 
 /// SSH 公開鍵の取得元と、取れた鍵の一覧。
-pub(super) fn draw_ssh_key_picker(frame: &mut Frame, stage: &SshKeyStage) {
+pub(super) fn draw_ssh_key_picker(frame: &mut Frame, back: &SshKeyReturn, stage: &SshKeyStage) {
     let mut lines: Vec<Line> = Vec::new();
     let title;
 
     match stage {
         SshKeyStage::Source { index } => {
             title = "公開鍵の取得元".to_string();
-            for (i, source) in SshKeySource::ALL.iter().enumerate() {
+            for (i, source) in back.sources().iter().enumerate() {
                 lines.push(selectable_line(
                     source.label(),
                     source.detail(),
                     i == *index,
+                    SSH_SOURCE_LABEL_WIDTH,
+                    SSH_KEY_ROW_WIDTH,
                 ));
             }
             lines.push(Line::raw(""));
@@ -464,7 +466,13 @@ pub(super) fn draw_ssh_key_picker(frame: &mut Frame, stage: &SshKeyStage) {
         SshKeyStage::Keys { from, keys, index } => {
             title = format!("公開鍵 — {from}");
             for (i, key) in keys.iter().enumerate() {
-                lines.push(selectable_line(&key.label, &key.summary(), i == *index));
+                lines.push(selectable_line(
+                    &key.label,
+                    &key.summary(),
+                    i == *index,
+                    SSH_KEY_LABEL_WIDTH,
+                    SSH_KEY_ROW_WIDTH,
+                ));
             }
             lines.push(Line::raw(""));
             lines.push(picker_hint("入れる"));
@@ -473,6 +481,81 @@ pub(super) fn draw_ssh_key_picker(frame: &mut Frame, stage: &SshKeyStage) {
 
     let width = SSH_KEY_PICKER_WIDTH;
     let area = centered(frame, width, dialog_height(&lines, width));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+/// SSH公開鍵の登録・編集フォーム。
+pub(super) fn draw_ssh_key_form(frame: &mut Frame, form: &SshKeyForm) {
+    let title = match form.mode {
+        SshKeyFormMode::Add => "公開鍵の登録".to_string(),
+        SshKeyFormMode::Edit => format!("公開鍵の編集 — {}", form.name),
+    };
+
+    let mut lines: Vec<Line> = form
+        .labels()
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            // 鍵はそのまま出すと数百文字あるので要約で出す。
+            if i == SshKeyForm::PUBLIC_KEY_FIELD {
+                let shown = if form.public_key.trim().is_empty() {
+                    String::new()
+                } else {
+                    crate::pubkey::PublicKey {
+                        label: String::new(),
+                        key: form.public_key.clone(),
+                    }
+                    .summary()
+                };
+                input_line(label, &shown, form.field == i, false)
+            } else {
+                input_line(label, form.value(i), form.field == i, false)
+            }
+        })
+        .collect();
+
+    lines.push(Line::raw(""));
+    match form.mode {
+        SshKeyFormMode::Add => lines.push(Line::from(Span::styled(
+            "登録した鍵はサーバー作成のときに選べます。",
+            Style::default().fg(DIM),
+        ))),
+        SshKeyFormMode::Edit => lines.push(Line::from(Span::styled(
+            "鍵そのものは変更できません。変えるときは登録し直してください。",
+            Style::default().fg(DIM),
+        ))),
+    }
+    lines.push(Line::raw(""));
+
+    let mut hint = vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+    ];
+    if form.mode == SshKeyFormMode::Add {
+        hint.push(Span::styled(
+            "Ctrl+K",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ));
+        hint.push(Span::raw(" 公開鍵を選ぶ   "));
+    }
+    hint.extend([
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]);
+    lines.push(Line::from(hint));
+
+    let area = centered(frame, 74, dialog_height(&lines, 74));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
@@ -606,6 +689,12 @@ pub(super) fn draw_disk_create_form(
     );
 }
 
+/// ディスクの接続先を出すダイアログの幅。
+const DISK_SERVER_PICKER_WIDTH: u16 = 74;
+const DISK_SERVER_ROW_WIDTH: usize =
+    DISK_SERVER_PICKER_WIDTH as usize - super::DIALOG_PADDING as usize - MARKER_WIDTH;
+const DISK_SERVER_LABEL_WIDTH: usize = 44;
+
 /// ディスクの接続先サーバーを選ぶ画面。
 pub(super) fn draw_disk_server_picker(frame: &mut Frame, picker: &DiskServerPicker) {
     let mut lines: Vec<Line> = vec![
@@ -624,7 +713,14 @@ pub(super) fn draw_disk_server_picker(frame: &mut Frame, picker: &DiskServerPick
         }
         Loadable::Ready(servers) => {
             for (i, (id, name)) in servers.iter().enumerate() {
-                lines.push(selectable_line(name, &id.to_string(), i == picker.index));
+                lines.push(selectable_line(
+                    name,
+                    &id.to_string(),
+                    i == picker.index,
+                    // 接続先はサーバー名だけなので、幅を名前に多めに回す。
+                    DISK_SERVER_LABEL_WIDTH,
+                    DISK_SERVER_ROW_WIDTH,
+                ));
             }
         }
         Loadable::Failed(err) => {
@@ -641,7 +737,8 @@ pub(super) fn draw_disk_server_picker(frame: &mut Frame, picker: &DiskServerPick
     lines.push(Line::raw(""));
     lines.push(picker_hint("接続する"));
 
-    let area = centered(frame, 74, dialog_height(&lines, 74));
+    let width = DISK_SERVER_PICKER_WIDTH;
+    let area = centered(frame, width, dialog_height(&lines, width));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines)
@@ -774,18 +871,26 @@ pub(super) fn draw_server_plan_form(
 ///
 /// 鍵の名前とコメントを1行に並べるので、他のフォームより広く取る。
 const SSH_KEY_PICKER_WIDTH: u16 = 84;
-const SSH_KEY_MARKER_WIDTH: usize = 3;
+/// 行頭の ▸ に使う幅。
+const MARKER_WIDTH: usize = 3;
+/// 枠と余白を除いた、公開鍵の一覧の1行に書ける桁数。
+const SSH_KEY_ROW_WIDTH: usize =
+    SSH_KEY_PICKER_WIDTH as usize - super::DIALOG_PADDING as usize - MARKER_WIDTH;
+/// 取得元の一覧。名前が長く、右の説明は短い。
+const SSH_SOURCE_LABEL_WIDTH: usize = 36;
+/// 鍵の一覧。名前は短めで、右のコメントに幅を回す。
 const SSH_KEY_LABEL_WIDTH: usize = 26;
-/// コメントに使える幅。枠に収まる分だけを残す。
-const SSH_KEY_DETAIL_WIDTH: usize = SSH_KEY_PICKER_WIDTH as usize
-    - super::DIALOG_PADDING as usize
-    - SSH_KEY_MARKER_WIDTH
-    - SSH_KEY_LABEL_WIDTH;
 
 /// 一覧の1行。選ばれているものに ▸ を付ける。
 ///
-/// 名前もコメントも長さが読めないので、折り返して行がずれないよう幅で切る。
-fn selectable_line(label: &str, detail: &str, selected: bool) -> Line<'static> {
+/// 名前も右の説明も長さが読めないので、折り返して行がずれないよう幅で切る。
+fn selectable_line(
+    label: &str,
+    detail: &str,
+    selected: bool,
+    label_width: usize,
+    row_width: usize,
+) -> Line<'static> {
     let style = if selected {
         Style::default().fg(accent()).add_modifier(Modifier::BOLD)
     } else {
@@ -794,10 +899,13 @@ fn selectable_line(label: &str, detail: &str, selected: bool) -> Line<'static> {
     Line::from(vec![
         Span::styled(if selected { " ▸ " } else { "   " }, style),
         Span::styled(
-            crate::ui::pad(&clip(label, SSH_KEY_LABEL_WIDTH), SSH_KEY_LABEL_WIDTH),
+            crate::ui::pad(&clip(label, label_width), label_width),
             style,
         ),
-        Span::styled(clip(detail, SSH_KEY_DETAIL_WIDTH), Style::default().fg(DIM)),
+        Span::styled(
+            clip(detail, row_width.saturating_sub(label_width)),
+            Style::default().fg(DIM),
+        ),
     ])
 }
 
@@ -1674,6 +1782,7 @@ pub(super) fn draw_login_form(frame: &mut Frame, form: &LoginForm) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::SshKeySource;
 
     /// 長い名前で行が折り返さないこと。折り返すと一覧の行がずれる。
     #[test]
@@ -1687,17 +1796,56 @@ mod tests {
         assert!(clipped.ends_with('…'));
     }
 
-    /// 公開鍵の1行が枠に収まること。溢れると折り返して一覧の行がずれる。
+    /// 一覧の1行が枠に収まること。溢れると折り返して行がずれる。
     #[test]
-    fn a_key_row_fits_inside_the_dialog() {
+    fn a_row_fits_inside_its_dialog() {
         use unicode_width::UnicodeWidthStr;
-        let line = selectable_line(
-            "とても長い名前の公開鍵ファイル.pub",
+        let width = |line: ratatui::text::Line| -> usize {
+            line.spans.iter().map(|s| s.content.width()).sum()
+        };
+        let long = "とても長い名前がついた公開鍵のファイル.pub";
+
+        let key_row = selectable_line(
+            long,
             "ssh-ed25519 …162vD11s7JNX  y-tsuruoka74@github.com",
             true,
+            SSH_KEY_LABEL_WIDTH,
+            SSH_KEY_ROW_WIDTH,
         );
-        let cells: usize = line.spans.iter().map(|s| s.content.width()).sum();
+        // 取得元の名前は鍵の名前より長い。こちらも収まること。
+        let source_row = selectable_line(
+            SshKeySource::Sacloud.label(),
+            SshKeySource::Sacloud.detail(),
+            true,
+            SSH_SOURCE_LABEL_WIDTH,
+            SSH_KEY_ROW_WIDTH,
+        );
         let inner = SSH_KEY_PICKER_WIDTH as usize - super::super::DIALOG_PADDING as usize;
-        assert!(cells <= inner, "{cells} 桁は {inner} 桁に収まらない");
+        for (name, line) in [("鍵", key_row), ("取得元", source_row)] {
+            let cells = width(line);
+            assert!(
+                cells <= inner,
+                "{name}の行 {cells} 桁が {inner} 桁に収まらない"
+            );
+        }
+        // 取得元の名前は切り詰めずに出せること。
+        assert_eq!(
+            clip(SshKeySource::Sacloud.label(), SSH_SOURCE_LABEL_WIDTH),
+            SshKeySource::Sacloud.label()
+        );
+
+        let disk_row = selectable_line(
+            long,
+            "113802075714",
+            true,
+            DISK_SERVER_LABEL_WIDTH,
+            DISK_SERVER_ROW_WIDTH,
+        );
+        let inner = DISK_SERVER_PICKER_WIDTH as usize - super::super::DIALOG_PADDING as usize;
+        let cells = width(disk_row);
+        assert!(
+            cells <= inner,
+            "接続先の行 {cells} 桁が {inner} 桁に収まらない"
+        );
     }
 }

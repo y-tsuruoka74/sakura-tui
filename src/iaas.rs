@@ -726,8 +726,10 @@ pub struct DiskCreateInput {
 pub struct SshKey {
     pub id: ResourceId,
     pub name: String,
+    pub description: String,
     pub public_key: String,
     pub fingerprint: String,
+    pub created_at: Option<String>,
 }
 
 /// ディスクプランと、そのプランで選べるサイズ。
@@ -841,10 +843,14 @@ struct NakedSshKey {
     id: ResourceId,
     #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
     name: String,
+    #[serde(rename = "Description", default, deserialize_with = "null_as_default")]
+    description: String,
     #[serde(rename = "PublicKey", default, deserialize_with = "null_as_default")]
     public_key: String,
     #[serde(rename = "Fingerprint", default, deserialize_with = "null_as_default")]
     fingerprint: String,
+    #[serde(rename = "CreatedAt", default, deserialize_with = "null_as_default")]
+    created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -909,8 +915,10 @@ fn parse_ssh_keys(value: &serde_json::Value) -> Vec<SshKey> {
         .map(|k| SshKey {
             id: k.id,
             name: k.name,
+            description: k.description,
             public_key: k.public_key.trim().to_string(),
             fingerprint: k.fingerprint,
+            created_at: (!k.created_at.is_empty()).then_some(k.created_at),
         })
         .collect()
 }
@@ -963,6 +971,52 @@ impl SacloudClient {
             .request_in_zone(zone, Method::GET, "sshkey", Some(body))
             .await?;
         Ok(parse_ssh_keys(&value))
+    }
+
+    /// SSH 公開鍵を登録する。
+    pub async fn create_ssh_key(
+        &self,
+        zone: &str,
+        name: &str,
+        description: &str,
+        public_key: &str,
+    ) -> Result<ResourceId> {
+        let body = json!({
+            "SSHKey": {
+                "Name": name,
+                "Description": description,
+                "PublicKey": public_key,
+            }
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "sshkey", Some(body))
+            .await?;
+        value
+            .pointer("/SSHKey/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("公開鍵の登録応答にIDがありませんでした"))
+    }
+
+    /// 登録済みの鍵の名前と説明を書き換える。鍵そのものは変えられない。
+    pub async fn update_ssh_key(
+        &self,
+        zone: &str,
+        id: ResourceId,
+        name: &str,
+        description: &str,
+    ) -> Result<()> {
+        let body = json!({ "SSHKey": { "Name": name, "Description": description } });
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::PUT, &format!("sshkey/{id}"), Some(body))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_ssh_key(&self, zone: &str, id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::DELETE, &format!("sshkey/{id}"), None)
+            .await?;
+        Ok(())
     }
 
     /// タグから OS テンプレートを1件引く。

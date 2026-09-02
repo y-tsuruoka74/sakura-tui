@@ -29,6 +29,7 @@ mod security_control;
 mod seg;
 mod server;
 mod service;
+mod ssh_key;
 mod switch;
 
 pub use account::AccountView;
@@ -49,6 +50,7 @@ pub use security_control::{SecurityControlTab, SecurityControlView};
 pub use seg::{SegTab, SegView};
 pub use server::ServerView;
 pub use service::*;
+pub use ssh_key::SshKeyView;
 pub use switch::SwitchView;
 
 use crate::account::AuthStatus;
@@ -200,6 +202,15 @@ pub enum Message {
     ServerPlans {
         plans: Result<Vec<crate::iaas::ServerPlan>, String>,
         disks: Result<Vec<crate::iaas::DiskPlan>, String>,
+    },
+    SshKeyList {
+        result: Result<Vec<crate::iaas::SshKey>, String>,
+    },
+    /// 登録・更新・削除のように、結果が成否だけの公開鍵の操作。
+    SshKeyChanged {
+        what: String,
+        failed: String,
+        result: Result<(), String>,
     },
     /// 作成フォームに入れる SSH 公開鍵。取得元ごとに非同期で引く。
     SshKeys {
@@ -566,6 +577,8 @@ pub enum Pane {
     Certificates,
     // サーバー
     Servers,
+    // SSH公開鍵
+    SshKeys,
     // スイッチ
     Switches,
     CloudResources,
@@ -793,6 +806,10 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    DeleteSshKey {
+        id: ResourceId,
+        name: String,
+    },
     DisconnectDisk {
         zone: String,
         id: ResourceId,
@@ -974,11 +991,12 @@ pub enum Overlay {
     RagUploadForm(RagUploadForm),
     ServerCreateForm(ServerCreateForm),
     ServerPlanForm(ServerPlanForm),
+    SshKeyForm(SshKeyForm),
     DiskCreateForm(DiskCreateForm),
     DiskServerPicker(DiskServerPicker),
-    /// SSH 公開鍵の取得元と一覧。作成フォームに戻すため、フォームごと預かる。
+    /// SSH 公開鍵の取得元と一覧。選び終えたら戻すので、呼び出し元ごと預かる。
     SshKeyPicker {
-        form: Box<ServerCreateForm>,
+        back: Box<SshKeyReturn>,
         stage: SshKeyStage,
     },
     RagEditForm(RagEditForm),
@@ -1110,6 +1128,8 @@ pub struct App {
     pub server: ServerView,
     /// ディスク画面の書き込み操作で使う状態。
     pub disk: DiskView,
+    /// SSH 公開鍵画面の状態。
+    pub ssh_key: SshKeyView,
     /// スイッチ画面の状態。
     pub switch: SwitchView,
     pub cloud_resources: CloudResourcesView,
@@ -1180,6 +1200,7 @@ impl App {
             dedicated: DedicatedView::default(),
             server: ServerView::default(),
             disk: DiskView::default(),
+            ssh_key: SshKeyView::default(),
             switch: SwitchView::default(),
             cloud_resources: CloudResourcesView::default(),
             managed_resources: ManagedResourcesView::default(),
@@ -1442,6 +1463,7 @@ impl App {
             Service::AppRun => self.apprun_active_pane(),
             Service::Dedicated => self.dedicated_active_pane(),
             Service::Server => Pane::Servers,
+            Service::SshKey => Pane::SshKeys,
             Service::Switch => Pane::Switches,
             Service::Disk
             | Service::Archive
@@ -1643,6 +1665,7 @@ impl App {
             Service::AppRun => self.apprun_ensure_loaded(),
             Service::Dedicated => self.dedicated_ensure_loaded(),
             Service::Server => self.server_ensure_loaded(),
+            Service::SshKey => self.ssh_key_ensure_loaded(),
             Service::Switch => self.switch_ensure_loaded(),
             Service::Disk
             | Service::Archive
@@ -1919,6 +1942,36 @@ impl App {
                 self.server_plans_arrived();
             }
             Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
+            Message::SshKeyList { result } => {
+                let count = result.as_ref().map(Vec::len).ok();
+                self.ssh_key.state.select(None);
+                self.ssh_key.keys = self.store_result(result);
+                if let Some(count) = count {
+                    self.set_status(format!("公開鍵 {count} 件"), StatusKind::Info);
+                    // 一覧が届いてから選択位置を決める。
+                    self.ensure_loaded();
+                }
+            }
+            Message::SshKeyChanged {
+                what,
+                failed,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(what, StatusKind::Success);
+                    self.ssh_key_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: failed,
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::ServerPlanChanged { name, result } => match result {
                 Ok(()) => {
                     self.set_status(
@@ -3475,6 +3528,7 @@ impl App {
             Service::AppRun => self.on_key_apprun(key),
             Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
+            Service::SshKey => self.on_key_ssh_key(key),
             Service::Switch => self.on_key_switch(key),
             Service::Disk => self.on_key_disk(key),
             Service::Archive
@@ -4072,6 +4126,7 @@ impl App {
             tokio::spawn(async move {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&zone).await,
+                    Service::SshKey => sacloud.list_ssh_keys(&zone).await.map(|k| k.len()),
                     Service::Switch => sacloud.count_switches(&zone).await,
                     Service::Disk => {
                         sacloud
@@ -4241,6 +4296,7 @@ impl App {
             Service::Dns => self.dns.zones.ready()?.len(),
             Service::SimpleMonitor => self.simple_monitor.monitors.ready()?.len(),
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
+            Service::SshKey => self.ssh_key.keys.ready()?.len(),
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
             Service::Disk
             | Service::Archive
@@ -4443,6 +4499,7 @@ impl App {
             Pane::Applications => self.visible_applications().len(),
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
+            Pane::SshKeys => self.visible_ssh_keys().ready().map_or(0, Vec::len),
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
             Pane::CloudResources => self.visible_cloud_resources().ready().map_or(0, Vec::len),
             Pane::ManagedResources => self.visible_managed_resources().ready().map_or(0, Vec::len),
@@ -4561,6 +4618,7 @@ impl App {
             Pane::Applications => Some(&mut self.apprun.application_state),
             Pane::Versions => Some(&mut self.apprun.version_state),
             Pane::Servers => Some(&mut self.server.server_state),
+            Pane::SshKeys => Some(&mut self.ssh_key.state),
             Pane::Switches => Some(&mut self.switch.switch_state),
             Pane::CloudResources => Some(&mut self.cloud_resources.state),
             Pane::ManagedResources => Some(&mut self.managed_resources.state),
@@ -4706,6 +4764,8 @@ impl App {
                     .cloned()
                     .unwrap_or(server.name.clone())
             }),
+            // 公開鍵は貼り付けて使うので、鍵そのものをコピーする。
+            Pane::SshKeys => self.selected_ssh_key().map(|key| key.public_key),
             Pane::Switches => self.selected_switch().map(|switch| switch.id.to_string()),
             Pane::CloudResources => self
                 .selected_cloud_resource()
@@ -4781,6 +4841,7 @@ impl App {
             Service::AppRun => self.apprun_refresh(),
             Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
+            Service::SshKey => self.ssh_key_refresh(),
             Service::Switch => self.switch_refresh(),
             Service::Disk
             | Service::Archive
@@ -5447,6 +5508,7 @@ impl App {
             } => self.run_change_server_plan(zone, id, name, cpu, memory_mb),
             ConfirmAction::CreateDisk { zone, input } => self.run_create_disk(zone, input),
             ConfirmAction::DeleteDisk { zone, id, name } => self.run_delete_disk(zone, id, name),
+            ConfirmAction::DeleteSshKey { id, name } => self.run_delete_ssh_key(id, name),
             ConfirmAction::DisconnectDisk {
                 zone,
                 id,
@@ -6067,7 +6129,7 @@ impl App {
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && form.field == ServerCreateForm::SSH_KEY_FIELD =>
                 {
-                    self.open_ssh_key_picker(form);
+                    self.open_ssh_key_picker(SshKeyReturn::ServerCreate(form));
                 }
                 _ => {
                     let plans = self.server_plan_choices();
@@ -6083,6 +6145,21 @@ impl App {
                     let plans = self.server_plan_choices();
                     edit_server_plan_form(&mut form, key, &plans);
                     self.overlay = Some(Overlay::ServerPlanForm(form));
+                }
+            },
+            Overlay::SshKeyForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_ssh_key_form(form),
+                // 公開鍵は長いので、貼り付けずに選べるようにする。
+                KeyCode::Char('k' | 'K')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && form.mode == SshKeyFormMode::Add =>
+                {
+                    self.open_ssh_key_source_from_form(form);
+                }
+                _ => {
+                    edit_ssh_key_form(&mut form, key);
+                    self.overlay = Some(Overlay::SshKeyForm(form));
                 }
             },
             Overlay::DiskCreateForm(mut form) => match key.code {
@@ -6107,46 +6184,44 @@ impl App {
                 }
                 _ => self.overlay = Some(Overlay::DiskServerPicker(picker)),
             },
-            Overlay::SshKeyPicker { form, mut stage } => match (&mut stage, key.code) {
-                // 一覧からは取得元へ、取得元からは作成フォームへ戻る。
-                (SshKeyStage::Source { .. }, KeyCode::Esc) => {
-                    self.overlay = Some(Overlay::ServerCreateForm(*form));
-                }
+            Overlay::SshKeyPicker { back, mut stage } => match (&mut stage, key.code) {
+                // 一覧からは取得元へ、取得元からは呼び出し元のフォームへ戻る。
+                (SshKeyStage::Source { .. }, KeyCode::Esc) => self.close_ssh_key_picker(*back),
                 (_, KeyCode::Esc) => {
                     self.overlay = Some(Overlay::SshKeyPicker {
-                        form,
+                        back,
                         stage: SshKeyStage::Source { index: 0 },
                     });
                 }
                 (SshKeyStage::Source { index }, KeyCode::Enter) => {
-                    let source = SshKeySource::ALL[*index];
-                    self.choose_ssh_key_source(form, source);
+                    let source = back.sources()[*index];
+                    self.choose_ssh_key_source(back, source);
                 }
                 (SshKeyStage::Keys { keys, index, .. }, KeyCode::Enter) => {
                     let key = keys[*index].clone();
-                    self.take_ssh_key(*form, &key);
+                    self.take_ssh_key(*back, &key);
                 }
                 (SshKeyStage::GithubUser { user }, KeyCode::Enter) => {
                     let user = user.clone();
-                    self.submit_github_ssh_user(form, user);
+                    self.submit_github_ssh_user(back, user);
                 }
                 (SshKeyStage::GithubUser { user }, KeyCode::Backspace) => {
                     user.pop();
-                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                    self.overlay = Some(Overlay::SshKeyPicker { back, stage });
                 }
                 (SshKeyStage::GithubUser { user }, KeyCode::Char(c)) => {
                     user.push(c);
-                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                    self.overlay = Some(Overlay::SshKeyPicker { back, stage });
                 }
                 (_, KeyCode::Down | KeyCode::Char('j')) => {
-                    stage.move_selection(true);
-                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                    stage.move_selection(true, back.sources().len());
+                    self.overlay = Some(Overlay::SshKeyPicker { back, stage });
                 }
                 (_, KeyCode::Up | KeyCode::Char('k')) => {
-                    stage.move_selection(false);
-                    self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+                    stage.move_selection(false, back.sources().len());
+                    self.overlay = Some(Overlay::SshKeyPicker { back, stage });
                 }
-                _ => self.overlay = Some(Overlay::SshKeyPicker { form, stage }),
+                _ => self.overlay = Some(Overlay::SshKeyPicker { back, stage }),
             },
             Overlay::RagUploadForm(mut form) => match key.code {
                 KeyCode::Esc => {}

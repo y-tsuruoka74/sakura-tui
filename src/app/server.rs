@@ -7,7 +7,7 @@ use ratatui::widgets::TableState;
 
 use super::{
     App, ConfirmAction, Loadable, Message, Overlay, Pane, ServerCreateForm, ServerPlanForm,
-    SshKeySource, SshKeyStage, StatusKind, fmt_error, matches,
+    SshKeyReturn, SshKeySource, SshKeyStage, StatusKind, fmt_error, matches,
 };
 use crate::iaas::{
     DiskPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan, SshKey,
@@ -145,7 +145,11 @@ impl App {
         let sizes = self.server.disk_sizes();
         match &mut self.overlay {
             Some(Overlay::ServerCreateForm(form)) => form.apply_defaults(&plans, &sizes),
-            Some(Overlay::SshKeyPicker { form, .. }) => form.apply_defaults(&plans, &sizes),
+            Some(Overlay::SshKeyPicker { back, .. }) => {
+                if let SshKeyReturn::ServerCreate(form) = back.as_mut() {
+                    form.apply_defaults(&plans, &sizes);
+                }
+            }
             _ => {}
         }
     }
@@ -167,25 +171,21 @@ impl App {
         });
     }
 
-    /// 公開鍵を選ぶ画面を開く。作成フォームは預かって、選び終えたら戻す。
-    pub(super) fn open_ssh_key_picker(&mut self, form: ServerCreateForm) {
+    /// 公開鍵を選ぶ画面を開く。呼び出し元のフォームは預かって、選び終えたら戻す。
+    pub(super) fn open_ssh_key_picker(&mut self, back: SshKeyReturn) {
         self.overlay = Some(Overlay::SshKeyPicker {
-            form: Box::new(form),
+            back: Box::new(back),
             stage: SshKeyStage::Source { index: 0 },
         });
     }
 
     /// 取得元が決まったので鍵を集める。
-    pub(super) fn choose_ssh_key_source(
-        &mut self,
-        form: Box<ServerCreateForm>,
-        source: SshKeySource,
-    ) {
+    pub(super) fn choose_ssh_key_source(&mut self, back: Box<SshKeyReturn>, source: SshKeySource) {
         match source {
             // ユーザー名を聞かないと取りに行けない。
             SshKeySource::Github => {
                 self.overlay = Some(Overlay::SshKeyPicker {
-                    form,
+                    back,
                     stage: SshKeyStage::GithubUser {
                         user: String::new(),
                     },
@@ -193,13 +193,13 @@ impl App {
             }
             // 手元のファイルなので待たせる必要がない。
             SshKeySource::Local => match crate::pubkey::from_local_ssh_dir() {
-                Ok(keys) => self.show_ssh_keys(form, source.label().to_string(), keys),
-                Err(err) => self.close_ssh_key_picker(*form, fmt_error(err)),
+                Ok(keys) => self.show_ssh_keys(back, source.label().to_string(), keys),
+                Err(err) => self.fail_ssh_key_picker(*back, fmt_error(err)),
             },
             SshKeySource::Sacloud => {
                 let from = source.label().to_string();
                 self.overlay = Some(Overlay::SshKeyPicker {
-                    form,
+                    back,
                     stage: SshKeyStage::Loading { from: from.clone() },
                 });
                 self.inflight += 1;
@@ -219,10 +219,10 @@ impl App {
     }
 
     /// GitHub のユーザー名が決まったので取りに行く。
-    pub(super) fn submit_github_ssh_user(&mut self, form: Box<ServerCreateForm>, user: String) {
+    pub(super) fn submit_github_ssh_user(&mut self, back: Box<SshKeyReturn>, user: String) {
         let from = format!("GitHub: {}", user.trim());
         self.overlay = Some(Overlay::SshKeyPicker {
-            form,
+            back,
             stage: SshKeyStage::Loading { from: from.clone() },
         });
         self.inflight += 1;
@@ -239,27 +239,27 @@ impl App {
         result: Result<Vec<PublicKey>, String>,
     ) {
         // 画面を閉じたあとに届くことがある。その場合は捨てる。
-        let Some(Overlay::SshKeyPicker { form, stage }) = self.overlay.take() else {
+        let Some(Overlay::SshKeyPicker { back, stage }) = self.overlay.take() else {
             return;
         };
         // 待っているものと別の応答なら、今の画面をそのまま続ける。
         if !matches!(&stage, SshKeyStage::Loading { from: waiting } if *waiting == from) {
-            self.overlay = Some(Overlay::SshKeyPicker { form, stage });
+            self.overlay = Some(Overlay::SshKeyPicker { back, stage });
             return;
         }
         match result {
-            Ok(keys) => self.show_ssh_keys(form, from, keys),
-            Err(err) => self.close_ssh_key_picker(*form, err),
+            Ok(keys) => self.show_ssh_keys(back, from, keys),
+            Err(err) => self.fail_ssh_key_picker(*back, err),
         }
     }
 
-    fn show_ssh_keys(&mut self, form: Box<ServerCreateForm>, from: String, keys: Vec<PublicKey>) {
+    fn show_ssh_keys(&mut self, back: Box<SshKeyReturn>, from: String, keys: Vec<PublicKey>) {
         if keys.is_empty() {
-            self.close_ssh_key_picker(*form, format!("{from}: 公開鍵が見つかりませんでした"));
+            self.fail_ssh_key_picker(*back, format!("{from}: 公開鍵が見つかりませんでした"));
             return;
         }
         self.overlay = Some(Overlay::SshKeyPicker {
-            form,
+            back,
             stage: SshKeyStage::Keys {
                 from,
                 keys,
@@ -268,18 +268,25 @@ impl App {
         });
     }
 
-    /// 鍵を諦めて作成フォームに戻す。
-    fn close_ssh_key_picker(&mut self, form: ServerCreateForm, err: String) {
-        self.overlay = Some(Overlay::ServerCreateForm(form));
+    /// 鍵を諦めて呼び出し元のフォームに戻す。
+    fn fail_ssh_key_picker(&mut self, back: SshKeyReturn, err: String) {
+        self.close_ssh_key_picker(back);
         self.set_status(err, StatusKind::Error);
     }
 
+    /// 呼び出し元のフォームに戻す。
+    pub(super) fn close_ssh_key_picker(&mut self, back: SshKeyReturn) {
+        self.overlay = Some(match back {
+            SshKeyReturn::ServerCreate(form) => Overlay::ServerCreateForm(form),
+            SshKeyReturn::Register(form) => Overlay::SshKeyForm(form),
+        });
+    }
+
     /// 選んだ鍵をフォームに入れて戻す。
-    pub(super) fn take_ssh_key(&mut self, mut form: ServerCreateForm, key: &PublicKey) {
-        form.ssh_public_key = key.key.clone();
-        form.field = ServerCreateForm::SSH_KEY_FIELD;
+    pub(super) fn take_ssh_key(&mut self, mut back: SshKeyReturn, key: &PublicKey) {
+        back.take_key(key);
         let label = key.label.clone();
-        self.overlay = Some(Overlay::ServerCreateForm(form));
+        self.close_ssh_key_picker(back);
         self.set_status(
             format!("公開鍵「{label}」を入れました"),
             StatusKind::Success,

@@ -22,10 +22,10 @@ use crate::app::{
     MetricsRoutingFormMode, NotificationRoutingForm, NotificationRoutingFormMode,
     NotificationTargetForm, NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage,
     RagEditForm, RagUploadForm, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode,
-    ServerCreateForm, ServerPlanForm, SimpleMonitorForm, SimpleMonitorFormMode, SshKeySource,
-    SshKeyStage, StatusKind, StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm,
-    StorageFormMode, StorageRetentionForm, SwitchForm, SwitchFormMode, UserForm, UserFormMode,
-    VaultForm, VaultFormMode,
+    ServerCreateForm, ServerPlanForm, SimpleMonitorForm, SimpleMonitorFormMode, SshKeyForm,
+    SshKeyFormMode, SshKeyReturn, SshKeyStage, StatusKind, StorageAccessKeyForm,
+    StorageAccessKeyFormMode, StorageForm, StorageFormMode, StorageRetentionForm, SwitchForm,
+    SwitchFormMode, UserForm, UserFormMode, VaultForm, VaultFormMode,
 };
 use crate::app::{Loadable, Service};
 use crate::config::CredentialSource;
@@ -59,9 +59,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::RagUploadForm(form) => draw_rag_upload_form(frame, form),
         Overlay::ServerCreateForm(form) => draw_server_create_form(frame, form, app),
         Overlay::ServerPlanForm(form) => draw_server_plan_form(frame, form, app),
+        Overlay::SshKeyForm(form) => draw_ssh_key_form(frame, form),
         Overlay::DiskCreateForm(form) => draw_disk_create_form(frame, form, app),
         Overlay::DiskServerPicker(picker) => draw_disk_server_picker(frame, picker),
-        Overlay::SshKeyPicker { stage, .. } => draw_ssh_key_picker(frame, stage),
+        Overlay::SshKeyPicker { back, stage } => draw_ssh_key_picker(frame, back, stage),
         Overlay::RagEditForm(form) => draw_rag_edit_form(frame, form),
         Overlay::DnsRecordForm(form) => draw_dns_record_form(frame, form),
         Overlay::DnsZoneForm(form) => draw_dns_zone_form(frame, form),

@@ -38,6 +38,11 @@ impl PublicKey {
     }
 }
 
+/// 公開鍵として体裁が整っているか。登録前の確認にも使う。
+pub fn looks_like_public_key(line: &str) -> bool {
+    is_public_key(line.trim())
+}
+
 /// 公開鍵として体裁が整っている行か。
 ///
 /// `~/.ssh` にも GitHub にも余計な行が混ざりうるので、種類と本体が
