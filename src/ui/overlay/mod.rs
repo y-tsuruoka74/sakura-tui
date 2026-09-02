@@ -20,8 +20,9 @@ use crate::app::{
     IamCredentialForm, IamResourceForm, IamResourceFormMode, IamRoleForm, LogMeasureRuleForm,
     LogMeasureRuleFormMode, LogRoutingForm, LogRoutingFormMode, LoginForm, MetricsRoutingForm,
     MetricsRoutingFormMode, NicChoice, NotificationRoutingForm, NotificationRoutingFormMode,
-    NotificationTargetForm, NotificationTargetFormMode, Overlay, ProfileForm, ProfileStorage,
-    RagEditForm, RagUploadForm, RegistryForm, RegistryFormMode, SecretForm, SecretFormMode,
+    NotificationTargetForm, NotificationTargetFormMode, Overlay, PacketFilterForm,
+    PacketFilterFormMode, ProfileForm, ProfileStorage, RagEditForm, RagUploadForm, RegistryForm,
+    RegistryFormMode, RuleField, RuleForm, RuleFormMode, SecretForm, SecretFormMode,
     ServerChoicePicker, ServerChoices, ServerCreateForm, ServerField, ServerPlanForm,
     SimpleMonitorForm, SimpleMonitorFormMode, SshKeyForm, SshKeyFormMode, SshKeyReturn,
     SshKeyStage, StatusKind, StorageAccessKeyForm, StorageAccessKeyFormMode, StorageForm,
@@ -60,6 +61,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Overlay::RagUploadForm(form) => draw_rag_upload_form(frame, form),
         Overlay::ServerCreateForm(form) => draw_server_create_form(frame, form, app),
         Overlay::ServerChoicePicker(picker) => draw_server_choice_picker(frame, picker, app),
+        Overlay::PacketFilterForm(form) => draw_packet_filter_form(frame, form),
+        Overlay::RuleForm(form) => draw_rule_form(frame, form),
         Overlay::ServerPlanForm(form) => draw_server_plan_form(frame, form, app),
         Overlay::SshKeyForm(form) => draw_ssh_key_form(frame, form),
         Overlay::DiskCreateForm(form) => draw_disk_create_form(frame, form, app),
@@ -697,6 +700,20 @@ pub(super) fn draw_confirm(
 }
 
 pub(super) fn input_line(label: &str, value: &str, focused: bool, masked: bool) -> Line<'static> {
+    input_line_at(label, value, focused, masked, 14)
+}
+
+/// ラベル幅を指定できる入力行。
+///
+/// 同じダイアログの中に長いラベルの選択欄が混ざるときは、そちらに合わせる。
+/// 揃っていないと値の位置がばらつく。
+pub(super) fn input_line_at(
+    label: &str,
+    value: &str,
+    focused: bool,
+    masked: bool,
+    label_width: usize,
+) -> Line<'static> {
     let count = value.chars().count();
     // 伏せ字だと何文字入ったか数えづらい。貼り付けが途中で切れていないか
     // 確かめられるよう、長いものは点の代わりに文字数を出す。
@@ -720,7 +737,7 @@ pub(super) fn input_line(label: &str, value: &str, focused: bool, masked: bool) 
         Style::default()
     };
     Line::from(vec![
-        Span::styled(super::pad(label, 14), label_style),
+        Span::styled(super::pad(label, label_width), label_style),
         Span::styled(shown, value_style),
         Span::styled(
             if focused { "▏" } else { "" },

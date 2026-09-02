@@ -14,6 +14,7 @@ mod networking_suite;
 mod nosql;
 mod observability;
 mod overlay;
+mod packet_filter;
 mod registries;
 mod security_control;
 mod seg;
@@ -261,11 +262,11 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Server => server::draw(frame, area, app),
         Service::SshKey => ssh_key::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
+        Service::PacketFilter => packet_filter::draw(frame, area, app),
         Service::Disk
         | Service::Archive
         | Service::IsoImage
         | Service::Internet
-        | Service::PacketFilter
         | Service::Bridge
         | Service::LoadBalancer
         | Service::VpcRouter
@@ -592,10 +593,16 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 hints.extend(["n 作成", "D 削除", "c 接続", "C 切断"]);
             }
         }
+        Service::PacketFilter => {
+            hints.push("z ゾーン");
+            hints.push("Tab フィルタ/ルール");
+            if app.mode == Mode::Write {
+                hints.extend(["n 追加", "E 編集", "D 削除", "[ ] ルール並べ替え"]);
+            }
+        }
         Service::Archive
         | Service::IsoImage
         | Service::Internet
-        | Service::PacketFilter
         | Service::Bridge
         | Service::LoadBalancer
         | Service::VpcRouter

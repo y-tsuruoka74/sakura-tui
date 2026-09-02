@@ -22,6 +22,7 @@ mod managed_resources;
 mod monitoring;
 mod networking_suite;
 mod nosql;
+mod packet_filter;
 mod pubkey;
 mod registry;
 mod sacloud;

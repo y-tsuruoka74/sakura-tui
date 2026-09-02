@@ -149,6 +149,9 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     for (i, disk) in server.disk_names.iter().enumerate() {
         lines.push(field(&format!("ディスク {}", i + 1), disk));
     }
+    if let Some(filter) = &server.packet_filter_name {
+        lines.push(field("フィルタ", filter));
+    }
     if !server.description.is_empty() {
         lines.push(field("説明", &server.description));
     }

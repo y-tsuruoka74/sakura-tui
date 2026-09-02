@@ -25,6 +25,7 @@ mod monitoring_suite;
 mod networking_suite;
 mod nosql;
 mod observability;
+mod packet_filter;
 mod security_control;
 mod seg;
 mod server;
@@ -46,6 +47,7 @@ pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
     DnsView, ListFocus, MonitoringTab, MonitoringView, SecretsView, SimpleMonitorView,
 };
+pub use packet_filter::PacketFilterView;
 pub use security_control::{SecurityControlTab, SecurityControlView};
 pub use seg::{SegTab, SegView};
 pub use server::ServerView;
@@ -206,11 +208,20 @@ pub enum Message {
     /// 作成フォームで NIC・フィルタ・スクリプトに選べるもの。
     ServerAttachments {
         switches: Result<Vec<crate::switch::Switch>, String>,
-        filters: Result<Vec<crate::cloud_resources::CloudResource>, String>,
+        filters: Result<Vec<crate::packet_filter::PacketFilter>, String>,
         scripts: Result<Vec<crate::iaas::StartupScript>, String>,
     },
     SshKeyList {
         result: Result<Vec<crate::iaas::SshKey>, String>,
+    },
+    PacketFilters {
+        result: Result<Vec<crate::packet_filter::PacketFilter>, String>,
+    },
+    /// 作成・更新・削除のように、結果が成否だけのパケットフィルタの操作。
+    PacketFilterChanged {
+        what: String,
+        failed: String,
+        result: Result<(), String>,
     },
     /// 登録・更新・削除のように、結果が成否だけの公開鍵の操作。
     SshKeyChanged {
@@ -585,6 +596,9 @@ pub enum Pane {
     Servers,
     // SSH公開鍵
     SshKeys,
+    // パケットフィルタ
+    PacketFilters,
+    PacketFilterRules,
     // スイッチ
     Switches,
     CloudResources,
@@ -816,6 +830,15 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    DeletePacketFilter {
+        zone: String,
+        id: ResourceId,
+        name: String,
+    },
+    DeletePacketFilterRule {
+        id: ResourceId,
+        index: usize,
+    },
     DisconnectDisk {
         zone: String,
         id: ResourceId,
@@ -997,6 +1020,8 @@ pub enum Overlay {
     RagUploadForm(RagUploadForm),
     ServerCreateForm(ServerCreateForm),
     ServerChoicePicker(ServerChoicePicker),
+    PacketFilterForm(PacketFilterForm),
+    RuleForm(RuleForm),
     ServerPlanForm(ServerPlanForm),
     SshKeyForm(SshKeyForm),
     DiskCreateForm(DiskCreateForm),
@@ -1137,6 +1162,8 @@ pub struct App {
     pub disk: DiskView,
     /// SSH 公開鍵画面の状態。
     pub ssh_key: SshKeyView,
+    /// パケットフィルタ画面の状態。
+    pub packet_filter: PacketFilterView,
     /// スイッチ画面の状態。
     pub switch: SwitchView,
     pub cloud_resources: CloudResourcesView,
@@ -1208,6 +1235,7 @@ impl App {
             server: ServerView::default(),
             disk: DiskView::default(),
             ssh_key: SshKeyView::default(),
+            packet_filter: PacketFilterView::default(),
             switch: SwitchView::default(),
             cloud_resources: CloudResourcesView::default(),
             managed_resources: ManagedResourcesView::default(),
@@ -1238,7 +1266,6 @@ impl App {
             Service::Archive => Some(CloudResourceKind::Archive),
             Service::IsoImage => Some(CloudResourceKind::IsoImage),
             Service::Internet => Some(CloudResourceKind::Internet),
-            Service::PacketFilter => Some(CloudResourceKind::PacketFilter),
             Service::Bridge => Some(CloudResourceKind::Bridge),
             Service::LoadBalancer => Some(CloudResourceKind::LoadBalancer),
             Service::VpcRouter => Some(CloudResourceKind::VpcRouter),
@@ -1472,11 +1499,11 @@ impl App {
             Service::Server => Pane::Servers,
             Service::SshKey => Pane::SshKeys,
             Service::Switch => Pane::Switches,
+            Service::PacketFilter => self.packet_filter_active_pane(),
             Service::Disk
             | Service::Archive
             | Service::IsoImage
             | Service::Internet
-            | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
@@ -1673,12 +1700,12 @@ impl App {
             Service::Dedicated => self.dedicated_ensure_loaded(),
             Service::Server => self.server_ensure_loaded(),
             Service::SshKey => self.ssh_key_ensure_loaded(),
+            Service::PacketFilter => self.packet_filter_ensure_loaded(),
             Service::Switch => self.switch_ensure_loaded(),
             Service::Disk
             | Service::Archive
             | Service::IsoImage
             | Service::Internet
-            | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
@@ -1958,6 +1985,27 @@ impl App {
                 self.server.startup_scripts = self.store_result(scripts);
             }
             Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
+            Message::PacketFilters { result } => self.packet_filters_arrived(result),
+            Message::PacketFilterChanged {
+                what,
+                failed,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(what, StatusKind::Success);
+                    self.packet_filter_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: failed,
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::SshKeyList { result } => {
                 let count = result.as_ref().map(Vec::len).ok();
                 self.ssh_key.state.select(None);
@@ -3545,12 +3593,12 @@ impl App {
             Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
             Service::SshKey => self.on_key_ssh_key(key),
+            Service::PacketFilter => self.on_key_packet_filter(key),
             Service::Switch => self.on_key_switch(key),
             Service::Disk => self.on_key_disk(key),
             Service::Archive
             | Service::IsoImage
             | Service::Internet
-            | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
@@ -4143,6 +4191,9 @@ impl App {
                 let result = match service {
                     Service::Server => sacloud.count_servers(&zone).await,
                     Service::SshKey => sacloud.list_ssh_keys(&zone).await.map(|k| k.len()),
+                    Service::PacketFilter => {
+                        sacloud.list_packet_filters(&zone).await.map(|f| f.len())
+                    }
                     Service::Switch => sacloud.count_switches(&zone).await,
                     Service::Disk => {
                         sacloud
@@ -4162,11 +4213,6 @@ impl App {
                     Service::Internet => {
                         sacloud
                             .count_cloud_resources(&zone, CloudResourceKind::Internet)
-                            .await
-                    }
-                    Service::PacketFilter => {
-                        sacloud
-                            .count_cloud_resources(&zone, CloudResourceKind::PacketFilter)
                             .await
                     }
                     Service::Bridge => {
@@ -4313,12 +4359,12 @@ impl App {
             Service::SimpleMonitor => self.simple_monitor.monitors.ready()?.len(),
             Service::Server => self.server.servers.get(&self.zone)?.ready()?.len(),
             Service::SshKey => self.ssh_key.keys.ready()?.len(),
+            Service::PacketFilter => self.packet_filter.filters.ready()?.len(),
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
             Service::Disk
             | Service::Archive
             | Service::IsoImage
             | Service::Internet
-            | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
@@ -4516,6 +4562,8 @@ impl App {
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
             Pane::SshKeys => self.visible_ssh_keys().ready().map_or(0, Vec::len),
+            Pane::PacketFilters => self.visible_packet_filters().ready().map_or(0, Vec::len),
+            Pane::PacketFilterRules => self.visible_packet_filter_rules().len(),
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
             Pane::CloudResources => self.visible_cloud_resources().ready().map_or(0, Vec::len),
             Pane::ManagedResources => self.visible_managed_resources().ready().map_or(0, Vec::len),
@@ -4635,6 +4683,8 @@ impl App {
             Pane::Versions => Some(&mut self.apprun.version_state),
             Pane::Servers => Some(&mut self.server.server_state),
             Pane::SshKeys => Some(&mut self.ssh_key.state),
+            Pane::PacketFilters => Some(&mut self.packet_filter.filter_state),
+            Pane::PacketFilterRules => Some(&mut self.packet_filter.rule_state),
             Pane::Switches => Some(&mut self.switch.switch_state),
             Pane::CloudResources => Some(&mut self.cloud_resources.state),
             Pane::ManagedResources => Some(&mut self.managed_resources.state),
@@ -4782,6 +4832,12 @@ impl App {
             }),
             // 公開鍵は貼り付けて使うので、鍵そのものをコピーする。
             Pane::SshKeys => self.selected_ssh_key().map(|key| key.public_key),
+            Pane::PacketFilters => self
+                .selected_packet_filter()
+                .map(|filter| filter.id.to_string()),
+            Pane::PacketFilterRules => self
+                .selected_packet_filter_rule()
+                .map(|(_, rule)| format!("{} {} {}", rule.protocol, rule.source(), rule.action)),
             Pane::Switches => self.selected_switch().map(|switch| switch.id.to_string()),
             Pane::CloudResources => self
                 .selected_cloud_resource()
@@ -4858,12 +4914,12 @@ impl App {
             Service::Dedicated => self.dedicated_refresh(),
             Service::Server => self.server_refresh(),
             Service::SshKey => self.ssh_key_refresh(),
+            Service::PacketFilter => self.packet_filter_refresh(),
             Service::Switch => self.switch_refresh(),
             Service::Disk
             | Service::Archive
             | Service::IsoImage
             | Service::Internet
-            | Service::PacketFilter
             | Service::Bridge
             | Service::LoadBalancer
             | Service::VpcRouter
@@ -5079,6 +5135,8 @@ impl App {
         self.switch_invalidate();
         self.cloud_resources.items.clear();
         self.cloud_resources.state.select(None);
+        self.packet_filter_invalidate();
+        self.ssh_key_invalidate();
         self.managed_resources.items.clear();
         self.managed_resources.state.select(None);
         self.api_gateway = ApiGatewayView::default();
@@ -5525,6 +5583,12 @@ impl App {
             ConfirmAction::CreateDisk { zone, input } => self.run_create_disk(zone, input),
             ConfirmAction::DeleteDisk { zone, id, name } => self.run_delete_disk(zone, id, name),
             ConfirmAction::DeleteSshKey { id, name } => self.run_delete_ssh_key(id, name),
+            ConfirmAction::DeletePacketFilter { zone, id, name } => {
+                self.run_delete_packet_filter(zone, id, name)
+            }
+            ConfirmAction::DeletePacketFilterRule { id, index } => {
+                self.run_delete_packet_filter_rule(id, index)
+            }
             ConfirmAction::DisconnectDisk {
                 zone,
                 id,
@@ -6195,6 +6259,22 @@ impl App {
                 _ => {
                     edit_ssh_key_form(&mut form, key);
                     self.overlay = Some(Overlay::SshKeyForm(form));
+                }
+            },
+            Overlay::PacketFilterForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_packet_filter_form(form),
+                _ => {
+                    edit_packet_filter_form(&mut form, key);
+                    self.overlay = Some(Overlay::PacketFilterForm(form));
+                }
+            },
+            Overlay::RuleForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_rule_form(form),
+                _ => {
+                    edit_rule_form(&mut form, key);
+                    self.overlay = Some(Overlay::RuleForm(form));
                 }
             },
             Overlay::ServerChoicePicker(mut picker) => {

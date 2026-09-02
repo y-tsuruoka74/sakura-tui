@@ -69,10 +69,18 @@
   - 接続先に選べるのは停止中のサーバーだけです。接続中のディスクは削除できません（先に切断が必要）
 - `z` でゾーンを切り替え
 
+### パケットフィルタ
+- ゾーンごとの一覧と、選択中フィルタのルール一覧（評価順・プロトコル・送信元・宛先・動作・説明）
+- `Tab` でフィルタ側とルール側を行き来します
+- 書き込みモードでは `n` 追加、`E` 編集、`D` 削除。ルール側では `[` `]` で並べ替えられます
+  - ルールは上から順に評価されるため、順番に意味があります
+  - `icmp` / `ip` / `fragment` などポートを持たないプロトコルでは、ポートの欄自体が出ません
+  - ルールの変更は配列ごと送り直す仕様なので、読み込み時の `ExpressionHash` を添えて送ります。間に別の場所で変更されていた場合は API 側で弾かれます
+- `z` でゾーンを切り替え
+
 ### その他のIaaSリソース（閲覧のみ）
 - アーカイブとISOイメージ（容量、スコープ、ストレージ、作成日時）
 - ルータ＋スイッチ（帯域、スイッチ、ネットワーク、マスク長、ゲートウェイ）
-- パケットフィルタ（ルール数とAllow/Deny、プロトコル、送信元、ポート）
 - ブリッジ接続（リージョン、接続スイッチ、サービスクラス）
 - ロードバランサ、VPCルータ、データベース、NFSアプライアンス
 - GSLB（FQDN、監視方法、ポート、実サーバ数）
@@ -244,7 +252,8 @@ git config core.hooksPath .githooks
                          同名があるときは @keychain:<名前> で明示できる
   -z, --zone <ゾーン>     ゾーン依存のサービスで使うゾーン (例: is1a)
   -s, --service <名前>    起動時に開くサービス
-                         server / ssh-key / disk / registry / apprun / dedicated /
+                         server / ssh-key / disk / packet-filter /
+                         registry / apprun / dedicated /
                          archive / iso-image /
                          switch / internet / packet-filter / bridge /
                          loadbalancer / enhanced-loadbalancer / vpcrouter /
@@ -416,6 +425,7 @@ username = "your-registry-user"
 | `P` | サーバー: プラン（CPU・メモリ）を変更（書き込みモード、停止中のみ） |
 | `E` | SSH公開鍵: 名前と説明を編集（書き込みモード） |
 | `/` | サーバーの作成: NIC・パケットフィルタ・スタートアップスクリプトを一覧から探す |
+| `[` / `]` | パケットフィルタ: ルールを上 / 下へ移動（書き込みモード） |
 | `c` / `C` | ディスク: サーバーへ接続 / 切断（書き込みモード） |
 | `Ctrl+K` | サーバーの作成: SSH公開鍵の欄で取得元を選ぶ |
 | `/` | 表示中のリストを絞り込み（`Enter` 確定 / `Esc` 解除） |
@@ -487,6 +497,7 @@ username = "your-registry-user"
 | `src/ai_engine.rs` | AI Engineのモデル一覧クライアント（Bearer認証） |
 | `src/sacloud.rs` | さくらのクラウド API v1.1 クライアントの土台とコンテナレジストリ |
 | `src/iaas.rs` | ゾーン、サーバー（電源操作・作成・プラン変更・削除）、ディスクの作成・削除・接続、SSH公開鍵 |
+| `src/packet_filter.rs` | パケットフィルタとルールのクライアント（更新はルール配列ごと差し替え） |
 | `src/pubkey.rs` | サーバー作成に入れる SSH 公開鍵の取得元（`~/.ssh/*.pub` と GitHub） |
 | `src/switch.rs` | ゾーンごとのスイッチ一覧と件数 |
 | `src/cloud_resources.rs` | ディスク、ルータ＋スイッチ、IaaSアプライアンスの共通閲覧クライアント |

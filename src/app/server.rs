@@ -10,11 +10,11 @@ use super::{
     ServerCreateForm, ServerPlanForm, SshKeyReturn, SshKeySource, SshKeyStage, StatusKind,
     fmt_error, matches,
 };
-use crate::cloud_resources::CloudResource;
 use crate::iaas::{
     DiskPlan, NicPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan,
     SshKey, StartupScript,
 };
+use crate::packet_filter::PacketFilter;
 use crate::pubkey::PublicKey;
 use crate::switch::Switch;
 
@@ -69,7 +69,7 @@ pub struct ServerView {
     pub plans: Loadable<Vec<ServerPlan>>,
     pub disk_plans: Loadable<Vec<DiskPlan>>,
     pub switches: Loadable<Vec<Switch>>,
-    pub packet_filters: Loadable<Vec<CloudResource>>,
+    pub packet_filters: Loadable<Vec<PacketFilter>>,
     pub startup_scripts: Loadable<Vec<StartupScript>>,
 }
 
@@ -266,13 +266,7 @@ impl App {
         let zone = self.zone.clone();
         tokio::spawn(async move {
             let switches = client.list_switches(&zone).await.map_err(fmt_error);
-            let filters = client
-                .list_cloud_resources(
-                    &zone,
-                    crate::cloud_resources::CloudResourceKind::PacketFilter,
-                )
-                .await
-                .map_err(fmt_error);
+            let filters = client.list_packet_filters(&zone).await.map_err(fmt_error);
             let scripts = client.list_startup_scripts(&zone).await.map_err(fmt_error);
             let _ = tx.send(Message::ServerAttachments {
                 switches,

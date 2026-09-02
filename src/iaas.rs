@@ -120,6 +120,8 @@ pub struct Server {
     /// 接続されている NIC の IP アドレス（グローバル / 個別割当の順で拾う）。
     pub ip_addresses: Vec<String>,
     pub disk_names: Vec<String>,
+    /// eth0 に付いているパケットフィルタの名前。
+    pub packet_filter_name: Option<String>,
     pub zone: String,
     pub created_at: Option<String>,
 }
@@ -248,6 +250,15 @@ struct NakedInterface {
         deserialize_with = "null_as_default"
     )]
     user_ip_address: String,
+    #[serde(rename = "PacketFilter")]
+    packet_filter: Option<NakedNamed>,
+}
+
+/// 名前だけ使う入れ子。
+#[derive(Debug, Deserialize)]
+struct NakedNamed {
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,18 +283,25 @@ impl From<NakedServer> for Server {
             plan_name: plan.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
             cpu: plan.as_ref().map_or(0, |p| p.cpu),
             memory_mb: plan.map_or(0, |p| p.memory_mb),
+            // フィルタは NIC ごとに付くが、画面には eth0 のものだけ出す。
+            packet_filter_name: naked
+                .interfaces
+                .first()
+                .and_then(|nic| nic.packet_filter.as_ref())
+                .map(|f| f.name.clone()),
             ip_addresses: naked
                 .interfaces
-                .into_iter()
+                .iter()
                 // 共有セグメントは IPAddress、スイッチ接続は UserIPAddress に入る。
                 .map(|nic| {
                     if nic.ip_address.is_empty() {
-                        nic.user_ip_address
+                        &nic.user_ip_address
                     } else {
-                        nic.ip_address
+                        &nic.ip_address
                     }
                 })
                 .filter(|ip| !ip.is_empty())
+                .cloned()
                 .collect(),
             disk_names: naked.disks.into_iter().map(|d| d.name).collect(),
             zone: naked.zone.map(|z| z.name).unwrap_or_default(),
@@ -437,6 +455,28 @@ mod tests {
                 availability: "available".to_string(),
             })
             .collect()
+    }
+
+    /// eth0 のパケットフィルタを詳細に出せること。
+    /// 付けたつもりで付いていない、を画面から確かめられるようにする。
+    #[test]
+    fn the_first_nic_reports_its_packet_filter() {
+        let with_filter = serde_json::json!({"ID": "1", "Name": "web", "Interfaces": [
+            {"IPAddress": "192.0.2.1", "PacketFilter": {"ID": "9", "Name": "probe-filter"}}
+        ]});
+        let server: Server = serde_json::from_value::<NakedServer>(with_filter)
+            .unwrap()
+            .into();
+        assert_eq!(server.packet_filter_name.as_deref(), Some("probe-filter"));
+        assert_eq!(server.ip_addresses, ["192.0.2.1"]);
+
+        let without = serde_json::json!({"ID": "2", "Name": "db", "Interfaces": [
+            {"IPAddress": "192.0.2.2"}
+        ]});
+        let server: Server = serde_json::from_value::<NakedServer>(without)
+            .unwrap()
+            .into();
+        assert_eq!(server.packet_filter_name, None);
     }
 
     /// NIC の繋ぎ先で送る中身が変わること。

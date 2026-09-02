@@ -14,6 +14,7 @@ use crate::monitoring::{
     LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput, NotificationRouting,
     NotificationTarget, Publisher, Storage, StorageAccessKey, StorageKind,
 };
+use crate::packet_filter::PacketFilterRule;
 use crate::pubkey::PublicKey;
 use crate::sacloud::{ContainerRegistry, Permission, ResourceId};
 use crate::secretmanager::Vault;
@@ -950,6 +951,285 @@ pub(super) fn edit_server_choice_picker(
         KeyCode::Char(c) => {
             let filter = format!("{}{c}", picker.filter);
             picker.set_filter(filter);
+        }
+        _ => {}
+    }
+}
+
+/// パケットフィルタ本体（名前と説明）のフォーム。
+#[derive(Debug, Clone, Default)]
+pub struct PacketFilterForm {
+    pub mode: PacketFilterFormMode,
+    pub id: Option<ResourceId>,
+    pub name: String,
+    pub description: String,
+    pub field: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PacketFilterFormMode {
+    #[default]
+    Create,
+    Edit,
+}
+
+impl PacketFilterForm {
+    pub const LABELS: [&'static str; 2] = ["名前", "説明"];
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn edit_packet_filter_form(form: &mut PacketFilterForm, key: KeyEvent) {
+    let fields = PacketFilterForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// パケットフィルタのルールのフォーム。
+///
+/// プロトコルと動作は選択式、残りは入力式。ポートを取らないプロトコルでは
+/// ポートの欄を出さない（入れても送られないため、出すと誤解のもとになる）。
+#[derive(Debug, Clone)]
+pub struct RuleForm {
+    pub mode: RuleFormMode,
+    /// 編集のとき、元の並びでの位置。
+    pub index: Option<usize>,
+    pub protocol: usize,
+    pub action: usize,
+    pub source_network: String,
+    pub source_port: String,
+    pub destination_port: String,
+    pub description: String,
+    pub field: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleFormMode {
+    Add,
+    Edit,
+}
+
+/// ルールの入力欄。プロトコルによって出る欄が変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleField {
+    Protocol,
+    SourceNetwork,
+    SourcePort,
+    DestinationPort,
+    Action,
+    Description,
+}
+
+impl RuleField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Protocol => "プロトコル",
+            Self::SourceNetwork => "送信元ネットワーク",
+            Self::SourcePort => "送信元ポート",
+            Self::DestinationPort => "宛先ポート",
+            Self::Action => "動作",
+            Self::Description => "説明",
+        }
+    }
+
+    pub fn is_choice(self) -> bool {
+        matches!(self, Self::Protocol | Self::Action)
+    }
+}
+
+impl RuleForm {
+    pub fn add() -> Self {
+        Self {
+            mode: RuleFormMode::Add,
+            index: None,
+            protocol: 0,
+            action: 0,
+            source_network: String::new(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            description: String::new(),
+            field: 0,
+        }
+    }
+
+    pub fn edit(index: usize, rule: &PacketFilterRule) -> Self {
+        Self {
+            mode: RuleFormMode::Edit,
+            index: Some(index),
+            protocol: crate::packet_filter::PROTOCOLS
+                .iter()
+                .position(|p| *p == rule.protocol)
+                .unwrap_or(0),
+            action: crate::packet_filter::ACTIONS
+                .iter()
+                .position(|a| *a == rule.action)
+                .unwrap_or(0),
+            source_network: rule.source_network.clone(),
+            source_port: rule.source_port.clone(),
+            destination_port: rule.destination_port.clone(),
+            description: rule.description.clone(),
+            field: 0,
+        }
+    }
+
+    pub fn protocol(&self) -> &'static str {
+        crate::packet_filter::PROTOCOLS
+            [self.protocol.min(crate::packet_filter::PROTOCOLS.len() - 1)]
+    }
+
+    pub fn action(&self) -> &'static str {
+        crate::packet_filter::ACTIONS[self.action.min(crate::packet_filter::ACTIONS.len() - 1)]
+    }
+
+    /// 今出ている欄。ポートを取らないプロトコルではポートの欄を出さない。
+    pub fn fields(&self) -> Vec<RuleField> {
+        let mut fields = vec![RuleField::Protocol, RuleField::SourceNetwork];
+        if PacketFilterRule::takes_port(self.protocol()) {
+            fields.extend([RuleField::SourcePort, RuleField::DestinationPort]);
+        }
+        fields.extend([RuleField::Action, RuleField::Description]);
+        fields
+    }
+
+    pub fn current(&self) -> RuleField {
+        self.fields()
+            .get(self.field)
+            .copied()
+            .unwrap_or(RuleField::Protocol)
+    }
+
+    pub fn value(&self, field: RuleField) -> &str {
+        match field {
+            RuleField::SourceNetwork => &self.source_network,
+            RuleField::SourcePort => &self.source_port,
+            RuleField::DestinationPort => &self.destination_port,
+            RuleField::Description => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, field: RuleField) -> Option<&mut String> {
+        match field {
+            RuleField::SourceNetwork => Some(&mut self.source_network),
+            RuleField::SourcePort => Some(&mut self.source_port),
+            RuleField::DestinationPort => Some(&mut self.destination_port),
+            RuleField::Description => Some(&mut self.description),
+            _ => None,
+        }
+    }
+
+    pub fn to_rule(&self) -> PacketFilterRule {
+        let ported = PacketFilterRule::takes_port(self.protocol());
+        PacketFilterRule {
+            protocol: self.protocol().to_string(),
+            source_network: self.source_network.trim().to_string(),
+            // 欄を出していないものは持ち越さない。
+            source_port: if ported {
+                self.source_port.trim().to_string()
+            } else {
+                String::new()
+            },
+            destination_port: if ported {
+                self.destination_port.trim().to_string()
+            } else {
+                String::new()
+            },
+            action: self.action().to_string(),
+            description: self.description.trim().to_string(),
+        }
+    }
+
+    /// 送る前に形を確かめる。API のエラーは読みづらいので手前で止める。
+    pub fn validate(&self) -> Result<(), String> {
+        for (label, port) in [
+            ("送信元ポート", &self.source_port),
+            ("宛先ポート", &self.destination_port),
+        ] {
+            if PacketFilterRule::takes_port(self.protocol()) && !is_port_spec(port.trim()) {
+                return Err(format!("{label}は 80 か 80-89 の形で入れてください"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// ポートの指定として使える文字列か。空は「すべて」の意味で通す。
+fn is_port_spec(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    let valid = |part: &str| part.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n));
+    match text.split_once('-') {
+        None => valid(text),
+        Some((from, to)) => {
+            valid(from)
+                && valid(to)
+                && from.parse::<u32>().unwrap_or(0) <= to.parse::<u32>().unwrap_or(0)
+        }
+    }
+}
+
+pub(super) fn edit_rule_form(form: &mut RuleForm, key: KeyEvent) {
+    let count = form.fields().len();
+    let current = form.current();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % count,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + count - 1) % count,
+        KeyCode::Left | KeyCode::Right => {
+            let forward = key.code == KeyCode::Right;
+            match current {
+                RuleField::Protocol => {
+                    form.protocol = cycle(
+                        form.protocol,
+                        crate::packet_filter::PROTOCOLS.len(),
+                        forward,
+                    );
+                    // ポートの欄が増減するので、選択位置をプロトコルの行に留める。
+                    form.field = 0;
+                }
+                RuleField::Action => {
+                    form.action = cycle(form.action, crate::packet_filter::ACTIONS.len(), forward)
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(current) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) if !current.is_choice() => {
+            if let Some(value) = form.value_mut(current) {
+                value.push(c);
+            }
         }
         _ => {}
     }
@@ -3064,6 +3344,75 @@ mod tests {
             assert!(!ServerChoices::is_list_field(target), "{target:?}");
             assert!(server_choices().rows(target).is_empty());
         }
+    }
+
+    /// ポートを取らないプロトコルではポートの欄を出さないこと。
+    /// 出したままにすると、送られない値を入れさせてしまう。
+    #[test]
+    fn the_port_fields_appear_only_for_tcp_and_udp() {
+        let mut form = RuleForm::add();
+        assert_eq!(form.protocol(), "tcp");
+        assert!(form.fields().contains(&RuleField::DestinationPort));
+
+        // tcp → udp → icmp と進める。
+        edit_rule_form(&mut form, press(KeyCode::Right));
+        assert_eq!(form.protocol(), "udp");
+        assert!(form.fields().contains(&RuleField::SourcePort));
+        edit_rule_form(&mut form, press(KeyCode::Right));
+        assert_eq!(form.protocol(), "icmp");
+        assert!(!form.fields().contains(&RuleField::SourcePort));
+        assert!(!form.fields().contains(&RuleField::DestinationPort));
+        // 欄が減っても、選択位置はプロトコルの行に残る。
+        assert_eq!(form.current(), RuleField::Protocol);
+    }
+
+    /// 欄を出していないポートは送らないこと。
+    #[test]
+    fn a_hidden_port_is_not_sent() {
+        let mut form = RuleForm::add();
+        form.destination_port = "22".to_string();
+        assert_eq!(form.to_rule().destination_port, "22");
+        // icmp にすると、入力済みの値は持ち越さない。
+        form.protocol = crate::packet_filter::PROTOCOLS
+            .iter()
+            .position(|p| *p == "icmp")
+            .unwrap();
+        assert_eq!(form.to_rule().destination_port, "");
+    }
+
+    /// ポートの書き方を送る前に確かめること。
+    #[test]
+    fn ports_are_checked_before_sending() {
+        let ok = |port: &str| {
+            let mut form = RuleForm::add();
+            form.destination_port = port.to_string();
+            form.validate().is_ok()
+        };
+        assert!(ok(""), "空欄は「すべて」の意味で通す");
+        assert!(ok("80"));
+        assert!(ok("80-89"));
+        assert!(!ok("0"));
+        assert!(!ok("70000"));
+        assert!(!ok("89-80"), "順序が逆な範囲は弾く");
+        assert!(!ok("http"));
+    }
+
+    /// 編集では今の値が入った状態で開くこと。
+    #[test]
+    fn editing_a_rule_starts_from_its_current_values() {
+        let rule = PacketFilterRule {
+            protocol: "udp".to_string(),
+            source_network: "192.0.2.0/24".to_string(),
+            destination_port: "53".to_string(),
+            action: "deny".to_string(),
+            description: "DNS".to_string(),
+            ..PacketFilterRule::default()
+        };
+        let form = RuleForm::edit(3, &rule);
+        assert_eq!(form.protocol(), "udp");
+        assert_eq!(form.action(), "deny");
+        assert_eq!(form.index, Some(3));
+        assert_eq!(form.to_rule(), rule);
     }
 
     /// パケットフィルタとスタートアップスクリプトは「なし」が既定。

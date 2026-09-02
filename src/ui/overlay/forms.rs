@@ -693,6 +693,139 @@ pub(super) fn draw_ssh_key_form(frame: &mut Frame, form: &SshKeyForm) {
     );
 }
 
+/// パケットフィルタ本体のフォーム。
+pub(super) fn draw_packet_filter_form(frame: &mut Frame, form: &PacketFilterForm) {
+    let title = match form.mode {
+        PacketFilterFormMode::Create => "パケットフィルタの作成".to_string(),
+        PacketFilterFormMode::Edit => format!("パケットフィルタの編集 — {}", form.name),
+    };
+    let mut lines: Vec<Line> = PacketFilterForm::LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, label)| input_line(label, form.value(i), form.field == i, false))
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "ルールは作成後にこの画面で足せます。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 70, dialog_height(&lines, 70));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
+        area,
+    );
+}
+
+/// パケットフィルタのルールのフォーム。
+pub(super) fn draw_rule_form(frame: &mut Frame, form: &RuleForm) {
+    let title = match form.mode {
+        RuleFormMode::Add => "ルールの追加",
+        RuleFormMode::Edit => "ルールの編集",
+    };
+
+    let choice_row = |label: &str, text: &str, pos: usize, total: usize, focused: bool| {
+        let shown = if focused {
+            format!("‹ {text} ›")
+        } else {
+            format!("  {text}  ")
+        };
+        let style = if focused {
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::styled(
+                crate::ui::pad(label, 20),
+                if focused {
+                    style
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
+            Span::styled(crate::ui::pad(&shown, 16), style),
+            Span::styled(format!("{}/{total}", pos + 1), Style::default().fg(DIM)),
+        ])
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, field) in form.fields().iter().enumerate() {
+        let focused = form.field == i;
+        lines.push(match field {
+            RuleField::Protocol => choice_row(
+                field.label(),
+                form.protocol(),
+                form.protocol,
+                crate::packet_filter::PROTOCOLS.len(),
+                focused,
+            ),
+            RuleField::Action => choice_row(
+                field.label(),
+                form.action(),
+                form.action,
+                crate::packet_filter::ACTIONS.len(),
+                focused,
+            ),
+            _ => input_line_at(field.label(), form.value(*field), focused, false, 20),
+        });
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "空欄は「すべて」の意味です。ポートは 80 か 80-89 の形で入れます。",
+        Style::default().fg(DIM),
+    )));
+    if !crate::packet_filter::PacketFilterRule::takes_port(form.protocol()) {
+        lines.push(Line::from(Span::styled(
+            format!("{} はポートを指定できません。", form.protocol()),
+            Style::default().fg(DIM),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "ルールは上から順に評価され、どれにも当たらない通信は拒否されます。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 選択   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 74, dialog_height(&lines, 74));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(title, accent())),
+        area,
+    );
+}
+
 /// ディスクの作成フォーム。選択式の欄は一覧の中の位置も出す。
 pub(super) fn draw_disk_create_form(
     frame: &mut Frame,
