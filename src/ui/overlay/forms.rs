@@ -482,6 +482,175 @@ pub(super) fn draw_ssh_key_picker(frame: &mut Frame, stage: &SshKeyStage) {
     );
 }
 
+/// ディスクの作成フォーム。選択式の欄は一覧の中の位置も出す。
+pub(super) fn draw_disk_create_form(
+    frame: &mut Frame,
+    form: &DiskCreateForm,
+    app: &crate::app::App,
+) {
+    let plans = app.disk_plan_choices();
+    let loading = app.disk.plans.ready().is_none();
+    let sizes = crate::app::sizes_of(&plans, form.plan_id);
+
+    let choice_row =
+        |label: &str, text: String, pos: Option<usize>, total: usize, focused: bool| {
+            let shown = if focused {
+                format!("‹ {text} ›")
+            } else {
+                format!("  {text}  ")
+            };
+            let style = if focused {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![
+                Span::styled(
+                    crate::ui::pad(label, 14),
+                    if focused {
+                        style
+                    } else {
+                        Style::default().fg(DIM)
+                    },
+                ),
+                Span::styled(crate::ui::pad(&shown, 30), style),
+            ];
+            if let Some(pos) = pos
+                && total > 1
+            {
+                spans.push(Span::styled(
+                    format!("{}/{total}", pos + 1),
+                    Style::default().fg(DIM),
+                ));
+            }
+            Line::from(spans)
+        };
+    let unknown = || {
+        if loading {
+            "読み込み中…".to_string()
+        } else {
+            "選べる値がありません".to_string()
+        }
+    };
+
+    let plan_pos = plans.iter().position(|p| p.id == form.plan_id);
+    let plan_text = match plans.iter().find(|p| p.id == form.plan_id) {
+        Some(plan) => plan.name.clone(),
+        None => unknown(),
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, label) in DiskCreateForm::LABELS.iter().enumerate() {
+        let focused = form.field == i;
+        match i {
+            2 => lines.push(choice_row(
+                label,
+                plan_text.clone(),
+                plan_pos,
+                plans.len(),
+                focused,
+            )),
+            3 => lines.push(choice_row(
+                label,
+                if sizes.is_empty() {
+                    unknown()
+                } else {
+                    format!("{} GB", form.size_mb / 1024)
+                },
+                sizes.iter().position(|mb| *mb == form.size_mb),
+                sizes.len(),
+                focused,
+            )),
+            4 => lines.push(choice_row(
+                label,
+                form.source_label().to_string(),
+                Some(form.source),
+                DiskCreateForm::SOURCE_COUNT,
+                focused,
+            )),
+            _ => lines.push(input_line(label, form.value(i), focused, false)),
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "OSを選ぶとテンプレートのコピーが走り、使えるまで数分かかります。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "ディスクは作成した時点から課金されます。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 選択   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 確認へ   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("ディスクの作成", accent())),
+        area,
+    );
+}
+
+/// ディスクの接続先サーバーを選ぶ画面。
+pub(super) fn draw_disk_server_picker(frame: &mut Frame, picker: &DiskServerPicker) {
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(crate::ui::pad("ディスク", 12), Style::default().fg(DIM)),
+            Span::raw(picker.disk_name.clone()),
+        ]),
+        Line::raw(""),
+    ];
+    match &picker.servers {
+        Loadable::Ready(servers) if servers.is_empty() => {
+            lines.push(Line::from(Span::styled(
+                "接続できるサーバーがありません。接続できるのは停止中のサーバーだけです。",
+                Style::default().fg(DIM),
+            )));
+        }
+        Loadable::Ready(servers) => {
+            for (i, (id, name)) in servers.iter().enumerate() {
+                lines.push(selectable_line(name, &id.to_string(), i == picker.index));
+            }
+        }
+        Loadable::Failed(err) => {
+            lines.push(Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(DIM),
+            )));
+        }
+        _ => lines.push(Line::from(Span::styled(
+            "停止中のサーバーを探しています…",
+            Style::default().fg(DIM),
+        ))),
+    }
+    lines.push(Line::raw(""));
+    lines.push(picker_hint("接続する"));
+
+    let area = centered(frame, 74, dialog_height(&lines, 74));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("ディスクの接続先", accent())),
+        area,
+    );
+}
+
 /// サーバーのプラン変更フォーム。変更前の構成を並べて出す。
 pub(super) fn draw_server_plan_form(
     frame: &mut Frame,

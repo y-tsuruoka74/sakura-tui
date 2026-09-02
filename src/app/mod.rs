@@ -19,6 +19,7 @@ mod billing;
 mod cloudhsm;
 mod credentials;
 mod dedicated;
+mod disk;
 mod forms;
 mod monitoring_suite;
 mod networking_suite;
@@ -37,6 +38,7 @@ pub use apprun::{AppRunPane, AppRunView};
 pub use billing::{BillingFocus, BillingTab, BillingView};
 pub use cloudhsm::{CloudHsmTab, CloudHsmView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
+pub use disk::DiskView;
 pub use forms::*;
 pub use networking_suite::{NetworkingSuiteTab, NetworkingSuiteView};
 pub use nosql::{NoSqlTab, NoSqlView};
@@ -211,6 +213,24 @@ pub enum Message {
     ServerPlanChanged {
         name: String,
         result: Result<(), String>,
+    },
+    DiskPlans {
+        result: Result<Vec<crate::iaas::DiskPlan>, String>,
+    },
+    DiskCreated {
+        name: String,
+        /// OS テンプレートからのコピーが走っているか。
+        copying: bool,
+        result: Result<(), String>,
+    },
+    /// 削除・接続・切断のように、結果が成否だけのディスク操作。
+    DiskChanged {
+        what: String,
+        failed: String,
+        result: Result<(), String>,
+    },
+    DiskTargetServers {
+        result: Result<Vec<(ResourceId, String)>, String>,
     },
     ServerCreated {
         name: String,
@@ -764,6 +784,21 @@ pub enum ConfirmAction {
         cpu: u32,
         memory_mb: u32,
     },
+    CreateDisk {
+        zone: String,
+        input: Box<crate::iaas::DiskCreateInput>,
+    },
+    DeleteDisk {
+        zone: String,
+        id: ResourceId,
+        name: String,
+    },
+    DisconnectDisk {
+        zone: String,
+        id: ResourceId,
+        name: String,
+        server: String,
+    },
     CreateServer {
         zone: String,
         /// 入力一式。列挙体が肥大しないよう箱に入れる。
@@ -939,6 +974,8 @@ pub enum Overlay {
     RagUploadForm(RagUploadForm),
     ServerCreateForm(ServerCreateForm),
     ServerPlanForm(ServerPlanForm),
+    DiskCreateForm(DiskCreateForm),
+    DiskServerPicker(DiskServerPicker),
     /// SSH 公開鍵の取得元と一覧。作成フォームに戻すため、フォームごと預かる。
     SshKeyPicker {
         form: Box<ServerCreateForm>,
@@ -1071,6 +1108,8 @@ pub struct App {
     pub dedicated: DedicatedView,
     /// サーバー画面の状態。
     pub server: ServerView,
+    /// ディスク画面の書き込み操作で使う状態。
+    pub disk: DiskView,
     /// スイッチ画面の状態。
     pub switch: SwitchView,
     pub cloud_resources: CloudResourcesView,
@@ -1140,6 +1179,7 @@ impl App {
             apprun: AppRunView::default(),
             dedicated: DedicatedView::default(),
             server: ServerView::default(),
+            disk: DiskView::default(),
             switch: SwitchView::default(),
             cloud_resources: CloudResourcesView::default(),
             managed_resources: ManagedResourcesView::default(),
@@ -1203,6 +1243,16 @@ impl App {
                 })
                 .collect(),
         )
+    }
+
+    /// ディスクなどを書き換えたあと、一覧を引き直させる。
+    pub(super) fn cloud_resources_invalidate(&mut self) {
+        let Some(kind) = self.cloud_resource_kind() else {
+            return;
+        };
+        self.cloud_resources
+            .items
+            .remove(&(self.zone.clone(), kind));
     }
 
     pub fn selected_cloud_resource(&self) -> Option<CloudResource> {
@@ -1882,6 +1932,59 @@ impl App {
                 Err(err) => {
                     self.overlay = Some(Overlay::Message {
                         title: "プランの変更に失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::DiskPlans { result } => {
+                self.disk.plans = self.store_result(result);
+                self.disk_plans_arrived();
+            }
+            Message::DiskTargetServers { result } => self.disk_target_servers_arrived(result),
+            Message::DiskCreated {
+                name,
+                copying,
+                result,
+            } => match result {
+                Ok(()) => {
+                    let note = if copying {
+                        "（コピーが終わるまでしばらくかかります）"
+                    } else {
+                        ""
+                    };
+                    self.set_status(
+                        format!("ディスク「{name}」を作成しました{note}"),
+                        StatusKind::Success,
+                    );
+                    self.cloud_resources_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "ディスクの作成に失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
+            Message::DiskChanged {
+                what,
+                failed,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(what, StatusKind::Success);
+                    self.cloud_resources_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: failed,
                         body: err.clone(),
                         kind: StatusKind::Error,
                         scroll: 0,
@@ -3373,8 +3476,8 @@ impl App {
             Service::Dedicated => self.on_key_dedicated(key),
             Service::Server => self.on_key_server(key),
             Service::Switch => self.on_key_switch(key),
-            Service::Disk
-            | Service::Archive
+            Service::Disk => self.on_key_disk(key),
+            Service::Archive
             | Service::IsoImage
             | Service::Internet
             | Service::PacketFilter
@@ -5342,6 +5445,14 @@ impl App {
                 cpu,
                 memory_mb,
             } => self.run_change_server_plan(zone, id, name, cpu, memory_mb),
+            ConfirmAction::CreateDisk { zone, input } => self.run_create_disk(zone, input),
+            ConfirmAction::DeleteDisk { zone, id, name } => self.run_delete_disk(zone, id, name),
+            ConfirmAction::DisconnectDisk {
+                zone,
+                id,
+                name,
+                server,
+            } => self.run_disconnect_disk(zone, id, name, server),
             ConfirmAction::DeleteRagDocument { id, name } => self.run_delete_rag_document(id, name),
             ConfirmAction::UnveilSecret { vault, name } => self.run_unveil(vault, name),
             ConfirmAction::DeleteVault { id, name } => self.run_delete_vault(id, name),
@@ -5973,6 +6084,28 @@ impl App {
                     edit_server_plan_form(&mut form, key, &plans);
                     self.overlay = Some(Overlay::ServerPlanForm(form));
                 }
+            },
+            Overlay::DiskCreateForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_disk_create_form(form),
+                _ => {
+                    let plans = self.disk_plan_choices();
+                    edit_disk_create_form(&mut form, key, &plans);
+                    self.overlay = Some(Overlay::DiskCreateForm(form));
+                }
+            },
+            Overlay::DiskServerPicker(mut picker) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_disk_server_picker(picker),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    picker.move_selection(true);
+                    self.overlay = Some(Overlay::DiskServerPicker(picker));
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    picker.move_selection(false);
+                    self.overlay = Some(Overlay::DiskServerPicker(picker));
+                }
+                _ => self.overlay = Some(Overlay::DiskServerPicker(picker)),
             },
             Overlay::SshKeyPicker { form, mut stage } => match (&mut stage, key.code) {
                 // 一覧からは取得元へ、取得元からは作成フォームへ戻る。

@@ -5,9 +5,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use crate::app::Loadable;
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::IamCredentials;
-use crate::iaas::{ServerPlan, Zone};
+use crate::iaas::{DiskPlan, ServerPlan, Zone};
 use crate::monitoring::{
     AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule, LogMeasureRuleInput,
     LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput, NotificationRouting,
@@ -641,6 +642,161 @@ impl ServerCreateForm {
 
 /// 作成フォームの既定のディスクサイズ（20GB）。
 const DEFAULT_DISK_SIZE_MB: u32 = 20480;
+
+/// ディスクの作成フォーム。
+///
+/// プラン（SSD / HDD）とサイズとソースは選択式。選べるサイズはプランごとに
+/// 違うので、サーバー作成のコア数とメモリと同じく値そのものを持つ。
+#[derive(Debug, Clone, Default)]
+pub struct DiskCreateForm {
+    pub name: String,
+    pub description: String,
+    /// ディスクプランの ID。一覧が届くまでは 0。
+    pub plan_id: u32,
+    pub size_mb: u32,
+    /// ソースの添字。0 はブランク、以降は [`crate::iaas::OS_CHOICES`]。
+    pub source: usize,
+    pub field: usize,
+}
+
+impl DiskCreateForm {
+    pub const LABELS: [&'static str; 5] = ["名前", "説明", "プラン", "サイズ", "ソース"];
+    pub const CHOICE_FIELDS: [usize; 3] = [2, 3, 4];
+    /// ブランクを先頭に置くぶん、OS の選択肢は1つずれる。
+    pub const SOURCE_COUNT: usize = crate::iaas::OS_CHOICES.len() + 1;
+
+    pub fn value(&self, index: usize) -> &str {
+        match index {
+            0 => &self.name,
+            1 => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, index: usize) -> Option<&mut String> {
+        match index {
+            0 => Some(&mut self.name),
+            1 => Some(&mut self.description),
+            _ => None,
+        }
+    }
+
+    pub fn is_choice(index: usize) -> bool {
+        Self::CHOICE_FIELDS.contains(&index)
+    }
+
+    /// 選んだソースの表示名。
+    pub fn source_label(&self) -> &'static str {
+        match self.source.checked_sub(1) {
+            None => "ブランク（空のディスク）",
+            Some(os) => crate::iaas::OS_CHOICES[os.min(crate::iaas::OS_CHOICES.len() - 1)].label,
+        }
+    }
+
+    /// OS テンプレートのタグ。ブランクなら空。
+    pub fn os_tags(&self) -> Vec<String> {
+        match self.source.checked_sub(1) {
+            None => Vec::new(),
+            Some(os) => crate::iaas::OS_CHOICES[os.min(crate::iaas::OS_CHOICES.len() - 1)]
+                .tags
+                .iter()
+                .map(|t| t.to_string())
+                .collect(),
+        }
+    }
+
+    /// プラン一覧が届いた時点で、まだ選んでいない欄を埋める。
+    pub fn apply_defaults(&mut self, plans: &[DiskPlan]) {
+        if self.plan_id == 0 {
+            // SSD を既定にする。無ければ先頭。
+            let Some(plan) = plans.iter().find(|p| p.is_ssd()).or_else(|| plans.first()) else {
+                return;
+            };
+            self.plan_id = plan.id;
+        }
+        if self.size_mb == 0 {
+            self.size_mb = default_disk_size(sizes_of(plans, self.plan_id));
+        }
+    }
+}
+
+/// そのプランで選べるサイズ（MB）。
+pub fn sizes_of(plans: &[DiskPlan], plan_id: u32) -> &[u32] {
+    plans
+        .iter()
+        .find(|p| p.id == plan_id)
+        .map_or(&[][..], |p| &p.sizes_mb)
+}
+
+/// 既定のサイズ。20GB があればそれ、無ければ一番小さいもの。
+fn default_disk_size(sizes: &[u32]) -> u32 {
+    sizes
+        .iter()
+        .copied()
+        .find(|mb| *mb == DEFAULT_DISK_SIZE_MB)
+        .or_else(|| sizes.first().copied())
+        .unwrap_or(0)
+}
+
+pub(super) fn edit_disk_create_form(form: &mut DiskCreateForm, key: KeyEvent, plans: &[DiskPlan]) {
+    let fields = DiskCreateForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Left | KeyCode::Right => {
+            let forward = key.code == KeyCode::Right;
+            match form.field {
+                2 => {
+                    let ids: Vec<u32> = plans.iter().map(|p| p.id).collect();
+                    form.plan_id = step(&ids, form.plan_id, forward);
+                    // プランごとに選べるサイズが違うので、近いものへ寄せ直す。
+                    let sizes = sizes_of(plans, form.plan_id);
+                    if !sizes.contains(&form.size_mb) {
+                        form.size_mb = sizes
+                            .iter()
+                            .copied()
+                            .min_by_key(|mb| mb.abs_diff(form.size_mb))
+                            .unwrap_or(form.size_mb);
+                    }
+                }
+                3 => form.size_mb = step(sizes_of(plans, form.plan_id), form.size_mb, forward),
+                4 => form.source = cycle(form.source, DiskCreateForm::SOURCE_COUNT, forward),
+                _ => {}
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) if !DiskCreateForm::is_choice(form.field) => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// ディスクの接続先サーバーを選ぶ画面。
+///
+/// 接続できるのは停止中のサーバーだけなので、絞ったものを持つ。
+#[derive(Debug, Clone)]
+pub struct DiskServerPicker {
+    pub disk_id: ResourceId,
+    pub disk_name: String,
+    pub servers: Loadable<Vec<(ResourceId, String)>>,
+    pub index: usize,
+}
+
+impl DiskServerPicker {
+    /// 選択位置を上下に動かす。読み込み中は何もしない。
+    pub fn move_selection(&mut self, forward: bool) {
+        let len = self.servers.ready().map_or(0, Vec::len);
+        self.index = cycle(self.index, len, forward);
+    }
+}
 
 /// サーバーのプラン変更フォーム。
 ///
@@ -2324,6 +2480,63 @@ mod tests {
         edit_server_create_form(&mut form, press(KeyCode::Char('x')), &plans, &[]);
         assert_eq!(form.name, "");
         assert_eq!(form.cpu, 1);
+    }
+
+    fn disk_plans() -> Vec<DiskPlan> {
+        vec![
+            DiskPlan {
+                id: 4,
+                name: "SSD".to_string(),
+                sizes_mb: vec![20480, 40960, 102400],
+            },
+            DiskPlan {
+                id: 2,
+                name: "HDD".to_string(),
+                sizes_mb: vec![40960, 102400, 256000],
+            },
+        ]
+    }
+
+    /// 既定は SSD の 20GB。
+    #[test]
+    fn a_new_disk_starts_at_ssd_20gb() {
+        let mut form = DiskCreateForm::default();
+        form.apply_defaults(&disk_plans());
+        assert_eq!((form.plan_id, form.size_mb), (4, 20480));
+        // ソースの既定はブランク。
+        assert_eq!(form.source, 0);
+        assert!(form.os_tags().is_empty());
+    }
+
+    /// プランを変えたら、そのプランで選べるサイズへ寄ること。
+    /// HDD には 20GB が無いので、そのままだと作成が弾かれる。
+    #[test]
+    fn changing_the_disk_plan_moves_the_size_into_range() {
+        let plans = disk_plans();
+        let mut form = DiskCreateForm {
+            field: 2,
+            ..DiskCreateForm::default()
+        };
+        form.apply_defaults(&plans);
+        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans);
+        assert_eq!(form.plan_id, 2);
+        assert_eq!(form.size_mb, 40960, "HDD で選べる一番近いサイズへ寄る");
+    }
+
+    /// ソースはブランクを先頭に、OS の選択肢が続くこと。
+    #[test]
+    fn the_source_list_puts_blank_first() {
+        let plans = disk_plans();
+        let mut form = DiskCreateForm {
+            field: 4,
+            ..DiskCreateForm::default()
+        };
+        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans);
+        assert_eq!(form.source, 1);
+        assert_eq!(form.os_tags(), crate::iaas::OS_CHOICES[0].tags);
+        // 端で折り返す。
+        edit_disk_create_form(&mut form, press(KeyCode::Left), &plans);
+        assert_eq!(form.source_label(), "ブランク（空のディスク）");
     }
 
     /// プラン変更でもコア数を変えたらメモリが追従すること。

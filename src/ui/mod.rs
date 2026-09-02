@@ -579,8 +579,13 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
                 hints.extend(["n 作成", "E 編集", "D 削除"]);
             }
         }
-        Service::Disk
-        | Service::Archive
+        Service::Disk => {
+            hints.push("z ゾーン");
+            if app.mode == Mode::Write {
+                hints.extend(["n 作成", "D 削除", "c 接続", "C 切断"]);
+            }
+        }
+        Service::Archive
         | Service::IsoImage
         | Service::Internet
         | Service::PacketFilter

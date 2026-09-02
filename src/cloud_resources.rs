@@ -77,6 +77,9 @@ pub struct CloudResource {
     pub plan: String,
     pub connection: String,
     pub created_at: String,
+    /// 繋がっているサーバー。ディスクの接続・切断の可否判定に使う。
+    /// `/Server` を持たない種別では常に None。
+    pub attached_server: Option<(ResourceId, String)>,
     pub details: Vec<(String, String)>,
 }
 
@@ -252,8 +255,16 @@ fn parse_resource(value: &Value, kind: CloudResourceKind) -> Result<CloudResourc
         plan,
         connection,
         created_at: string_at(value, "/CreatedAt"),
+        attached_server: attached_server(value),
         details,
     })
+}
+
+/// 繋がっているサーバーの ID と名前。名前は空のこともある。
+fn attached_server(value: &Value) -> Option<(ResourceId, String)> {
+    let id = value.pointer("/Server/ID")?;
+    let id: ResourceId = serde_json::from_value(id.clone()).ok()?;
+    Some((id, string_at(value, "/Server/Name")))
 }
 
 fn detail_fields(kind: CloudResourceKind) -> &'static [(&'static str, &'static [&'static str])] {
@@ -388,6 +399,25 @@ mod tests {
                 .status,
             "up"
         );
+    }
+
+    /// ディスクの接続先は、接続・切断の可否判定に使うので型付きで持つ。
+    /// `/Connection` は繋がっていなくても入っているため、そちらでは判定できない。
+    #[test]
+    fn tells_an_attached_disk_from_a_free_one() {
+        let attached = json!({"ID":"1","Name":"data","Connection":"virtio",
+            "Server":{"ID":"9","Name":"web"}});
+        let parsed = parse_resource(&attached, CloudResourceKind::Disk).unwrap();
+        assert_eq!(
+            parsed.attached_server,
+            Some((ResourceId(9), "web".to_string()))
+        );
+
+        let free = json!({"ID":"2","Name":"spare","Connection":"virtio"});
+        let parsed = parse_resource(&free, CloudResourceKind::Disk).unwrap();
+        assert_eq!(parsed.attached_server, None);
+        // 接続先の表示は Connection で埋まるので、これでは判定できない。
+        assert_eq!(parsed.connection, "virtio");
     }
 
     #[test]

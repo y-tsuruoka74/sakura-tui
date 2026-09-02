@@ -710,6 +710,17 @@ pub fn plan_exists(plans: &[ServerPlan], cpu: u32, memory_mb: u32) -> bool {
         .any(|p| p.cpu == cpu && p.memory_mb == memory_mb)
 }
 
+/// 単体で作るディスクの指定。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskCreateInput {
+    pub name: String,
+    pub description: String,
+    pub plan_id: u32,
+    pub size_mb: u32,
+    /// OS テンプレートのタグ。空ならブランクディスク。
+    pub os_tags: Vec<String>,
+}
+
 /// アカウントに登録済みの SSH 公開鍵。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshKey {
@@ -1150,6 +1161,64 @@ impl SacloudClient {
         let body = json!({ "WithDisk": with_disk });
         let _: serde_json::Value = self
             .request_in_zone(zone, Method::DELETE, &format!("server/{id}"), Some(body))
+            .await?;
+        Ok(())
+    }
+
+    /// ディスクを単体で作る。
+    ///
+    /// OS テンプレートを指定するとコピーが走るので、完了まで数分かかる。
+    /// ここでは待たずに ID を返し、進み具合は一覧の「状態」で見せる。
+    pub async fn create_disk(&self, zone: &str, input: &DiskCreateInput) -> Result<ResourceId> {
+        let mut disk = json!({
+            "Name": input.name,
+            "Description": input.description,
+            "Plan": { "ID": input.plan_id },
+            "SizeMB": input.size_mb,
+            "Connection": "virtio",
+        });
+        if !input.os_tags.is_empty() {
+            let template = self.find_os_template(zone, &input.os_tags).await?;
+            disk["SourceArchive"] = json!({ "ID": template.id.0 });
+        }
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "disk", Some(json!({ "Disk": disk })))
+            .await?;
+        value
+            .pointer("/Disk/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("ディスクの作成応答にIDがありませんでした"))
+    }
+
+    pub async fn delete_disk(&self, zone: &str, id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::DELETE, &format!("disk/{id}"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// ディスクをサーバーに繋ぐ。相手のサーバーは停止中でなければならない。
+    pub async fn connect_disk(
+        &self,
+        zone: &str,
+        id: ResourceId,
+        server_id: ResourceId,
+    ) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(
+                zone,
+                Method::PUT,
+                &format!("disk/{id}/to/server/{server_id}"),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// ディスクをサーバーから外す。接続先はパスに含めない。
+    pub async fn disconnect_disk(&self, zone: &str, id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::DELETE, &format!("disk/{id}/to/server"), None)
             .await?;
         Ok(())
     }
