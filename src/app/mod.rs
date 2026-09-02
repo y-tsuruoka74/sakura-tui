@@ -208,6 +208,10 @@ pub enum Message {
         name: String,
         result: Result<(), String>,
     },
+    ServerPlanChanged {
+        name: String,
+        result: Result<(), String>,
+    },
     ServerCreated {
         name: String,
         progress: crate::iaas::ServerCreateProgress,
@@ -753,6 +757,13 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    ChangeServerPlan {
+        zone: String,
+        id: ResourceId,
+        name: String,
+        cpu: u32,
+        memory_mb: u32,
+    },
     CreateServer {
         zone: String,
         /// 入力一式。列挙体が肥大しないよう箱に入れる。
@@ -927,6 +938,7 @@ pub enum Overlay {
     SwitchForm(SwitchForm),
     RagUploadForm(RagUploadForm),
     ServerCreateForm(ServerCreateForm),
+    ServerPlanForm(ServerPlanForm),
     /// SSH 公開鍵の取得元と一覧。作成フォームに戻すため、フォームごと預かる。
     SshKeyPicker {
         form: Box<ServerCreateForm>,
@@ -1857,6 +1869,26 @@ impl App {
                 self.server_plans_arrived();
             }
             Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
+            Message::ServerPlanChanged { name, result } => match result {
+                Ok(()) => {
+                    self.set_status(
+                        format!("サーバー「{name}」のプランを変更しました"),
+                        StatusKind::Success,
+                    );
+                    // プラン変更でIDが変わるので、一覧を引き直す。
+                    self.server_invalidate();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: "プランの変更に失敗しました".to_string(),
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::ServerCreated {
                 name,
                 progress,
@@ -5303,6 +5335,13 @@ impl App {
             ConfirmAction::DeleteServer { zone, id, name } => {
                 self.run_delete_server(zone, id, name)
             }
+            ConfirmAction::ChangeServerPlan {
+                zone,
+                id,
+                name,
+                cpu,
+                memory_mb,
+            } => self.run_change_server_plan(zone, id, name, cpu, memory_mb),
             ConfirmAction::DeleteRagDocument { id, name } => self.run_delete_rag_document(id, name),
             ConfirmAction::UnveilSecret { vault, name } => self.run_unveil(vault, name),
             ConfirmAction::DeleteVault { id, name } => self.run_delete_vault(id, name),
@@ -5924,6 +5963,15 @@ impl App {
                     let sizes = self.server.disk_sizes();
                     edit_server_create_form(&mut form, key, &plans, &sizes);
                     self.overlay = Some(Overlay::ServerCreateForm(form));
+                }
+            },
+            Overlay::ServerPlanForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_server_plan_form(form),
+                _ => {
+                    let plans = self.server_plan_choices();
+                    edit_server_plan_form(&mut form, key, &plans);
+                    self.overlay = Some(Overlay::ServerPlanForm(form));
                 }
             },
             Overlay::SshKeyPicker { form, mut stage } => match (&mut stage, key.code) {

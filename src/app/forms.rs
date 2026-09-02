@@ -642,6 +642,50 @@ impl ServerCreateForm {
 /// 作成フォームの既定のディスクサイズ（20GB）。
 const DEFAULT_DISK_SIZE_MB: u32 = 20480;
 
+/// サーバーのプラン変更フォーム。
+///
+/// 変えられるのはコア数とメモリだけ。作成フォームと同じ規則で選ぶ。
+#[derive(Debug, Clone)]
+pub struct ServerPlanForm {
+    pub server_id: ResourceId,
+    pub server_name: String,
+    /// 変更前の構成。確認の文言と「変わらない」判定に使う。
+    pub original_cpu: u32,
+    pub original_memory_mb: u32,
+    pub cpu: u32,
+    pub memory_mb: u32,
+    pub field: usize,
+}
+
+impl ServerPlanForm {
+    pub const LABELS: [&'static str; 2] = ["CPU", "メモリ"];
+
+    /// 変更前と同じ構成か。同じなら API を叩く意味がない。
+    pub fn is_unchanged(&self) -> bool {
+        self.cpu == self.original_cpu && self.memory_mb == self.original_memory_mb
+    }
+}
+
+pub(super) fn edit_server_plan_form(
+    form: &mut ServerPlanForm,
+    key: KeyEvent,
+    plans: &[ServerPlan],
+) {
+    let fields = ServerPlanForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Left | KeyCode::Right => {
+            let forward = key.code == KeyCode::Right;
+            match form.field {
+                0 => step_cpu(&mut form.cpu, &mut form.memory_mb, forward, plans),
+                _ => step_memory(form.cpu, &mut form.memory_mb, forward, plans),
+            }
+        }
+        _ => {}
+    }
+}
+
 /// SSH 公開鍵の取得元。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SshKeySource {
@@ -1571,15 +1615,8 @@ pub(super) fn edit_server_create_form(
         KeyCode::Left | KeyCode::Right => {
             let forward = key.code == KeyCode::Right;
             match form.field {
-                2 => {
-                    form.cpu = step(&crate::iaas::cpu_choices(plans), form.cpu, forward);
-                    // コア数ごとに選べるメモリが違うので、近いものへ寄せ直す。
-                    form.memory_mb = crate::iaas::nearest_memory(plans, form.cpu, form.memory_mb);
-                }
-                3 => {
-                    let choices = crate::iaas::memory_choices(plans, form.cpu);
-                    form.memory_mb = step(&choices, form.memory_mb, forward);
-                }
+                2 => step_cpu(&mut form.cpu, &mut form.memory_mb, forward, plans),
+                3 => step_memory(form.cpu, &mut form.memory_mb, forward, plans),
                 4 => form.os = cycle(form.os, crate::iaas::OS_CHOICES.len(), forward),
                 5 => form.disk_size_mb = step(disk_sizes, form.disk_size_mb, forward),
                 9 => form.boot_after_create = !form.boot_after_create,
@@ -1602,6 +1639,24 @@ pub(super) fn edit_server_create_form(
         }
         _ => {}
     }
+}
+
+/// コア数を隣へ動かし、メモリをその構成で選べる値へ寄せ直す。
+///
+/// 作成フォームとプラン変更フォームで同じ規則を使う。寄せ直しを忘れると
+/// 存在しない組み合わせのまま送信してしまう。
+fn step_cpu(cpu: &mut u32, memory_mb: &mut u32, forward: bool, plans: &[ServerPlan]) {
+    *cpu = step(&crate::iaas::cpu_choices(plans), *cpu, forward);
+    *memory_mb = crate::iaas::nearest_memory(plans, *cpu, *memory_mb);
+}
+
+/// メモリを、そのコア数で選べる値の中で隣へ動かす。
+fn step_memory(cpu: u32, memory_mb: &mut u32, forward: bool, plans: &[ServerPlan]) {
+    *memory_mb = step(
+        &crate::iaas::memory_choices(plans, cpu),
+        *memory_mb,
+        forward,
+    );
 }
 
 /// 昇順に並んだ選択肢の中で、今の値の隣へ動かす。
@@ -2269,6 +2324,29 @@ mod tests {
         edit_server_create_form(&mut form, press(KeyCode::Char('x')), &plans, &[]);
         assert_eq!(form.name, "");
         assert_eq!(form.cpu, 1);
+    }
+
+    /// プラン変更でもコア数を変えたらメモリが追従すること。
+    /// 作成フォームと同じ規則を共用しているかの確認。
+    #[test]
+    fn the_plan_form_snaps_memory_like_the_create_form() {
+        let plans = plans();
+        let mut form = ServerPlanForm {
+            server_id: crate::sacloud::ResourceId(1),
+            server_name: "web-01".to_string(),
+            original_cpu: 1,
+            original_memory_mb: 1024,
+            cpu: 1,
+            memory_mb: 1024,
+            field: 0,
+        };
+        assert!(form.is_unchanged());
+        // 2 コアの最小は 2GB。
+        edit_server_plan_form(&mut form, press(KeyCode::Right), &plans);
+        assert_eq!((form.cpu, form.memory_mb), (2, 2048));
+        assert!(!form.is_unchanged());
+        // 変更前の値は動かない。確認の文言に使うため。
+        assert_eq!((form.original_cpu, form.original_memory_mb), (1, 1024));
     }
 
     /// 一覧の選択位置は上下で折り返す。

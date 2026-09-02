@@ -482,6 +482,125 @@ pub(super) fn draw_ssh_key_picker(frame: &mut Frame, stage: &SshKeyStage) {
     );
 }
 
+/// サーバーのプラン変更フォーム。変更前の構成を並べて出す。
+pub(super) fn draw_server_plan_form(
+    frame: &mut Frame,
+    form: &ServerPlanForm,
+    app: &crate::app::App,
+) {
+    let plans = app.server_plan_choices();
+    let loading = app.server.plans.ready().is_none();
+    let cpus = crate::iaas::cpu_choices(&plans);
+    let memories = crate::iaas::memory_choices(&plans, form.cpu);
+
+    let row = |label: &str, text: String, choices: &[u32], current: u32, focused: bool| {
+        let shown = if focused {
+            format!("‹ {text} ›")
+        } else {
+            format!("  {text}  ")
+        };
+        let style = if focused {
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let mut spans = vec![
+            Span::styled(
+                crate::ui::pad(label, 12),
+                if focused {
+                    style
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
+            Span::styled(crate::ui::pad(&shown, 20), style),
+        ];
+        if let Some(pos) = choices.iter().position(|v| *v == current)
+            && choices.len() > 1
+        {
+            spans.push(Span::styled(
+                format!("{}/{}", pos + 1, choices.len()),
+                Style::default().fg(DIM),
+            ));
+        }
+        Line::from(spans)
+    };
+    let unknown = || {
+        if loading {
+            "読み込み中…".to_string()
+        } else {
+            "選べる値がありません".to_string()
+        }
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            form.server_name.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(crate::ui::pad("変更前", 12), Style::default().fg(DIM)),
+            Span::raw(format!(
+                "  {} コア / {} GB",
+                form.original_cpu,
+                form.original_memory_mb / 1024
+            )),
+        ]),
+        Line::raw(""),
+        row(
+            ServerPlanForm::LABELS[0],
+            if cpus.is_empty() {
+                unknown()
+            } else {
+                format!("{} コア", form.cpu)
+            },
+            &cpus,
+            form.cpu,
+            form.field == 0,
+        ),
+        row(
+            ServerPlanForm::LABELS[1],
+            if memories.is_empty() {
+                unknown()
+            } else {
+                format!("{} GB", form.memory_mb / 1024)
+            },
+            &memories,
+            form.memory_mb,
+            form.field == 1,
+        ),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "ディスクと NIC はそのまま引き継がれますが、サーバーの ID が変わります。",
+            Style::default().fg(DIM),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 項目移動   "),
+            Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 選択   "),
+            Span::styled(
+                "Enter",
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" 確認へ   "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" 中止"),
+        ]),
+    ];
+
+    let area = centered(frame, 66, dialog_height(&lines, 66));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("プランの変更", accent())),
+        area,
+    );
+}
+
 /// 公開鍵の一覧を出すダイアログの幅。
 ///
 /// 鍵の名前とコメントを1行に並べるので、他のフォームより広く取る。

@@ -6,8 +6,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    App, ConfirmAction, Loadable, Message, Overlay, Pane, ServerCreateForm, SshKeySource,
-    SshKeyStage, StatusKind, fmt_error, matches,
+    App, ConfirmAction, Loadable, Message, Overlay, Pane, ServerCreateForm, ServerPlanForm,
+    SshKeySource, SshKeyStage, StatusKind, fmt_error, matches,
 };
 use crate::iaas::{
     DiskPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan, SshKey,
@@ -439,10 +439,109 @@ impl App {
         });
     }
 
+    /// プラン変更フォームを開く。
+    fn open_server_plan_form(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(server) = self.selected_server() else {
+            return;
+        };
+        // 起動中は API 側で拒否されるので、叩く前に止める。
+        if server.power != PowerStatus::Down {
+            self.set_status(
+                format!(
+                    "{}: 起動中はプランを変更できません。先に停止してください",
+                    server.name
+                ),
+                StatusKind::Error,
+            );
+            return;
+        }
+        // 選べる値はゾーンごとに違う。開くたびに引き直す。
+        self.load_server_plans();
+        self.overlay = Some(Overlay::ServerPlanForm(ServerPlanForm {
+            server_id: server.id,
+            server_name: server.name,
+            original_cpu: server.cpu,
+            original_memory_mb: server.memory_mb,
+            cpu: server.cpu,
+            memory_mb: server.memory_mb,
+            field: 0,
+        }));
+    }
+
+    pub(super) fn submit_server_plan_form(&mut self, form: ServerPlanForm) {
+        if form.is_unchanged() {
+            self.overlay = Some(Overlay::ServerPlanForm(form));
+            self.set_status("今と同じ構成です", StatusKind::Error);
+            return;
+        }
+        let plans = self.server_plan_choices();
+        if !crate::iaas::plan_exists(&plans, form.cpu, form.memory_mb) {
+            self.overlay = Some(Overlay::ServerPlanForm(form));
+            self.set_status(
+                "その CPU とメモリの組み合わせは選べません",
+                StatusKind::Error,
+            );
+            return;
+        }
+        // ID が変わるので、外から ID で参照している設定があれば直す必要がある。
+        self.overlay = Some(Overlay::Confirm {
+            title: "プランの変更".to_string(),
+            body: format!(
+                "サーバー「{}」({}) のプランを変更します。\n\
+                 {} コア / {} GB → {} コア / {} GB\n\n\
+                 ディスクと NIC はそのまま引き継がれますが、\
+                 サーバーの ID が変わります。",
+                form.server_name,
+                self.zone,
+                form.original_cpu,
+                form.original_memory_mb / 1024,
+                form.cpu,
+                form.memory_mb / 1024,
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::ChangeServerPlan {
+                zone: self.zone.clone(),
+                id: form.server_id,
+                name: form.server_name,
+                cpu: form.cpu,
+                memory_mb: form.memory_mb,
+            },
+        });
+    }
+
+    pub(super) fn run_change_server_plan(
+        &mut self,
+        zone: String,
+        id: crate::sacloud::ResourceId,
+        name: String,
+        cpu: u32,
+        memory_mb: u32,
+    ) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        self.set_status(
+            format!("サーバー「{name}」のプランを変更しています…"),
+            StatusKind::Info,
+        );
+        tokio::spawn(async move {
+            let result = client.change_server_plan(&zone, id, cpu, memory_mb).await;
+            let _ = tx.send(Message::ServerPlanChanged {
+                name,
+                result: result.map(|_| ()).map_err(fmt_error),
+            });
+        });
+    }
+
     pub(super) fn on_key_server(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('n') => self.open_server_create_form(),
             KeyCode::Char('D') => self.confirm_delete_server(),
+            KeyCode::Char('P') => self.open_server_plan_form(),
             KeyCode::Char('b') => self.confirm_power(PowerAction::Boot),
             KeyCode::Char('x') => self.confirm_power(PowerAction::Shutdown),
             KeyCode::Char('X') => self.confirm_power(PowerAction::PowerOff),

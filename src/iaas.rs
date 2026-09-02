@@ -1154,6 +1154,35 @@ impl SacloudClient {
         Ok(())
     }
 
+    /// サーバーのプランを変える。
+    ///
+    /// 停止中しか受け付けない。またプランを変えると **サーバーの ID が変わる**
+    /// ので、新しい ID を返す（画面側で選び直すのに使う）。
+    /// ディスクと NIC はそのまま引き継がれる。
+    ///
+    /// プラン ID 指定は 2025-04-17 に廃止されたため、作成と同じく
+    /// コア数とメモリを直接送る。
+    pub async fn change_server_plan(
+        &self,
+        zone: &str,
+        id: ResourceId,
+        cpu: u32,
+        memory_mb: u32,
+    ) -> Result<ResourceId> {
+        let body = json!({
+            "CPU": cpu,
+            "MemoryMB": memory_mb,
+            "Commitment": "standard",
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::PUT, &format!("server/{id}/plan"), Some(body))
+            .await?;
+        value
+            .pointer("/Server/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("プラン変更の応答にIDがありませんでした"))
+    }
+
     /// サーバーに繋がっているディスクの ID。削除のときに使う。
     pub async fn server_disk_ids(&self, zone: &str, id: ResourceId) -> Result<Vec<ResourceId>> {
         let value: serde_json::Value = self
