@@ -6,16 +6,17 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 
 use super::{
-    App, ConfirmAction, Loadable, Message, NicChoice, Overlay, Pane, ServerChoices,
-    ServerCreateForm, ServerPlanForm, SshKeyReturn, SshKeySource, SshKeyStage, StatusKind,
-    fmt_error, matches,
+    App, ConfirmAction, ListFocus, Loadable, Message, NicChoice, NicPicker, NicTarget, Overlay,
+    Pane, ServerChoices, ServerCreateForm, ServerPlanForm, SshKeyReturn, SshKeySource, SshKeyStage,
+    StatusKind, fmt_error, matches,
 };
 use crate::iaas::{
-    DiskPlan, NicPlan, OS_CHOICES, PowerAction, PowerStatus, Server, ServerCreateInput, ServerPlan,
-    SshKey, StartupScript,
+    DiskPlan, Nic, NicAttach, NicPlan, OS_CHOICES, PowerAction, PowerStatus, Server,
+    ServerCreateInput, ServerPlan, SshKey, StartupScript,
 };
 use crate::packet_filter::PacketFilter;
 use crate::pubkey::PublicKey;
+use crate::sacloud::ResourceId;
 use crate::switch::Switch;
 
 /// スイッチに繋ぐ NIC の指定。IP が無ければ作らせない。
@@ -65,6 +66,11 @@ pub struct ServerView {
     /// ゾーンごとのサーバー一覧。
     pub servers: HashMap<String, Loadable<Vec<Server>>>,
     pub server_state: TableState,
+    /// 選択中サーバーの NIC 一覧。
+    pub nic_state: TableState,
+    pub focus: ListFocus,
+    /// 引き直しの理由が操作の完了なら、件数のお知らせで上書きしない。
+    pub quiet_reload: bool,
     /// 作成フォームで使う選択肢。ゾーンごとに違うので都度引く。
     pub plans: Loadable<Vec<ServerPlan>>,
     pub disk_plans: Loadable<Vec<DiskPlan>>,
@@ -132,6 +138,23 @@ impl App {
         });
     }
 
+    /// 選択中サーバーの NIC。
+    pub fn visible_nics(&self) -> Vec<Nic> {
+        self.selected_server().map(|s| s.nics).unwrap_or_default()
+    }
+
+    pub fn selected_nic(&self) -> Option<Nic> {
+        let index = self.server.nic_state.selected()?;
+        self.visible_nics().get(index).cloned()
+    }
+
+    pub(super) fn server_active_pane(&self) -> Pane {
+        match self.server.focus {
+            ListFocus::Left => Pane::Servers,
+            ListFocus::Right => Pane::Nics,
+        }
+    }
+
     pub(super) fn server_ensure_loaded(&mut self) {
         let zone = self.zone.clone();
         if self.server.servers.get(&zone).is_none_or(Loadable::is_idle) {
@@ -145,6 +168,14 @@ impl App {
             && self.server.server_state.selected().is_none()
         {
             self.server.server_state.select(Some(0));
+        }
+        // NIC は枚数が変わるので、選択位置を範囲に収め直す。
+        let nics = self.visible_nics().len();
+        match self.server.nic_state.selected() {
+            _ if nics == 0 => self.server.nic_state.select(None),
+            None => self.server.nic_state.select(Some(0)),
+            Some(i) if i >= nics => self.server.nic_state.select(Some(nics - 1)),
+            Some(_) => {}
         }
     }
 
@@ -680,8 +711,214 @@ impl App {
         });
     }
 
+    /// NIC の繋ぎ先を選ぶ画面を開く。
+    fn open_nic_connection_picker(&mut self) {
+        let Some((server, nic)) = self.writable_nic() else {
+            return;
+        };
+        // NIC の付け替えは停止中でないと API 側で拒否される。
+        if server.power != PowerStatus::Down {
+            self.set_status(
+                format!("{}: 起動中は NIC の接続先を変えられません", server.name),
+                StatusKind::Error,
+            );
+            return;
+        }
+        self.load_server_attachments();
+        self.overlay = Some(Overlay::NicPicker(NicPicker {
+            target: NicTarget::Connection,
+            server_name: server.name,
+            nic: nic.clone(),
+            index: 0,
+            filter: String::new(),
+        }));
+    }
+
+    /// NIC に付けるパケットフィルタを選ぶ画面を開く。
+    fn open_nic_filter_picker(&mut self) {
+        let Some((_, nic)) = self.writable_nic() else {
+            return;
+        };
+        self.load_server_attachments();
+        let server_name = self.selected_server().map(|s| s.name).unwrap_or_default();
+        self.overlay = Some(Overlay::NicPicker(NicPicker {
+            target: NicTarget::PacketFilter,
+            server_name,
+            nic,
+            index: 0,
+            filter: String::new(),
+        }));
+    }
+
+    /// 一覧から選んだものを NIC に反映する。
+    pub(super) fn submit_nic_picker(&mut self, picker: NicPicker) {
+        let choices = self.server_choices();
+        let rows = picker.visible(&choices);
+        let Some(row) = rows.get(picker.index) else {
+            self.overlay = Some(Overlay::NicPicker(picker));
+            return;
+        };
+        let position = row.position;
+        self.overlay = None;
+        let nic = picker.nic;
+        match picker.target {
+            NicTarget::Connection => {
+                let to = match choices.nic(position) {
+                    NicChoice::Shared => NicAttach::Shared,
+                    NicChoice::Switch(id, _) => NicAttach::Switch(id),
+                    NicChoice::None => NicAttach::None,
+                };
+                self.run_connect_nic(nic, to, choices.nic(position).label());
+            }
+            NicTarget::PacketFilter => {
+                let filter = choices.packet_filter(position);
+                self.run_set_nic_filter(nic, filter);
+            }
+        }
+    }
+
+    fn run_connect_nic(&mut self, nic: Nic, to: NicAttach, label: String) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let what = match to {
+            NicAttach::None => format!("{} を切断しました", nic.name()),
+            _ => format!("{} を {label} に繋ぎました", nic.name()),
+        };
+        tokio::spawn(async move {
+            let result = client.connect_nic(&zone, nic.id, to).await;
+            let _ = tx.send(Message::NicChanged {
+                what,
+                failed: "NIC の接続先を変えられませんでした".to_string(),
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
+    fn run_set_nic_filter(&mut self, nic: Nic, filter: Option<(ResourceId, String)>) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let what = match &filter {
+            Some((_, name)) => format!("{} にフィルタ「{name}」を付けました", nic.name()),
+            None => format!("{} のフィルタを外しました", nic.name()),
+        };
+        tokio::spawn(async move {
+            let result = client
+                .set_nic_packet_filter(&zone, nic.id, filter.map(|(id, _)| id))
+                .await;
+            let _ = tx.send(Message::NicChanged {
+                what,
+                failed: "パケットフィルタを変えられませんでした".to_string(),
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
+    /// NIC を1枚足す。
+    fn add_nic(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(server) = self.selected_server() else {
+            return;
+        };
+        if server.power != PowerStatus::Down {
+            self.set_status(
+                format!("{}: 起動中は NIC を足せません", server.name),
+                StatusKind::Error,
+            );
+            return;
+        }
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        let id = server.id;
+        tokio::spawn(async move {
+            let result = client.add_nic(&zone, id).await;
+            let _ = tx.send(Message::NicChanged {
+                what: "NIC を足しました（接続先は c で選べます）".to_string(),
+                failed: "NIC を足せませんでした".to_string(),
+                result: result.map(|_| ()).map_err(fmt_error),
+            });
+        });
+    }
+
+    fn confirm_delete_nic(&mut self) {
+        let Some((server, nic)) = self.writable_nic() else {
+            return;
+        };
+        if server.power != PowerStatus::Down {
+            self.set_status(
+                format!("{}: 起動中は NIC を外せません", server.name),
+                StatusKind::Error,
+            );
+            return;
+        }
+        // eth0 を消すと共有セグメントに繋ぎ直せなくなるので、警告を添える。
+        let note = if nic.index == 0 {
+            "\neth0 を外すと、共有セグメントに繋ぎ直せるのは eth0 だけである都合上、\
+             作り直しても同じ IP には戻りません。"
+        } else {
+            ""
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "NIC の削除".to_string(),
+            body: format!(
+                "サーバー「{}」の {} ({}) を外します。{note}",
+                server.name,
+                nic.name(),
+                nic.connection.label(),
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteNic {
+                zone: self.zone.clone(),
+                id: nic.id,
+                name: nic.name(),
+            },
+        });
+    }
+
+    pub(super) fn run_delete_nic(&mut self, zone: String, id: ResourceId, name: String) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.delete_nic(&zone, id).await;
+            let _ = tx.send(Message::NicChanged {
+                what: format!("{name} を外しました"),
+                failed: "NIC を外せませんでした".to_string(),
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
+    /// 書き込みモードで、サーバーと NIC が選ばれていること。
+    fn writable_nic(&mut self) -> Option<(Server, Nic)> {
+        if !self.require_write() {
+            return None;
+        }
+        Some((self.selected_server()?, self.selected_nic()?))
+    }
+
     pub(super) fn on_key_server(&mut self, key: KeyEvent) {
+        // NIC 側を見ているときは、作成・削除の相手が NIC になる。
+        let on_nic = self.server.focus == ListFocus::Right;
         match key.code {
+            KeyCode::Tab => {
+                self.server.focus = match self.server.focus {
+                    ListFocus::Left => ListFocus::Right,
+                    ListFocus::Right => ListFocus::Left,
+                };
+            }
+            KeyCode::Char('n') if on_nic => self.add_nic(),
+            KeyCode::Char('D') if on_nic => self.confirm_delete_nic(),
+            KeyCode::Char('c') => self.open_nic_connection_picker(),
+            KeyCode::Char('f') => self.open_nic_filter_picker(),
             KeyCode::Char('n') => self.open_server_create_form(),
             KeyCode::Char('D') => self.confirm_delete_server(),
             KeyCode::Char('P') => self.open_server_plan_form(),
@@ -770,6 +1007,15 @@ impl App {
 
     pub(super) fn server_invalidate(&mut self) {
         self.server = ServerView::default();
+    }
+
+    /// サーバー一覧だけ引き直す。
+    ///
+    /// NIC をいじるたびに画面ごと作り直すと、見ていた NIC の行と
+    /// フォーカスが毎回リセットされて操作を続けられない。
+    pub(super) fn server_reload(&mut self) {
+        self.server.quiet_reload = true;
+        self.server.servers.remove(&self.zone);
     }
 }
 

@@ -456,6 +456,86 @@ pub(super) fn draw_server_create_form(
 /// 選択式の欄に出せる値の幅。ラベルと位置表示を除いた残り。
 const CHOICE_TEXT_WIDTH: usize = 44;
 
+/// NIC の接続先やパケットフィルタを選ぶ画面。
+///
+/// 候補の出どころが作成フォームと同じなので、行の作り方もそろえる。
+pub(super) fn draw_nic_picker(frame: &mut Frame, picker: &NicPicker, app: &crate::app::App) {
+    let choices = app.server_choices();
+    let rows = picker.visible(&choices);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(crate::ui::pad("今の接続先", 14), Style::default().fg(DIM)),
+            Span::raw(picker.nic.connection.label()),
+        ]),
+        Line::from(vec![
+            Span::styled(crate::ui::pad("今のフィルタ", 14), Style::default().fg(DIM)),
+            Span::raw(
+                picker
+                    .nic
+                    .packet_filter
+                    .as_ref()
+                    .map_or_else(|| "なし".to_string(), Clone::clone),
+            ),
+        ]),
+        Line::raw(""),
+        input_line("絞り込み", &picker.filter, true, false),
+        Line::raw(""),
+    ];
+
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "一致するものがありません",
+            Style::default().fg(DIM),
+        )));
+    } else {
+        let start = picker
+            .index
+            .saturating_sub(CHOICE_PICKER_ROWS - 1)
+            .min(rows.len().saturating_sub(CHOICE_PICKER_ROWS));
+        for (i, row) in rows.iter().enumerate().skip(start).take(CHOICE_PICKER_ROWS) {
+            lines.push(selectable_line(
+                &row.label,
+                &row.detail,
+                i == picker.index,
+                CHOICE_PICKER_LABEL_WIDTH,
+                CHOICE_PICKER_ROW_WIDTH,
+            ));
+        }
+        if rows.len() > CHOICE_PICKER_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("{} / {} 件", picker.index + 1, rows.len()),
+                Style::default().fg(DIM),
+            )));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("文字入力", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 絞り込み   "),
+        Span::styled("↑↓", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 移動   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 決定   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let width = CHOICE_PICKER_WIDTH;
+    let area = centered(frame, width, dialog_height(&lines, width));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&picker.title(), accent())),
+        area,
+    );
+}
+
 /// 候補が多い欄を絞り込みながら選ぶ画面。
 const CHOICE_PICKER_WIDTH: u16 = 88;
 const CHOICE_PICKER_ROW_WIDTH: usize =

@@ -217,6 +217,12 @@ pub enum Message {
     PacketFilters {
         result: Result<Vec<crate::packet_filter::PacketFilter>, String>,
     },
+    /// 接続・切断・フィルタの付け外しのように、結果が成否だけの NIC の操作。
+    NicChanged {
+        what: String,
+        failed: String,
+        result: Result<(), String>,
+    },
     /// 作成・更新・削除のように、結果が成否だけのパケットフィルタの操作。
     PacketFilterChanged {
         what: String,
@@ -594,6 +600,7 @@ pub enum Pane {
     Certificates,
     // サーバー
     Servers,
+    Nics,
     // SSH公開鍵
     SshKeys,
     // パケットフィルタ
@@ -839,6 +846,11 @@ pub enum ConfirmAction {
         id: ResourceId,
         index: usize,
     },
+    DeleteNic {
+        zone: String,
+        id: ResourceId,
+        name: String,
+    },
     DisconnectDisk {
         zone: String,
         id: ResourceId,
@@ -1022,6 +1034,7 @@ pub enum Overlay {
     ServerChoicePicker(ServerChoicePicker),
     PacketFilterForm(PacketFilterForm),
     RuleForm(RuleForm),
+    NicPicker(NicPicker),
     ServerPlanForm(ServerPlanForm),
     SshKeyForm(SshKeyForm),
     DiskCreateForm(DiskCreateForm),
@@ -1496,7 +1509,7 @@ impl App {
             Service::Registry => self.registry_active_pane(),
             Service::AppRun => self.apprun_active_pane(),
             Service::Dedicated => self.dedicated_active_pane(),
-            Service::Server => Pane::Servers,
+            Service::Server => self.server_active_pane(),
             Service::SshKey => Pane::SshKeys,
             Service::Switch => Pane::Switches,
             Service::PacketFilter => self.packet_filter_active_pane(),
@@ -1986,6 +1999,27 @@ impl App {
             }
             Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
             Message::PacketFilters { result } => self.packet_filters_arrived(result),
+            Message::NicChanged {
+                what,
+                failed,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.set_status(what, StatusKind::Success);
+                    // NIC はサーバーの応答に入っているので、一覧を引き直す。
+                    self.server_reload();
+                    self.ensure_loaded();
+                }
+                Err(err) => {
+                    self.overlay = Some(Overlay::Message {
+                        title: failed,
+                        body: err.clone(),
+                        kind: StatusKind::Error,
+                        scroll: 0,
+                    });
+                    self.set_status(err, StatusKind::Error);
+                }
+            },
             Message::PacketFilterChanged {
                 what,
                 failed,
@@ -3201,16 +3235,21 @@ impl App {
                 match result {
                     Ok(servers) => {
                         let count = servers.len();
-                        self.server.server_state.select(None);
+                        // NIC をいじった直後などは同じ行に留まりたい。
+                        // 件数が減っていることもあるので範囲に収める。
+                        let keep = self.server.server_state.selected().filter(|i| *i < count);
+                        self.server.server_state.select(keep);
                         self.server
                             .servers
                             .insert(zone.clone(), Loadable::Ready(servers));
-                        if zone == self.zone {
+                        // 操作の完了を伝えたばかりなら、件数で上書きしない。
+                        if zone == self.zone && !self.server.quiet_reload {
                             self.set_status(
                                 format!("{zone} のサーバー {count} 件"),
                                 StatusKind::Info,
                             );
                         }
+                        self.server.quiet_reload = false;
                         self.ensure_loaded();
                     }
                     Err(err) => {
@@ -4562,6 +4601,7 @@ impl App {
             Pane::Versions => self.visible_versions().ready().map_or(0, Vec::len),
             Pane::Servers => self.visible_servers().ready().map_or(0, Vec::len),
             Pane::SshKeys => self.visible_ssh_keys().ready().map_or(0, Vec::len),
+            Pane::Nics => self.visible_nics().len(),
             Pane::PacketFilters => self.visible_packet_filters().ready().map_or(0, Vec::len),
             Pane::PacketFilterRules => self.visible_packet_filter_rules().len(),
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
@@ -4683,6 +4723,7 @@ impl App {
             Pane::Versions => Some(&mut self.apprun.version_state),
             Pane::Servers => Some(&mut self.server.server_state),
             Pane::SshKeys => Some(&mut self.ssh_key.state),
+            Pane::Nics => Some(&mut self.server.nic_state),
             Pane::PacketFilters => Some(&mut self.packet_filter.filter_state),
             Pane::PacketFilterRules => Some(&mut self.packet_filter.rule_state),
             Pane::Switches => Some(&mut self.switch.switch_state),
@@ -4832,6 +4873,13 @@ impl App {
             }),
             // 公開鍵は貼り付けて使うので、鍵そのものをコピーする。
             Pane::SshKeys => self.selected_ssh_key().map(|key| key.public_key),
+            Pane::Nics => self.selected_nic().map(|nic| {
+                if nic.ip_address.is_empty() {
+                    nic.mac_address
+                } else {
+                    nic.ip_address
+                }
+            }),
             Pane::PacketFilters => self
                 .selected_packet_filter()
                 .map(|filter| filter.id.to_string()),
@@ -5589,6 +5637,7 @@ impl App {
             ConfirmAction::DeletePacketFilterRule { id, index } => {
                 self.run_delete_packet_filter_rule(id, index)
             }
+            ConfirmAction::DeleteNic { zone, id, name } => self.run_delete_nic(zone, id, name),
             ConfirmAction::DisconnectDisk {
                 zone,
                 id,
@@ -6277,6 +6326,18 @@ impl App {
                     self.overlay = Some(Overlay::RuleForm(form));
                 }
             },
+            Overlay::NicPicker(mut picker) => {
+                let choices = self.server_choices();
+                let visible = picker.visible(&choices).len();
+                match key.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Enter => self.submit_nic_picker(picker),
+                    _ => {
+                        edit_nic_picker(&mut picker, key, visible);
+                        self.overlay = Some(Overlay::NicPicker(picker));
+                    }
+                }
+            }
             Overlay::ServerChoicePicker(mut picker) => {
                 let choices = self.server_choices();
                 let visible = picker.visible(&choices);

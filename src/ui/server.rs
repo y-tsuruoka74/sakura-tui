@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Wrap};
 
 use super::{DIM, accent, border_style, field, format_datetime, placeholder};
-use crate::app::{App, Loadable};
+use crate::app::{App, ListFocus, Loadable};
 use crate::iaas::PowerStatus;
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -25,8 +25,83 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
         ])
         .split(area);
 
+    // 左は一覧、右は詳細と NIC を縦に分ける。NIC は数が少ないので下に置く。
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(NIC_PANE_HEIGHT)])
+        .split(chunks[2]);
+
     draw_list(frame, chunks[0], app);
-    draw_detail(frame, chunks[2], app);
+    draw_detail(frame, right[0], app);
+    draw_nics(frame, right[1], app);
+}
+
+/// NIC ペインの高さ。枠と見出しに 3 行、NIC 4 枚ぶんで足りる。
+const NIC_PANE_HEIGHT: u16 = 8;
+
+fn draw_nics(frame: &mut Frame, area: Rect, app: &mut App) {
+    let focused = app.server.focus == ListFocus::Right;
+    let nics = app.visible_nics();
+    let block = Block::bordered()
+        .title(Span::styled(
+            format!(" NIC ({}) ", nics.len()),
+            if focused {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(DIM)
+            },
+        ))
+        .border_style(border_style(focused));
+
+    if app.selected_server().is_none() {
+        frame.render_widget(placeholder("").block(block), area);
+        return;
+    }
+    if nics.is_empty() {
+        frame.render_widget(
+            placeholder("NIC がありません（Tab で移り、書き込みモードで n）").block(block),
+            area,
+        );
+        return;
+    }
+
+    let rows = nics.iter().map(|nic| {
+        Row::new(vec![
+            Cell::from(nic.name()),
+            Cell::from(nic.connection.label()),
+            Cell::from(if nic.ip_address.is_empty() {
+                Span::styled("—", Style::default().fg(DIM))
+            } else {
+                Span::raw(nic.ip_address.clone())
+            }),
+            Cell::from(match &nic.packet_filter {
+                Some(name) => Span::raw(name.clone()),
+                None => Span::styled("—", Style::default().fg(DIM)),
+            }),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(5),
+            Constraint::Min(12),
+            Constraint::Length(16),
+            Constraint::Length(16),
+        ],
+    )
+    .header(
+        Row::new(vec!["NIC", "接続先", "IPアドレス", "フィルタ"])
+            .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+    )
+    .row_highlight_style(if focused {
+        Style::default()
+            .fg(accent())
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    })
+    .block(block);
+    frame.render_stateful_widget(table, area, &mut app.server.nic_state);
 }
 
 /// 電源状態の色。起動中は緑、停止は灰、処理中は黄。
@@ -47,7 +122,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
             format!(" サーバー — {} ({count}) ", app.zone),
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         ))
-        .border_style(border_style(true));
+        .border_style(border_style(app.server.focus == ListFocus::Left));
 
     match &servers {
         Loadable::Idle | Loadable::Loading => {
@@ -148,9 +223,6 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
     for (i, disk) in server.disk_names.iter().enumerate() {
         lines.push(field(&format!("ディスク {}", i + 1), disk));
-    }
-    if let Some(filter) = &server.packet_filter_name {
-        lines.push(field("フィルタ", filter));
     }
     if !server.description.is_empty() {
         lines.push(field("説明", &server.description));

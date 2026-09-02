@@ -122,8 +122,59 @@ pub struct Server {
     pub disk_names: Vec<String>,
     /// eth0 に付いているパケットフィルタの名前。
     pub packet_filter_name: Option<String>,
+    pub nics: Vec<Nic>,
     pub zone: String,
     pub created_at: Option<String>,
+}
+
+/// サーバーの NIC。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nic {
+    pub id: ResourceId,
+    /// `eth0` のような並び順。
+    pub index: usize,
+    pub connection: NicConnection,
+    /// 割り当てられている IP。共有セグメントは自動、スイッチは自分で決めた値。
+    pub ip_address: String,
+    pub mac_address: String,
+    /// 付いているパケットフィルタの名前。外すのに ID は要らない。
+    pub packet_filter: Option<String>,
+}
+
+impl Nic {
+    pub fn name(&self) -> String {
+        format!("eth{}", self.index)
+    }
+}
+
+/// 今の NIC の繋ぎ先。名前を出すためだけに使う。
+///
+/// 繋ぎ替えの指定は [`NicAttach`] のほうを使う。読むときは ID が
+/// 応答に無いこともあるが、繋ぎ替えでは必ず要るため、型を分けている。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NicConnection {
+    Shared,
+    Switch(String),
+    None,
+}
+
+impl NicConnection {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Shared => "共有セグメント".to_string(),
+            Self::Switch(name) if name.is_empty() => "スイッチ".to_string(),
+            Self::Switch(name) => name.clone(),
+            Self::None => "未接続".to_string(),
+        }
+    }
+}
+
+/// NIC の繋ぎ替え先。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NicAttach {
+    Shared,
+    Switch(ResourceId),
+    None,
 }
 
 impl Server {
@@ -242,6 +293,10 @@ struct NakedInstance {
 
 #[derive(Debug, Deserialize)]
 struct NakedInterface {
+    // 応答に無いことは実際には無いが、1枚欠けただけで一覧全部が
+    // 読めなくなるのは困るので、無ければその NIC を飛ばす。
+    #[serde(rename = "ID")]
+    id: Option<ResourceId>,
     #[serde(rename = "IPAddress", default, deserialize_with = "null_as_default")]
     ip_address: String,
     #[serde(
@@ -250,8 +305,21 @@ struct NakedInterface {
         deserialize_with = "null_as_default"
     )]
     user_ip_address: String,
+    #[serde(rename = "MACAddress", default, deserialize_with = "null_as_default")]
+    mac_address: String,
+    #[serde(rename = "Switch")]
+    switch: Option<NakedNicSwitch>,
     #[serde(rename = "PacketFilter")]
     packet_filter: Option<NakedNamed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NakedNicSwitch {
+    #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
+    name: String,
+    /// `shared` なら共有セグメント。
+    #[serde(rename = "Scope", default, deserialize_with = "null_as_default")]
+    scope: String,
 }
 
 /// 名前だけ使う入れ子。
@@ -283,12 +351,35 @@ impl From<NakedServer> for Server {
             plan_name: plan.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
             cpu: plan.as_ref().map_or(0, |p| p.cpu),
             memory_mb: plan.map_or(0, |p| p.memory_mb),
-            // フィルタは NIC ごとに付くが、画面には eth0 のものだけ出す。
+            // フィルタは NIC ごとに付くが、一覧の隣には eth0 のものだけ出す。
             packet_filter_name: naked
                 .interfaces
                 .first()
                 .and_then(|nic| nic.packet_filter.as_ref())
                 .map(|f| f.name.clone()),
+            nics: naked
+                .interfaces
+                .iter()
+                .enumerate()
+                .filter_map(|(index, nic)| {
+                    Some(Nic {
+                        id: nic.id?,
+                        index,
+                        connection: match &nic.switch {
+                            None => NicConnection::None,
+                            Some(sw) if sw.scope == "shared" => NicConnection::Shared,
+                            Some(sw) => NicConnection::Switch(sw.name.clone()),
+                        },
+                        ip_address: if nic.ip_address.is_empty() {
+                            nic.user_ip_address.clone()
+                        } else {
+                            nic.ip_address.clone()
+                        },
+                        mac_address: nic.mac_address.clone(),
+                        packet_filter: nic.packet_filter.as_ref().map(|f| f.name.clone()),
+                    })
+                })
+                .collect(),
             ip_addresses: naked
                 .interfaces
                 .iter()
@@ -455,6 +546,48 @@ mod tests {
                 availability: "available".to_string(),
             })
             .collect()
+    }
+
+    /// NIC を接続先つきで読めること。共有セグメントとスイッチを取り違えない。
+    #[test]
+    fn nics_report_where_they_are_connected() {
+        let value = serde_json::json!({"ID": "1", "Name": "web", "Interfaces": [
+            {"ID": "10", "IPAddress": "203.0.113.5", "MACAddress": "9c:a3:xx",
+             "Switch": {"ID": "1", "Name": "共有セグメント", "Scope": "shared"}},
+            {"ID": "11", "UserIPAddress": "192.168.0.10",
+             "Switch": {"ID": "77", "Name": "sw-01", "Scope": "user"},
+             "PacketFilter": {"ID": "9", "Name": "web-filter"}},
+            {"ID": "12"}
+        ]});
+        let server: Server = serde_json::from_value::<NakedServer>(value).unwrap().into();
+        assert_eq!(server.nics.len(), 3);
+        assert_eq!(server.nics[0].name(), "eth0");
+        assert_eq!(server.nics[0].connection, NicConnection::Shared);
+        assert_eq!(server.nics[0].ip_address, "203.0.113.5");
+        // スイッチ接続は UserIPAddress のほうに入る。
+        assert_eq!(
+            server.nics[1].connection,
+            NicConnection::Switch("sw-01".to_string())
+        );
+        assert_eq!(server.nics[1].ip_address, "192.168.0.10");
+        assert_eq!(server.nics[1].packet_filter.as_deref(), Some("web-filter"));
+        // どこにも繋がっていない NIC。
+        assert_eq!(server.nics[2].connection, NicConnection::None);
+        assert_eq!(server.nics[2].connection.label(), "未接続");
+    }
+
+    /// ID の無い NIC があっても、他が読めなくならないこと。
+    #[test]
+    fn a_nic_without_an_id_is_skipped_not_fatal() {
+        let value = serde_json::json!({"ID": "1", "Name": "web", "Interfaces": [
+            {"IPAddress": "203.0.113.5"},
+            {"ID": "11", "IPAddress": "203.0.113.6"}
+        ]});
+        let server: Server = serde_json::from_value::<NakedServer>(value).unwrap().into();
+        // 操作できない NIC は落とすが、IP の一覧には残す。
+        assert_eq!(server.nics.len(), 1);
+        assert_eq!(server.nics[0].id, ResourceId(11));
+        assert_eq!(server.ip_addresses, ["203.0.113.5", "203.0.113.6"]);
     }
 
     /// eth0 のパケットフィルタを詳細に出せること。
@@ -1329,6 +1462,69 @@ impl SacloudClient {
         (progress, Ok(server_id))
     }
 
+    /// サーバーに NIC を1枚足す。追加できるのは停止中のときだけ。
+    pub async fn add_nic(&self, zone: &str, server_id: ResourceId) -> Result<ResourceId> {
+        let body = json!({ "Interface": { "Server": { "ID": server_id.0 } } });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "interface", Some(body))
+            .await?;
+        value
+            .pointer("/Interface/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("NICの追加応答にIDがありませんでした"))
+    }
+
+    pub async fn delete_nic(&self, zone: &str, nic_id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::DELETE, &format!("interface/{nic_id}"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// NIC の繋ぎ先を変える。共有セグメントだけパスが別。
+    pub async fn connect_nic(&self, zone: &str, nic_id: ResourceId, to: NicAttach) -> Result<()> {
+        let path = match to {
+            NicAttach::Shared => format!("interface/{nic_id}/to/switch/shared"),
+            NicAttach::Switch(id) => format!("interface/{nic_id}/to/switch/{id}"),
+            NicAttach::None => return self.disconnect_nic(zone, nic_id).await,
+        };
+        let _: serde_json::Value = self.request_in_zone(zone, Method::PUT, &path, None).await?;
+        Ok(())
+    }
+
+    pub async fn disconnect_nic(&self, zone: &str, nic_id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(
+                zone,
+                Method::DELETE,
+                &format!("interface/{nic_id}/to/switch"),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// NIC にパケットフィルタを付ける。`None` なら外す。
+    pub async fn set_nic_packet_filter(
+        &self,
+        zone: &str,
+        nic_id: ResourceId,
+        filter_id: Option<ResourceId>,
+    ) -> Result<()> {
+        let (method, path) = match filter_id {
+            Some(id) => (
+                Method::PUT,
+                format!("interface/{nic_id}/to/packetfilter/{id}"),
+            ),
+            None => (
+                Method::DELETE,
+                format!("interface/{nic_id}/to/packetfilter"),
+            ),
+        };
+        let _: serde_json::Value = self.request_in_zone(zone, method, &path, None).await?;
+        Ok(())
+    }
+
     /// eth0 にパケットフィルタを付ける。
     ///
     /// フィルタは NIC 単位なので、サーバーを作ってから最初の NIC の ID を
@@ -1348,15 +1544,8 @@ impl SacloudClient {
         else {
             return Ok(());
         };
-        let _: serde_json::Value = self
-            .request_in_zone(
-                zone,
-                Method::PUT,
-                &format!("interface/{interface_id}/to/packetfilter/{filter_id}"),
-                None,
-            )
-            .await?;
-        Ok(())
+        self.set_nic_packet_filter(zone, interface_id, Some(filter_id))
+            .await
     }
 
     /// スタートアップスクリプト（Note）の一覧。

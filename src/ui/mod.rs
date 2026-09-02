@@ -570,10 +570,14 @@ fn draw_hints(frame: &mut Frame, area: Rect, app: &App) {
         }
         Service::Server => {
             hints.push("z ゾーン");
+            hints.push("Tab サーバー/NIC");
             if app.mode == Mode::Write {
                 hints.extend([
                     "n 作成",
                     "D 削除",
+                    "P プラン変更",
+                    "c NIC接続先",
+                    "f NICフィルタ",
                     "b 起動",
                     "x 停止",
                     "X 強制停止",

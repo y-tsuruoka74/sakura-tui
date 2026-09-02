@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::{Loadable, matches};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::IamCredentials;
-use crate::iaas::{DiskPlan, ServerPlan, StartupScript, Zone};
+use crate::iaas::{DiskPlan, Nic, ServerPlan, StartupScript, Zone};
 use crate::monitoring::{
     AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule, LogMeasureRuleInput,
     LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput, NotificationRouting,
@@ -940,6 +940,78 @@ pub(super) fn edit_server_choice_picker(
     key: KeyEvent,
     visible: usize,
 ) {
+    match key.code {
+        KeyCode::Down => picker.move_selection(true, visible),
+        KeyCode::Up => picker.move_selection(false, visible),
+        KeyCode::Backspace => {
+            let mut filter = picker.filter.clone();
+            filter.pop();
+            picker.set_filter(filter);
+        }
+        KeyCode::Char(c) => {
+            let filter = format!("{}{c}", picker.filter);
+            picker.set_filter(filter);
+        }
+        _ => {}
+    }
+}
+
+/// NIC の繋ぎ先かパケットフィルタを、絞り込みながら選ぶ画面。
+///
+/// 候補は作成フォームと同じ一覧を使う。
+#[derive(Debug, Clone)]
+pub struct NicPicker {
+    pub target: NicTarget,
+    pub server_name: String,
+    pub nic: Nic,
+    pub filter: String,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NicTarget {
+    Connection,
+    PacketFilter,
+}
+
+impl NicTarget {
+    /// 候補の出どころ。作成フォームの同じ欄を使い回す。
+    fn field(self) -> ServerField {
+        match self {
+            Self::Connection => ServerField::Nic,
+            Self::PacketFilter => ServerField::PacketFilter,
+        }
+    }
+}
+
+impl NicPicker {
+    pub fn title(&self) -> String {
+        let what = match self.target {
+            NicTarget::Connection => "接続先",
+            NicTarget::PacketFilter => "パケットフィルタ",
+        };
+        format!("{} の{what} — {}", self.nic.name(), self.server_name)
+    }
+
+    pub fn visible(&self, choices: &ServerChoices) -> Vec<ChoiceRow> {
+        choices
+            .rows(self.target.field())
+            .into_iter()
+            .filter(|row| matches(&self.filter, &row.haystack()))
+            .collect()
+    }
+
+    pub fn move_selection(&mut self, forward: bool, len: usize) {
+        self.index = cycle(self.index, len, forward);
+    }
+
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.index = 0;
+    }
+}
+
+pub(super) fn edit_nic_picker(picker: &mut NicPicker, key: KeyEvent, visible: usize) {
     match key.code {
         KeyCode::Down => picker.move_selection(true, visible),
         KeyCode::Up => picker.move_selection(false, visible),
