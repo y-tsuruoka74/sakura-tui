@@ -5,7 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::Loadable;
+use crate::app::{Loadable, matches};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::IamCredentials;
 use crate::iaas::{DiskPlan, ServerPlan, StartupScript, Zone};
@@ -769,6 +769,189 @@ impl ServerCreateForm {
                 .or_else(|| disk_sizes.first().copied())
                 .unwrap_or(0);
         }
+    }
+}
+
+/// 一覧から選ぶ画面に出す1件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceRow {
+    /// 元の一覧での位置。フォームに書き戻すのに使う。
+    pub position: usize,
+    pub label: String,
+    /// 種類や所有者など、名前の右に出す短い情報。
+    pub detail: String,
+    /// 何をするものかの説明。選んでいる行にだけ出す。
+    pub note: String,
+}
+
+impl ChoiceRow {
+    /// 絞り込みで見る文字列。
+    pub fn haystack(&self) -> [&str; 3] {
+        [&self.label, &self.detail, &self.note]
+    }
+}
+
+/// 候補が多い欄を、絞り込みながら選ぶ画面。
+///
+/// 左右キーで1件ずつ送るのは、スタートアップスクリプトのように数十件ある欄では
+/// 現実的でないため、名前で絞れるようにする。
+#[derive(Debug, Clone)]
+pub struct ServerChoicePicker {
+    /// 選び終えたら戻すフォーム。
+    pub form: Box<ServerCreateForm>,
+    /// どの欄を選んでいるか。
+    pub target: ServerField,
+    pub filter: String,
+    /// 絞り込んだあとの一覧での位置。
+    pub index: usize,
+}
+
+impl ServerChoicePicker {
+    pub fn title(&self) -> String {
+        format!("{}を選ぶ", self.target.label())
+    }
+
+    /// 絞り込んだ候補。
+    pub fn visible(&self, choices: &ServerChoices) -> Vec<ChoiceRow> {
+        choices
+            .rows(self.target)
+            .into_iter()
+            .filter(|row| matches(&self.filter, &row.haystack()))
+            .collect()
+    }
+
+    pub fn move_selection(&mut self, forward: bool, len: usize) {
+        self.index = cycle(self.index, len, forward);
+    }
+
+    /// 絞り込みを変えたら、選択位置を先頭に戻す。
+    /// そのままだと、絞った結果の見えていない行を選んだままになる。
+    pub fn set_filter(&mut self, filter: String) {
+        self.filter = filter;
+        self.index = 0;
+    }
+}
+
+impl ServerChoices {
+    /// その欄で選べるものを、一覧に出す形で返す。
+    pub fn rows(&self, target: ServerField) -> Vec<ChoiceRow> {
+        match target {
+            ServerField::Nic => self
+                .nics
+                .iter()
+                .enumerate()
+                .map(|(position, nic)| ChoiceRow {
+                    position,
+                    label: nic.label(),
+                    detail: match nic {
+                        NicChoice::Switch(id, _) => id.to_string(),
+                        _ => String::new(),
+                    },
+                    note: String::new(),
+                })
+                .collect(),
+            ServerField::PacketFilter => self
+                .packet_filters
+                .iter()
+                .enumerate()
+                .map(|(position, filter)| match filter {
+                    None => ChoiceRow {
+                        position,
+                        label: "なし".to_string(),
+                        detail: String::new(),
+                        note: String::new(),
+                    },
+                    Some((id, name)) => ChoiceRow {
+                        position,
+                        label: name.clone(),
+                        detail: id.to_string(),
+                        note: String::new(),
+                    },
+                })
+                .collect(),
+            ServerField::StartupScript => self
+                .startup_scripts
+                .iter()
+                .enumerate()
+                .map(|(position, script)| match script {
+                    None => ChoiceRow {
+                        position,
+                        label: "なし".to_string(),
+                        detail: String::new(),
+                        note: String::new(),
+                    },
+                    Some(script) => ChoiceRow {
+                        position,
+                        label: script.name.clone(),
+                        detail: format!(
+                            "{} · {}",
+                            if script.is_own() { "自分" } else { "共有" },
+                            script.class
+                        ),
+                        // 説明とタグを検索の手がかりにする。
+                        note: [script.description.clone(), script.tags.join(" ")]
+                            .iter()
+                            .filter(|s| !s.is_empty())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("  "),
+                    },
+                })
+                .collect(),
+            // 候補が短い欄は左右キーで足りるので一覧を出さない。
+            _ => Vec::new(),
+        }
+    }
+
+    /// その欄が一覧から選ぶ形式か。
+    pub fn is_list_field(target: ServerField) -> bool {
+        matches!(
+            target,
+            ServerField::Nic | ServerField::PacketFilter | ServerField::StartupScript
+        )
+    }
+}
+
+impl ServerCreateForm {
+    /// 一覧で選んだものを欄に書き戻す。
+    pub fn take_choice(&mut self, target: ServerField, position: usize) {
+        match target {
+            ServerField::Nic => self.nic = position,
+            ServerField::PacketFilter => self.packet_filter = position,
+            ServerField::StartupScript => self.startup_script = position,
+            _ => {}
+        }
+    }
+
+    /// その欄で今選んでいる位置。
+    pub fn choice_position(&self, target: ServerField) -> usize {
+        match target {
+            ServerField::Nic => self.nic,
+            ServerField::PacketFilter => self.packet_filter,
+            ServerField::StartupScript => self.startup_script,
+            _ => 0,
+        }
+    }
+}
+
+pub(super) fn edit_server_choice_picker(
+    picker: &mut ServerChoicePicker,
+    key: KeyEvent,
+    visible: usize,
+) {
+    match key.code {
+        KeyCode::Down => picker.move_selection(true, visible),
+        KeyCode::Up => picker.move_selection(false, visible),
+        KeyCode::Backspace => {
+            let mut filter = picker.filter.clone();
+            filter.pop();
+            picker.set_filter(filter);
+        }
+        KeyCode::Char(c) => {
+            let filter = format!("{}{c}", picker.filter);
+            picker.set_filter(filter);
+        }
+        _ => {}
     }
 }
 
@@ -2648,6 +2831,7 @@ pub(super) fn edit_login_form(form: &mut LoginForm, key: KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::iaas::StartupScript;
     use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
 
     fn plans() -> Vec<ServerPlan> {
@@ -2790,6 +2974,96 @@ mod tests {
         assert_eq!(choices.nic(form.nic), NicChoice::None);
         assert!(!form.fields(&choices).contains(&ServerField::IpAddress));
         assert_eq!(form.current(&choices), ServerField::Nic);
+    }
+
+    fn script_choices() -> ServerChoices {
+        let script = |id: u64, name: &str, own: bool, description: &str| {
+            Some(StartupScript {
+                id: ResourceId(id),
+                name: name.to_string(),
+                class: "shell".to_string(),
+                scope: if own { "user" } else { "shared" }.to_string(),
+                description: description.to_string(),
+                tags: Vec::new(),
+            })
+        };
+        ServerChoices {
+            startup_scripts: vec![
+                None,
+                script(1, "自分の初期設定", true, "パッケージを入れる"),
+                script(2, "WordPress", false, "WordPressを入れる"),
+                script(3, "Redmine", false, "Redmineを入れる"),
+            ],
+            ..server_choices()
+        }
+    }
+
+    /// 名前でも説明でも絞り込めること。数十件から目当てを探せるようにする。
+    #[test]
+    fn the_picker_narrows_by_name_and_by_description() {
+        let choices = script_choices();
+        let mut picker = ServerChoicePicker {
+            form: Box::new(ServerCreateForm::default()),
+            target: ServerField::StartupScript,
+            filter: String::new(),
+            index: 0,
+        };
+        assert_eq!(picker.visible(&choices).len(), 4);
+
+        picker.set_filter("word".to_string());
+        let rows = picker.visible(&choices);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "WordPress");
+        // 元の一覧での位置を持ち回るので、絞り込んでも正しい値を選べる。
+        assert_eq!(rows[0].position, 2);
+
+        // 説明にしか出てこない語でも見つかる。
+        picker.set_filter("パッケージ".to_string());
+        assert_eq!(picker.visible(&choices)[0].label, "自分の初期設定");
+    }
+
+    /// 絞り込みを変えたら選択位置を先頭へ戻すこと。
+    /// 残したままだと、見えていない行を選んだまま決定してしまう。
+    #[test]
+    fn narrowing_resets_the_selection() {
+        let mut picker = ServerChoicePicker {
+            form: Box::new(ServerCreateForm::default()),
+            target: ServerField::StartupScript,
+            filter: String::new(),
+            index: 3,
+        };
+        picker.set_filter("word".to_string());
+        assert_eq!(picker.index, 0);
+    }
+
+    /// 一覧で選んだものが欄に戻ること。
+    #[test]
+    fn the_picker_writes_the_choice_back_to_the_form() {
+        let choices = script_choices();
+        let mut form = ServerCreateForm::default();
+        assert_eq!(form.choice_position(ServerField::StartupScript), 0);
+        form.take_choice(ServerField::StartupScript, 2);
+        assert_eq!(form.choice_position(ServerField::StartupScript), 2);
+        assert_eq!(
+            choices.startup_script(form.startup_script).unwrap().name,
+            "WordPress"
+        );
+    }
+
+    /// 候補が少ない欄では一覧を出さないこと。
+    #[test]
+    fn only_the_long_lists_get_a_picker() {
+        for target in [
+            ServerField::Nic,
+            ServerField::PacketFilter,
+            ServerField::StartupScript,
+        ] {
+            assert!(ServerChoices::is_list_field(target), "{target:?}");
+        }
+        for target in [ServerField::Cpu, ServerField::Os, ServerField::Name] {
+            assert!(!ServerChoices::is_list_field(target), "{target:?}");
+            assert!(server_choices().rows(target).is_empty());
+        }
     }
 
     /// パケットフィルタとスタートアップスクリプトは「なし」が既定。

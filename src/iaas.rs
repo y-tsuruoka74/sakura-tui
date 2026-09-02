@@ -485,13 +485,25 @@ mod tests {
     #[test]
     fn startup_scripts_come_from_the_notes_list() {
         let value = serde_json::json!({"Notes": [
-            {"ID": "1", "Name": "初期設定", "Class": "shell"},
-            {"ID": 2, "Name": "cloud-init", "Class": "yaml_cloud_config"}
+            {"ID": "1", "Name": "さくら提供", "Class": "shell", "Scope": "shared"},
+            {"ID": 9, "Name": "パケットフィルタのひな形", "Class": "json_packetfilter"},
+            {"ID": 10, "Name": "Terraformのひな形", "Class": "hcl_terraform"},
+            {"ID": 2, "Name": "cloud-init", "Class": "yaml_cloud_config", "Scope": "shared"},
+            {"ID": 3, "Name": "自分の初期設定", "Class": "shell", "Scope": "user",
+             "Description": "パッケージを入れる", "Tags": ["web"]}
         ]});
         let scripts = parse_startup_scripts(&value);
-        assert_eq!(scripts.len(), 2);
-        assert_eq!(scripts[0].name, "初期設定");
-        assert_eq!(scripts[1].class, "yaml_cloud_config");
+        // 流せない種別は落とす。
+        assert_eq!(scripts.len(), 3);
+        assert!(!scripts.iter().any(|s| s.class == "hcl_terraform"));
+        // 自分で作ったものが先頭に来る。共有のものに埋もれさせない。
+        assert_eq!(scripts[0].name, "自分の初期設定");
+        assert!(scripts[0].is_own());
+        assert_eq!(scripts[0].description, "パッケージを入れる");
+        assert_eq!(scripts[0].tags, ["web"]);
+        // 残りは名前順。
+        assert_eq!(scripts[1].name, "cloud-init");
+        assert!(!scripts[1].is_own());
     }
 
     /// 公開鍵は本体が無いものを捨て、名前が空でも指紋で見分けられること。
@@ -783,6 +795,18 @@ pub struct StartupScript {
     pub name: String,
     /// `shell` / `yaml_cloud_config` など。
     pub class: String,
+    /// `user`（自分で作ったもの）か `shared`（さくらの公開スクリプト）。
+    pub scope: String,
+    /// 本文から作られる要約。何をするスクリプトかの手がかりになる。
+    pub description: String,
+    pub tags: Vec<String>,
+}
+
+impl StartupScript {
+    /// 自分で作ったものか。共有のものより先に出す。
+    pub fn is_own(&self) -> bool {
+        self.scope == "user"
+    }
 }
 
 /// アカウントに登録済みの SSH 公開鍵。
@@ -958,6 +982,12 @@ struct NakedNote {
     name: String,
     #[serde(rename = "Class", default, deserialize_with = "null_as_default")]
     class: String,
+    #[serde(rename = "Scope", default, deserialize_with = "null_as_default")]
+    scope: String,
+    #[serde(rename = "Description", default, deserialize_with = "null_as_default")]
+    description: String,
+    #[serde(rename = "Tags", default, deserialize_with = "null_as_default")]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1028,18 +1058,36 @@ fn parse_server_plans(value: &serde_json::Value) -> Vec<ServerPlan> {
     plans
 }
 
+/// Note のうち、サーバー作成で流せないもの。
+const NOT_STARTUP_SCRIPT_CLASSES: [&str; 2] = ["json_packetfilter", "hcl_terraform"];
+
 fn parse_startup_scripts(value: &serde_json::Value) -> Vec<StartupScript> {
     let raw: Vec<NakedNote> = value
         .get("Notes")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    raw.into_iter()
+    let mut scripts: Vec<StartupScript> = raw
+        .into_iter()
+        // Note にはパケットフィルタや Terraform のひな形も入っている。
+        // ディスクの修正で流せないものは出しても選べないので落とす。
+        // 知らない種別は残す（増えたときに黙って消えない方がよい）。
+        .filter(|n| !NOT_STARTUP_SCRIPT_CLASSES.contains(&n.class.as_str()))
         .map(|n| StartupScript {
             id: n.id,
             name: n.name,
             class: n.class,
+            scope: n.scope,
+            description: n.description,
+            tags: n.tags,
         })
-        .collect()
+        .collect();
+    // 自分で作ったものを先に出す。共有のものは数十件あって埋もれる。
+    scripts.sort_by(|a, b| {
+        b.is_own()
+            .cmp(&a.is_own())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    scripts
 }
 
 fn parse_ssh_keys(value: &serde_json::Value) -> Vec<SshKey> {

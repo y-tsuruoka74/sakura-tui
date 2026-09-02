@@ -996,6 +996,7 @@ pub enum Overlay {
     SwitchForm(SwitchForm),
     RagUploadForm(RagUploadForm),
     ServerCreateForm(ServerCreateForm),
+    ServerChoicePicker(ServerChoicePicker),
     ServerPlanForm(ServerPlanForm),
     SshKeyForm(SshKeyForm),
     DiskCreateForm(DiskCreateForm),
@@ -6146,6 +6147,26 @@ impl App {
                 {
                     self.open_ssh_key_picker(SshKeyReturn::ServerCreate(form));
                 }
+                // 候補が多い欄は、左右キーではなく絞り込みで選ぶ。
+                KeyCode::Char('/')
+                    if ServerChoices::is_list_field(form.current(&self.server_choices())) =>
+                {
+                    let choices = self.server_choices();
+                    let target = form.current(&choices);
+                    // 今えらんでいるものに合わせて開く。開き直すたびに先頭へ
+                    // 戻ると、確認して閉じただけで選択が変わってしまう。
+                    let index = choices
+                        .rows(target)
+                        .iter()
+                        .position(|row| row.position == form.choice_position(target))
+                        .unwrap_or(0);
+                    self.overlay = Some(Overlay::ServerChoicePicker(ServerChoicePicker {
+                        target,
+                        index,
+                        filter: String::new(),
+                        form: Box::new(form),
+                    }));
+                }
                 _ => {
                     let choices = self.server_choices();
                     edit_server_create_form(&mut form, key, &choices);
@@ -6176,6 +6197,27 @@ impl App {
                     self.overlay = Some(Overlay::SshKeyForm(form));
                 }
             },
+            Overlay::ServerChoicePicker(mut picker) => {
+                let choices = self.server_choices();
+                let visible = picker.visible(&choices);
+                match key.code {
+                    // 絞り込みは捨てて、選んでいたものはそのまま戻す。
+                    KeyCode::Esc => {
+                        self.overlay = Some(Overlay::ServerCreateForm(*picker.form));
+                    }
+                    KeyCode::Enter => {
+                        let mut form = picker.form;
+                        if let Some(row) = visible.get(picker.index) {
+                            form.take_choice(picker.target, row.position);
+                        }
+                        self.overlay = Some(Overlay::ServerCreateForm(*form));
+                    }
+                    _ => {
+                        edit_server_choice_picker(&mut picker, key, visible.len());
+                        self.overlay = Some(Overlay::ServerChoicePicker(picker));
+                    }
+                }
+            }
             Overlay::DiskCreateForm(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => self.submit_disk_create_form(form),
