@@ -1307,6 +1307,167 @@ pub(super) fn edit_rule_form(form: &mut RuleForm, key: KeyEvent) {
     }
 }
 
+/// 自動バックアップの作成・編集フォーム。
+///
+/// 対象ディスクは作成後に変えられないので、編集では欄を出さない。
+#[derive(Debug, Clone)]
+pub struct AutoBackupForm {
+    pub mode: AutoBackupFormMode,
+    pub id: Option<ResourceId>,
+    pub name: String,
+    /// 対象ディスクの添字。編集では使わない。
+    pub source: usize,
+    /// 曜日ごとの取得有無。並びは [`crate::commonservice::BACKUP_WEEKDAYS`]。
+    pub weekdays: [bool; 7],
+    /// 曜日の欄で今どこにいるか。左右で動かし、Space で切り替える。
+    pub weekday_cursor: usize,
+    pub generations: u32,
+    pub field: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoBackupFormMode {
+    Create,
+    Edit,
+}
+
+/// 自動バックアップの入力欄。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoBackupField {
+    Name,
+    Disk,
+    Weekdays,
+    Generations,
+}
+
+impl AutoBackupField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "名前",
+            Self::Disk => "対象ディスク",
+            Self::Weekdays => "取得する曜日",
+            Self::Generations => "残す世代数",
+        }
+    }
+}
+
+/// 世代数として指定できる値。API が受け付ける範囲。
+pub const BACKUP_GENERATIONS: [u32; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+/// 曜日の日本語表記。並びは [`crate::commonservice::BACKUP_WEEKDAYS`] と同じ。
+pub const WEEKDAY_LABELS: [&str; 7] = ["日", "月", "火", "水", "木", "金", "土"];
+
+impl Default for AutoBackupForm {
+    fn default() -> Self {
+        Self {
+            mode: AutoBackupFormMode::Create,
+            id: None,
+            name: String::new(),
+            source: 0,
+            // 既定は毎日。取り忘れより取りすぎのほうが安全。
+            weekdays: [true; 7],
+            weekday_cursor: 0,
+            generations: 3,
+            field: 0,
+        }
+    }
+}
+
+impl AutoBackupForm {
+    pub fn fields(&self) -> Vec<AutoBackupField> {
+        match self.mode {
+            AutoBackupFormMode::Create => vec![
+                AutoBackupField::Name,
+                AutoBackupField::Disk,
+                AutoBackupField::Weekdays,
+                AutoBackupField::Generations,
+            ],
+            AutoBackupFormMode::Edit => vec![
+                AutoBackupField::Name,
+                AutoBackupField::Weekdays,
+                AutoBackupField::Generations,
+            ],
+        }
+    }
+
+    pub fn current(&self) -> AutoBackupField {
+        self.fields()
+            .get(self.field)
+            .copied()
+            .unwrap_or(AutoBackupField::Name)
+    }
+
+    /// 曜日の欄で今どの曜日にいるか。左右で移動し、Space で切り替える。
+    pub fn weekday_cursor(&self) -> usize {
+        self.weekday_cursor.min(WEEKDAY_LABELS.len() - 1)
+    }
+
+    /// 選んだ曜日を API に送る形にする。
+    pub fn selected_weekdays(&self) -> Vec<String> {
+        crate::commonservice::BACKUP_WEEKDAYS
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.weekdays[*i])
+            .map(|(_, day)| day.to_string())
+            .collect()
+    }
+
+    /// 曜日の表示。1つも選んでいなければそれと分かるようにする。
+    pub fn weekday_label(&self) -> String {
+        if self.weekdays.iter().all(|on| !on) {
+            return "（1つ以上選んでください）".to_string();
+        }
+        WEEKDAY_LABELS
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                if self.weekdays[i] {
+                    label.to_string()
+                } else {
+                    "・".to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+pub(super) fn edit_auto_backup_form(form: &mut AutoBackupForm, key: KeyEvent, disks: usize) {
+    let count = form.fields().len();
+    let current = form.current();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % count,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + count - 1) % count,
+        KeyCode::Left | KeyCode::Right => {
+            let forward = key.code == KeyCode::Right;
+            match current {
+                AutoBackupField::Disk => form.source = cycle(form.source, disks, forward),
+                // 曜日は7つ並んでいるので、左右は選択のカーソル移動にあてる。
+                AutoBackupField::Weekdays => {
+                    form.weekday_cursor = cycle(form.weekday_cursor, WEEKDAY_LABELS.len(), forward)
+                }
+                AutoBackupField::Generations => {
+                    let at = BACKUP_GENERATIONS
+                        .iter()
+                        .position(|g| *g == form.generations)
+                        .unwrap_or(0);
+                    form.generations =
+                        BACKUP_GENERATIONS[cycle(at, BACKUP_GENERATIONS.len(), forward)];
+                }
+                AutoBackupField::Name => {}
+            }
+        }
+        KeyCode::Char(' ') if current == AutoBackupField::Weekdays => {
+            let at = form.weekday_cursor();
+            form.weekdays[at] = !form.weekdays[at];
+        }
+        KeyCode::Backspace if current == AutoBackupField::Name => {
+            form.name.pop();
+        }
+        KeyCode::Char(c) if current == AutoBackupField::Name => form.name.push(c),
+        _ => {}
+    }
+}
+
 /// ディスクからアーカイブを取るフォーム。
 #[derive(Debug, Clone, Default)]
 pub struct ArchiveForm {
@@ -3802,6 +3963,85 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label, "web-backup");
         assert_eq!(rows[1].detail, "40 GB");
+    }
+
+    /// 曜日は左右で選び、Space で切り替えること。
+    /// 7つ並ぶので、左右を値の切り替えに使うと1つずつしか触れない。
+    #[test]
+    fn weekdays_are_toggled_one_at_a_time() {
+        let mut form = AutoBackupForm::default();
+        // 既定は毎日。取り忘れより取りすぎのほうが安全。
+        assert_eq!(form.selected_weekdays().len(), 7);
+        form.field = form
+            .fields()
+            .iter()
+            .position(|f| *f == AutoBackupField::Weekdays)
+            .unwrap();
+
+        // 日曜を外す。
+        edit_auto_backup_form(&mut form, press(KeyCode::Char(' ')), 1);
+        assert!(!form.weekdays[0]);
+        assert_eq!(
+            form.selected_weekdays(),
+            ["mon", "tue", "wed", "thu", "fri", "sat"]
+        );
+
+        // 右へ動いて月曜も外す。カーソルだけ動いて値は変わらない。
+        edit_auto_backup_form(&mut form, press(KeyCode::Right), 1);
+        assert_eq!(form.weekday_cursor(), 1);
+        assert!(form.weekdays[1], "移動だけでは切り替わらない");
+        edit_auto_backup_form(&mut form, press(KeyCode::Char(' ')), 1);
+        assert_eq!(
+            form.selected_weekdays(),
+            ["tue", "wed", "thu", "fri", "sat"]
+        );
+    }
+
+    /// 1つも選んでいないと分かる表示にすること。
+    #[test]
+    fn no_weekday_selected_is_visible() {
+        let form = AutoBackupForm {
+            weekdays: [false; 7],
+            ..AutoBackupForm::default()
+        };
+        assert!(form.selected_weekdays().is_empty());
+        assert!(form.weekday_label().contains("1つ以上"));
+        // 選んでいる曜日だけ名前を出し、残りは点にする。
+        let some = AutoBackupForm {
+            weekdays: [false, true, false, false, false, true, false],
+            ..AutoBackupForm::default()
+        };
+        assert_eq!(some.weekday_label(), "・月・・・金・");
+    }
+
+    /// 編集では対象ディスクの欄を出さないこと。作成後は変えられない。
+    #[test]
+    fn editing_a_backup_hides_the_disk_field() {
+        let create = AutoBackupForm::default();
+        assert!(create.fields().contains(&AutoBackupField::Disk));
+        let edit = AutoBackupForm {
+            mode: AutoBackupFormMode::Edit,
+            ..AutoBackupForm::default()
+        };
+        assert!(!edit.fields().contains(&AutoBackupField::Disk));
+    }
+
+    /// 世代数は決められた値だけを巡ること。
+    #[test]
+    fn generations_cycle_through_the_allowed_values() {
+        let mut form = AutoBackupForm::default();
+        form.field = form
+            .fields()
+            .iter()
+            .position(|f| *f == AutoBackupField::Generations)
+            .unwrap();
+        assert_eq!(form.generations, 3);
+        edit_auto_backup_form(&mut form, press(KeyCode::Right), 1);
+        assert_eq!(form.generations, 4);
+        // 端では折り返す。
+        form.generations = *BACKUP_GENERATIONS.last().unwrap();
+        edit_auto_backup_form(&mut form, press(KeyCode::Right), 1);
+        assert_eq!(form.generations, BACKUP_GENERATIONS[0]);
     }
 
     /// プラン変更でもコア数を変えたらメモリが追従すること。

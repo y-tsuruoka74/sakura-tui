@@ -3,6 +3,7 @@
 //! 定義と編集操作は `src/app/forms.rs` にあり、ここは見た目だけを持つ。
 
 use super::*;
+use crate::app::WEEKDAY_LABELS;
 use crate::ui::clip;
 
 pub(super) fn draw_user_form(frame: &mut Frame, form: &UserForm) {
@@ -1035,6 +1036,139 @@ pub(super) fn draw_disk_create_form(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog("ディスクの作成", accent())),
+        area,
+    );
+}
+
+/// 自動バックアップのフォーム。
+pub(super) fn draw_auto_backup_form(
+    frame: &mut Frame,
+    form: &AutoBackupForm,
+    app: &crate::app::App,
+) {
+    let disks = app.archive_source_choices();
+    let loading = app.disk.sources.ready().is_none();
+    let title = match form.mode {
+        AutoBackupFormMode::Create => "自動バックアップの作成".to_string(),
+        AutoBackupFormMode::Edit => format!("自動バックアップの編集 — {}", form.name),
+    };
+
+    let boxed = |label: &str, text: String, focused: bool| {
+        let shown = if focused {
+            format!("‹ {text} ›")
+        } else {
+            format!("  {text}  ")
+        };
+        let style = if focused {
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::styled(
+                crate::ui::pad(label, 16),
+                if focused {
+                    style
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
+            Span::styled(shown, style),
+        ])
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, field) in form.fields().iter().enumerate() {
+        let focused = form.field == i;
+        let label = field.label();
+        lines.push(match field {
+            AutoBackupField::Name => input_line_at(label, &form.name, focused, false, 16),
+            AutoBackupField::Disk => boxed(
+                label,
+                match disks.get(form.source) {
+                    Some((_, name)) => clip(name, CHOICE_TEXT_WIDTH),
+                    None if loading => "読み込み中…".to_string(),
+                    None => "このゾーンにディスクがありません".to_string(),
+                },
+                focused,
+            ),
+            // 曜日は7つ並ぶので、選んでいる曜日にだけ印を付ける。
+            AutoBackupField::Weekdays => {
+                let mut spans = vec![Span::styled(
+                    crate::ui::pad(label, 16),
+                    if focused {
+                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM)
+                    },
+                )];
+                for (day, name) in WEEKDAY_LABELS.iter().enumerate() {
+                    let on = form.weekdays[day];
+                    let here = focused && form.weekday_cursor() == day;
+                    let mut style = if on {
+                        Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(DIM)
+                    };
+                    if here {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                    spans.push(Span::styled(
+                        format!(" {} ", if on { *name } else { "・" }),
+                        style,
+                    ));
+                }
+                Line::from(spans)
+            }
+            AutoBackupField::Generations => {
+                boxed(label, format!("{} 世代", form.generations), focused)
+            }
+        });
+    }
+
+    lines.push(Line::raw(""));
+    if form.current() == AutoBackupField::Weekdays {
+        lines.push(Line::from(vec![
+            Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(" で曜日を移り、", Style::default().fg(DIM)),
+            Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " で取る / 取らないを切り替えます。",
+                Style::default().fg(DIM),
+            ),
+        ]));
+    }
+    if form.mode == AutoBackupFormMode::Edit {
+        lines.push(Line::from(Span::styled(
+            "対象のディスクは変更できません。変えるときは作り直してください。",
+            Style::default().fg(DIM),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "取得したアーカイブは世代数を超えた分から消えます。アーカイブは容量分だけ課金されます。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 選択   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 実行   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 78, dialog_height(&lines, 78));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog(&title, accent())),
         area,
     );
 }

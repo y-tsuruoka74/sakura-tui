@@ -866,6 +866,11 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    DeleteAutoBackup {
+        zone: String,
+        id: ResourceId,
+        name: String,
+    },
     DisconnectDisk {
         zone: String,
         id: ResourceId,
@@ -1055,6 +1060,7 @@ pub enum Overlay {
     DiskCreateForm(DiskCreateForm),
     DiskServerPicker(DiskServerPicker),
     ArchiveForm(ArchiveForm),
+    AutoBackupForm(AutoBackupForm),
     /// SSH 公開鍵の取得元と一覧。選び終えたら戻すので、呼び出し元ごと預かる。
     SshKeyPicker {
         back: Box<SshKeyReturn>,
@@ -1330,13 +1336,19 @@ impl App {
     }
 
     /// ディスクなどを書き換えたあと、一覧を引き直させる。
+    ///
+    /// 画面によって一覧の置き場所が違う（ディスクとアーカイブは
+    /// `cloud_resources`、自動バックアップは `managed_resources`）ので、
+    /// 今の画面が使っているほうを捨てる。
     pub(super) fn cloud_resources_invalidate(&mut self) {
-        let Some(kind) = self.cloud_resource_kind() else {
-            return;
-        };
-        self.cloud_resources
-            .items
-            .remove(&(self.zone.clone(), kind));
+        if let Some(kind) = self.cloud_resource_kind() {
+            self.cloud_resources
+                .items
+                .remove(&(self.zone.clone(), kind));
+        }
+        if let Some(kind) = self.managed_resource_kind() {
+            self.managed_resources.items.remove(&kind);
+        }
     }
 
     pub fn selected_cloud_resource(&self) -> Option<CloudResource> {
@@ -3676,8 +3688,8 @@ impl App {
             | Service::Gslb
             | Service::Kms
             | Service::AutoScale
-            | Service::EnhancedDb
-            | Service::AutoBackup => {}
+            | Service::EnhancedDb => {}
+            Service::AutoBackup => self.on_key_auto_backup(key),
             Service::AiEngine => self.on_key_ai_engine(key),
             Service::NetworkingSuite => self.on_key_networking_suite(key),
             Service::CloudHsm => self.on_key_cloudhsm(key),
@@ -5667,6 +5679,9 @@ impl App {
             ConfirmAction::DeleteArchive { zone, id, name } => {
                 self.run_delete_archive(zone, id, name)
             }
+            ConfirmAction::DeleteAutoBackup { zone, id, name } => {
+                self.run_delete_auto_backup(zone, id, name)
+            }
             ConfirmAction::DisconnectDisk {
                 zone,
                 id,
@@ -6405,6 +6420,15 @@ impl App {
                     let sources = self.archive_source_choices().len();
                     edit_archive_form(&mut form, key, sources);
                     self.overlay = Some(Overlay::ArchiveForm(form));
+                }
+            },
+            Overlay::AutoBackupForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_auto_backup_form(form),
+                _ => {
+                    let disks = self.archive_source_choices().len();
+                    edit_auto_backup_form(&mut form, key, disks);
+                    self.overlay = Some(Overlay::AutoBackupForm(form));
                 }
             },
             Overlay::DiskServerPicker(mut picker) => match key.code {

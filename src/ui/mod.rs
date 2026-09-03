@@ -716,6 +716,12 @@ fn hints_for(app: &App) -> Vec<&'static str> {
                 hints.extend(["n ディスクから作成", "D 削除"]);
             }
         }
+        Service::AutoBackup => {
+            hints.push("z ゾーン");
+            if app.mode == Mode::Write {
+                hints.extend(["n 作成", "E 編集", "D 削除"]);
+            }
+        }
         Service::IsoImage
         | Service::Internet
         | Service::Bridge
@@ -736,8 +742,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         | Service::Kms
         | Service::Iam
         | Service::AutoScale
-        | Service::EnhancedDb
-        | Service::AutoBackup => {
+        | Service::EnhancedDb => {
             if app.service == Service::Iam && app.mode == Mode::Write {
                 hints.extend([
                     "u ユーザー作成",

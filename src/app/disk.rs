@@ -6,11 +6,13 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{
-    App, ArchiveForm, ConfirmAction, DiskCreateForm, DiskServerPicker, Loadable, Message, Overlay,
-    StatusKind, fmt_error,
+    App, ArchiveForm, AutoBackupForm, AutoBackupFormMode, ConfirmAction, DiskCreateForm,
+    DiskServerPicker, Loadable, Message, Overlay, StatusKind, fmt_error,
 };
 use crate::cloud_resources::{CloudResource, CloudResourceKind};
+use crate::commonservice::AutoBackupInput;
 use crate::iaas::{DiskCreateInput, DiskPlan, OsTemplate, PowerStatus};
+use crate::managed_resources::ManagedResource;
 use crate::sacloud::ResourceId;
 
 #[derive(Debug, Default)]
@@ -486,6 +488,189 @@ impl App {
             let _ = tx.send(Message::DiskChanged {
                 what: format!("アーカイブ「{name}」を削除しました"),
                 failed: "アーカイブの削除に失敗しました".to_string(),
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
+    // --- 自動バックアップ ---
+
+    pub(super) fn on_key_auto_backup(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('n') => self.open_auto_backup_form(AutoBackupFormMode::Create),
+            KeyCode::Char('E') => self.open_auto_backup_form(AutoBackupFormMode::Edit),
+            KeyCode::Char('D') => self.confirm_delete_auto_backup(),
+            _ => {}
+        }
+    }
+
+    fn open_auto_backup_form(&mut self, mode: AutoBackupFormMode) {
+        if !self.require_write() {
+            return;
+        }
+        let form = match mode {
+            AutoBackupFormMode::Create => {
+                // 対象ディスクは表示中のゾーンから選ぶ。
+                self.load_archive_sources();
+                AutoBackupForm::default()
+            }
+            AutoBackupFormMode::Edit => {
+                let Some(item) = self.selected_managed_resource() else {
+                    return;
+                };
+                let Some(current) = self.auto_backup_settings(&item) else {
+                    return;
+                };
+                current
+            }
+        };
+        self.overlay = Some(Overlay::AutoBackupForm(form));
+    }
+
+    /// 一覧に出ている値から編集フォームを組み立てる。
+    ///
+    /// 一覧は詳細を文字列で持っているので、そこから読み戻す。
+    fn auto_backup_settings(&self, item: &ManagedResource) -> Option<AutoBackupForm> {
+        let detail = |label: &str| {
+            item.details
+                .iter()
+                .find(|(key, _)| key == label)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        let mut weekdays = [false; 7];
+        for day in detail("取得曜日").split(',').map(str::trim) {
+            if let Some(index) = crate::commonservice::BACKUP_WEEKDAYS
+                .iter()
+                .position(|d| *d == day)
+            {
+                weekdays[index] = true;
+            }
+        }
+        Some(AutoBackupForm {
+            mode: AutoBackupFormMode::Edit,
+            id: item.id.parse().ok().map(ResourceId),
+            name: item.name.clone(),
+            source: 0,
+            weekdays,
+            weekday_cursor: 0,
+            generations: detail("世代数").parse().unwrap_or(3),
+            field: 0,
+        })
+    }
+
+    pub(super) fn submit_auto_backup_form(&mut self, form: AutoBackupForm) {
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            self.overlay = Some(Overlay::AutoBackupForm(form));
+            self.set_status("名前を入力してください", StatusKind::Error);
+            return;
+        }
+        let weekdays = form.selected_weekdays();
+        if weekdays.is_empty() {
+            self.overlay = Some(Overlay::AutoBackupForm(form));
+            self.set_status("取得する曜日を1つ以上選んでください", StatusKind::Error);
+            return;
+        }
+        let sources = self.archive_source_choices();
+        let disk = match form.mode {
+            AutoBackupFormMode::Create => sources.get(form.source).cloned(),
+            // 編集では対象ディスクを変えないので、ここでは使わない。
+            AutoBackupFormMode::Edit => Some((ResourceId(0), String::new())),
+        };
+        let Some((disk_id, disk_name)) = disk else {
+            self.overlay = Some(Overlay::AutoBackupForm(form));
+            self.set_status("対象のディスクを選んでください", StatusKind::Error);
+            return;
+        };
+
+        let input = AutoBackupInput {
+            name: name.clone(),
+            description: String::new(),
+            disk_id,
+            weekdays,
+            generations: form.generations,
+        };
+        self.overlay = None;
+        match (form.mode, form.id) {
+            (AutoBackupFormMode::Create, _) => self.run_auto_backup(
+                None,
+                input,
+                format!(
+                    "ディスク「{disk_name}」の自動バックアップを作りました（{} / {} 世代）",
+                    form.weekday_label(),
+                    form.generations
+                ),
+            ),
+            (AutoBackupFormMode::Edit, Some(id)) => self.run_auto_backup(
+                Some(id),
+                input,
+                format!(
+                    "自動バックアップ「{name}」を変更しました（{} / {} 世代）",
+                    form.weekday_label(),
+                    form.generations
+                ),
+            ),
+            (AutoBackupFormMode::Edit, None) => {}
+        }
+    }
+
+    /// 作成と変更は送る中身がほぼ同じなので、1つにまとめる。
+    fn run_auto_backup(&mut self, id: Option<ResourceId>, input: AutoBackupInput, done: String) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        tokio::spawn(async move {
+            let result = match id {
+                None => client.create_auto_backup(&zone, &input).await.map(|_| ()),
+                Some(id) => client.update_auto_backup(&zone, id, &input).await,
+            };
+            let _ = tx.send(Message::DiskChanged {
+                what: done,
+                failed: "自動バックアップの設定に失敗しました".to_string(),
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
+    fn confirm_delete_auto_backup(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(item) = self.selected_managed_resource() else {
+            return;
+        };
+        let Some(id) = item.id.parse().ok().map(ResourceId) else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "自動バックアップの削除".to_string(),
+            body: format!(
+                "自動バックアップ「{}」を削除します。\n\n\
+                 これから先の取得が止まるだけで、\
+                 すでに取ったアーカイブは残ります。",
+                item.name
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::DeleteAutoBackup {
+                zone: self.zone.clone(),
+                id,
+                name: item.name,
+            },
+        });
+    }
+
+    pub(super) fn run_delete_auto_backup(&mut self, zone: String, id: ResourceId, name: String) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.delete_auto_backup(&zone, id).await;
+            let _ = tx.send(Message::DiskChanged {
+                what: format!("自動バックアップ「{name}」を削除しました"),
+                failed: "自動バックアップの削除に失敗しました".to_string(),
                 result: result.map_err(fmt_error),
             });
         });

@@ -374,6 +374,33 @@ fn has_class(item: &serde_json::Value, class: &str, settings_key: &str) -> bool 
         .is_some_and(|v| !v.is_null())
 }
 
+/// 自動バックアップの `Provider.Class`。
+const AUTO_BACKUP_CLASS: &str = "autobackup";
+
+/// 曜日の指定に使える値。API はこの綴りしか受け付けない。
+pub const BACKUP_WEEKDAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/// 自動バックアップの設定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoBackupInput {
+    pub name: String,
+    pub description: String,
+    /// 対象のディスク。作成後は変えられない。
+    pub disk_id: ResourceId,
+    /// 取得する曜日。空にはできない。
+    pub weekdays: Vec<String>,
+    /// 残す世代数。
+    pub generations: u32,
+}
+
+fn auto_backup_settings(input: &AutoBackupInput) -> serde_json::Value {
+    // 公式SDKは種別を送らない（曜日指定しか無いため）。合わせておく。
+    json!({
+        "BackupSpanWeekdays": input.weekdays,
+        "MaximumNumberOfArchives": input.generations,
+    })
+}
+
 impl SacloudClient {
     /// `commonserviceitem` から指定種別のものだけを全件集める。
     async fn find_common_items(
@@ -470,6 +497,71 @@ impl SacloudClient {
         let body = dns_update_body(records, original_settings_hash);
         let path = format!("commonserviceitem/{id}");
         let _: serde_json::Value = self.request_common(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    /// 自動バックアップを作る。
+    ///
+    /// 対象ディスクのあるゾーンで呼ぶ。`commonserviceitem` は DNS などと
+    /// 同じ入れ物だが、こちらは対象ディスクがゾーンに属する。
+    pub async fn create_auto_backup(
+        &self,
+        zone: &str,
+        input: &AutoBackupInput,
+    ) -> Result<ResourceId> {
+        let body = json!({
+            "CommonServiceItem": {
+                "Name": input.name,
+                "Description": input.description,
+                // API のキーは DiskId（小文字の d）。DiskID だと 400 になる。
+                "Status": { "DiskId": input.disk_id.0 },
+                "Settings": { "Autobackup": auto_backup_settings(input) },
+                "Provider": { "Class": AUTO_BACKUP_CLASS },
+            }
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "commonserviceitem", Some(body))
+            .await?;
+        value
+            .pointer("/CommonServiceItem/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("自動バックアップの作成応答にIDがありませんでした"))
+    }
+
+    /// 曜日と世代数を変える。対象ディスクは変えられない。
+    pub async fn update_auto_backup(
+        &self,
+        zone: &str,
+        id: ResourceId,
+        input: &AutoBackupInput,
+    ) -> Result<()> {
+        let body = json!({
+            "CommonServiceItem": {
+                "Name": input.name,
+                "Description": input.description,
+                "Settings": { "Autobackup": auto_backup_settings(input) },
+            }
+        });
+        let _: serde_json::Value = self
+            .request_in_zone(
+                zone,
+                Method::PUT,
+                &format!("commonserviceitem/{id}"),
+                Some(body),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_auto_backup(&self, zone: &str, id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(
+                zone,
+                Method::DELETE,
+                &format!("commonserviceitem/{id}"),
+                None,
+            )
+            .await?;
         Ok(())
     }
 
