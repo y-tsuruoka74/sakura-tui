@@ -99,6 +99,7 @@ pub enum Service {
     Server,
     SshKey,
     Switch,
+    NetworkMap,
     Disk,
     Internet,
     PacketFilter,
@@ -145,7 +146,7 @@ struct ServiceMeta {
 impl Service {
     /// 分類順に並べる。ピッカーの並び・`s` での巡回・`--service` のヘルプが
     /// すべてこの順になるので、分類をまたぐ並べ替えはしないこと。
-    pub const ALL: [Service; 44] = [
+    pub const ALL: [Service; 45] = [
         // コンピュート
         Service::Server,
         Service::SshKey,
@@ -162,6 +163,7 @@ impl Service {
         Service::Workflows,
         Service::ApiGateway,
         // ネットワーク
+        Service::NetworkMap,
         Service::Switch,
         Service::Internet,
         Service::PacketFilter,
@@ -301,6 +303,14 @@ impl Service {
                 count_label: Some("件"),
                 // アカウント共通で、ゾーンを切り替えても同じものが見える。
                 zoned: false,
+            },
+            Service::NetworkMap => ServiceMeta {
+                category: Category::Network,
+                title: "接続マップ",
+                arg_name: "network-map",
+                countable_label: None,
+                count_label: None,
+                zoned: true,
             },
             Service::Switch => ServiceMeta {
                 category: Category::Network,

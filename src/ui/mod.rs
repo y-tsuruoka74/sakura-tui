@@ -10,6 +10,7 @@ mod cloudhsm;
 mod dedicated;
 mod detail;
 mod managed_resources;
+mod network_map;
 mod networking_suite;
 mod nosql;
 mod observability;
@@ -158,31 +159,20 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         )],
     )];
 
-    // 分類を添えて、今どのあたりを見ているのかが分かるようにする。
-    if !choosing_service {
-        parts.push(HeaderPart::after_separator(
-            4,
-            vec![Span::styled(
-                format!("{} / ", app.service.category().title()),
-                Style::default().fg(DIM),
-            )],
-        ));
-    }
-    // 分類を落としたときに区切りが残らないよう、サービス名は区切りを持たない。
-    let service_has_separator = choosing_service;
-    let service = Span::styled(
-        if choosing_service {
-            "サービスを選択"
-        } else {
-            app.service.title()
-        },
-        Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-    );
-    parts.push(if service_has_separator {
-        HeaderPart::after_separator(2, vec![service])
+    // 分類はサービス名の頭に付ける。別の部品にすると区切りが between に
+    // 入ってしまい「ネットワーク / │ 接続マップ」のように読めなくなる。
+    let service_title = if choosing_service {
+        "サービスを選択"
     } else {
-        HeaderPart::new(2, vec![separator(), service])
-    });
+        app.service.title()
+    };
+    parts.push(HeaderPart::after_separator(
+        2,
+        vec![Span::styled(
+            service_title,
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        )],
+    ));
     parts.push(HeaderPart::new(
         5,
         vec![Span::styled(" (s)", Style::default().fg(DIM))],
@@ -251,7 +241,20 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         ],
     ));
 
-    let spans = fit_header(parts, area.width as usize);
+    let mut spans = fit_header(parts, area.width as usize);
+    // 分類は「今どのあたりを見ているか」の手がかりだが、プロファイル名や
+    // モードほど大事ではない。他が収まったうえで余りがあるときだけ添える。
+    if !choosing_service {
+        let category = Span::styled(
+            format!("{} / ", app.service.category().title()),
+            Style::default().fg(DIM),
+        );
+        if let Some(at) = spans.iter().position(|span| span.content == service_title)
+            && width(&spans) + width(std::slice::from_ref(&category)) <= area.width as usize
+        {
+            spans.insert(at, category);
+        }
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -353,6 +356,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
         Service::Server => server::draw(frame, area, app),
         Service::SshKey => ssh_key::draw(frame, area, app),
         Service::Switch => switch::draw(frame, area, app),
+        Service::NetworkMap => network_map::draw(frame, area, app),
         Service::PacketFilter => packet_filter::draw(frame, area, app),
         Service::Disk
         | Service::Archive
@@ -686,6 +690,10 @@ fn hints_for(app: &App) -> Vec<&'static str> {
                     ]);
                 }
             }
+        }
+        Service::NetworkMap => {
+            hints.push("z ゾーン");
+            hints.push("Enter サーバーへ");
         }
         Service::Switch => {
             hints.push("z ゾーン");

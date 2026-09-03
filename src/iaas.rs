@@ -154,7 +154,13 @@ impl Nic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NicConnection {
     Shared,
-    Switch(String),
+    /// 繋ぎ先のスイッチ。ID は応答に無いこともあるので任意。
+    /// 接続マップでまとめるときは、名前ではなく ID で突き合わせる
+    /// （同じ名前のスイッチを作れてしまうため）。
+    Switch {
+        id: Option<ResourceId>,
+        name: String,
+    },
     None,
 }
 
@@ -162,9 +168,17 @@ impl NicConnection {
     pub fn label(&self) -> String {
         match self {
             Self::Shared => "共有セグメント".to_string(),
-            Self::Switch(name) if name.is_empty() => "スイッチ".to_string(),
-            Self::Switch(name) => name.clone(),
+            Self::Switch { name, .. } if name.is_empty() => "スイッチ".to_string(),
+            Self::Switch { name, .. } => name.clone(),
             Self::None => "未接続".to_string(),
+        }
+    }
+
+    /// 繋ぎ先のスイッチの ID。
+    pub fn switch_id(&self) -> Option<ResourceId> {
+        match self {
+            Self::Switch { id, .. } => *id,
+            _ => None,
         }
     }
 }
@@ -315,6 +329,8 @@ struct NakedInterface {
 
 #[derive(Debug, Deserialize)]
 struct NakedNicSwitch {
+    #[serde(rename = "ID")]
+    id: Option<ResourceId>,
     #[serde(rename = "Name", default, deserialize_with = "null_as_default")]
     name: String,
     /// `shared` なら共有セグメント。
@@ -368,7 +384,10 @@ impl From<NakedServer> for Server {
                         connection: match &nic.switch {
                             None => NicConnection::None,
                             Some(sw) if sw.scope == "shared" => NicConnection::Shared,
-                            Some(sw) => NicConnection::Switch(sw.name.clone()),
+                            Some(sw) => NicConnection::Switch {
+                                id: sw.id,
+                                name: sw.name.clone(),
+                            },
                         },
                         ip_address: if nic.ip_address.is_empty() {
                             nic.user_ip_address.clone()
@@ -567,7 +586,10 @@ mod tests {
         // スイッチ接続は UserIPAddress のほうに入る。
         assert_eq!(
             server.nics[1].connection,
-            NicConnection::Switch("sw-01".to_string())
+            NicConnection::Switch {
+                id: Some(ResourceId(77)),
+                name: "sw-01".to_string()
+            }
         );
         assert_eq!(server.nics[1].ip_address, "192.168.0.10");
         assert_eq!(server.nics[1].packet_filter.as_deref(), Some("web-filter"));
@@ -1451,10 +1473,25 @@ impl SacloudClient {
         if let Err(err) = self.wait_disk_ready(zone, disk_id).await {
             return (progress, Err(err));
         }
-        if let Some(filter_id) = input.packet_filter_id
-            && let Err(err) = self.attach_packet_filter(zone, server_id, filter_id).await
-        {
-            return (progress, Err(err));
+        // フィルタと IP は NIC に付くので、まとめてここで設定する。
+        let nic_id = match self.first_nic_id(zone, server_id).await {
+            Ok(id) => id,
+            Err(err) => return (progress, Err(err)),
+        };
+        if let Some(nic_id) = nic_id {
+            if let Some(filter_id) = input.packet_filter_id
+                && let Err(err) = self
+                    .set_nic_packet_filter(zone, nic_id, Some(filter_id))
+                    .await
+            {
+                return (progress, Err(err));
+            }
+            // スイッチ接続では、ディスクに書くだけでは API 側に記録が残らない。
+            if let Some((ip, _, _)) = input.nic.disk_network_config()
+                && let Err(err) = self.set_nic_ip(zone, nic_id, &ip).await
+            {
+                return (progress, Err(err));
+            }
         }
         if input.boot_after_create
             && let Err(err) = self.power_action(zone, server_id, PowerAction::Boot).await
@@ -1527,27 +1564,33 @@ impl SacloudClient {
         Ok(())
     }
 
-    /// eth0 にパケットフィルタを付ける。
+    /// サーバーの最初の NIC の ID。
     ///
-    /// フィルタは NIC 単位なので、サーバーを作ってから最初の NIC の ID を
-    /// 引いて付ける。NIC が無ければ何もしない。
-    async fn attach_packet_filter(
-        &self,
-        zone: &str,
-        server_id: ResourceId,
-        filter_id: ResourceId,
-    ) -> Result<()> {
+    /// フィルタも IP も NIC 単位で設定するので、作成後にここから引く。
+    async fn first_nic_id(&self, zone: &str, server_id: ResourceId) -> Result<Option<ResourceId>> {
         let value: serde_json::Value = self
             .request_in_zone(zone, Method::GET, &format!("server/{server_id}"), None)
             .await?;
-        let Some(interface_id) = value
+        Ok(value
             .pointer("/Server/Interfaces/0/ID")
-            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
-        else {
-            return Ok(());
-        };
-        self.set_nic_packet_filter(zone, interface_id, Some(filter_id))
-            .await
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok()))
+    }
+
+    /// NIC に IP を覚えさせる。
+    ///
+    /// スイッチ接続では、ディスクの修正で OS 側に書き込むだけでは API 側に
+    /// 記録が残らず、一覧や接続マップで空欄になる。同じ値をこちらにも入れる。
+    pub async fn set_nic_ip(&self, zone: &str, nic_id: ResourceId, ip: &str) -> Result<()> {
+        let body = json!({ "Interface": { "UserIPAddress": ip } });
+        let _: serde_json::Value = self
+            .request_in_zone(
+                zone,
+                Method::PUT,
+                &format!("interface/{nic_id}"),
+                Some(body),
+            )
+            .await?;
+        Ok(())
     }
 
     /// 自分で作ったアーカイブ。ディスクの作成元に選べるもの。

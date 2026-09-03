@@ -22,6 +22,7 @@ mod dedicated;
 mod disk;
 mod forms;
 mod monitoring_suite;
+mod network_map;
 mod networking_suite;
 mod nosql;
 mod observability;
@@ -42,6 +43,7 @@ pub use cloudhsm::{CloudHsmTab, CloudHsmView};
 pub use dedicated::{DedicatedFocus, DedicatedTab, DedicatedView};
 pub use disk::DiskView;
 pub use forms::*;
+pub use network_map::{MapData, MapRow, NetworkKind, NetworkMapView};
 pub use networking_suite::{NetworkingSuiteTab, NetworkingSuiteView};
 pub use nosql::{NoSqlTab, NoSqlView};
 pub use observability::{
@@ -216,6 +218,10 @@ pub enum Message {
     },
     PacketFilters {
         result: Result<Vec<crate::packet_filter::PacketFilter>, String>,
+    },
+    NetworkMap {
+        zone: String,
+        result: Result<MapData, String>,
     },
     /// 接続・切断・フィルタの付け外しのように、結果が成否だけの NIC の操作。
     NicChanged {
@@ -610,6 +616,8 @@ pub enum Pane {
     // パケットフィルタ
     PacketFilters,
     PacketFilterRules,
+    // 接続マップ
+    NetworkMap,
     // スイッチ
     Switches,
     CloudResources,
@@ -1199,6 +1207,8 @@ pub struct App {
     pub ssh_key: SshKeyView,
     /// パケットフィルタ画面の状態。
     pub packet_filter: PacketFilterView,
+    /// 接続マップ画面の状態。
+    pub network_map: NetworkMapView,
     /// スイッチ画面の状態。
     pub switch: SwitchView,
     pub cloud_resources: CloudResourcesView,
@@ -1271,6 +1281,7 @@ impl App {
             disk: DiskView::default(),
             ssh_key: SshKeyView::default(),
             packet_filter: PacketFilterView::default(),
+            network_map: NetworkMapView::default(),
             switch: SwitchView::default(),
             cloud_resources: CloudResourcesView::default(),
             managed_resources: ManagedResourcesView::default(),
@@ -1540,6 +1551,7 @@ impl App {
             Service::Server => self.server_active_pane(),
             Service::SshKey => Pane::SshKeys,
             Service::Switch => Pane::Switches,
+            Service::NetworkMap => Pane::NetworkMap,
             Service::PacketFilter => self.packet_filter_active_pane(),
             Service::Disk
             | Service::Archive
@@ -1743,6 +1755,7 @@ impl App {
             Service::SshKey => self.ssh_key_ensure_loaded(),
             Service::PacketFilter => self.packet_filter_ensure_loaded(),
             Service::Switch => self.switch_ensure_loaded(),
+            Service::NetworkMap => self.network_map_ensure_loaded(),
             Service::Disk
             | Service::Archive
             | Service::IsoImage
@@ -2027,6 +2040,12 @@ impl App {
             }
             Message::SshKeys { from, result } => self.ssh_keys_arrived(from, result),
             Message::PacketFilters { result } => self.packet_filters_arrived(result),
+            Message::NetworkMap { zone, result } => {
+                self.network_map.state.select(None);
+                let loadable = self.store_result(result);
+                self.network_map.maps.insert(zone, loadable);
+                self.ensure_loaded();
+            }
             Message::NicChanged {
                 what,
                 failed,
@@ -3666,6 +3685,7 @@ impl App {
             Service::SshKey => self.on_key_ssh_key(key),
             Service::PacketFilter => self.on_key_packet_filter(key),
             Service::Switch => self.on_key_switch(key),
+            Service::NetworkMap => self.on_key_network_map(key),
             Service::Disk => self.on_key_disk(key),
             Service::Archive => self.on_key_archive(key),
             Service::IsoImage
@@ -4266,6 +4286,8 @@ impl App {
                         sacloud.list_packet_filters(&zone).await.map(|f| f.len())
                     }
                     Service::Switch => sacloud.count_switches(&zone).await,
+                    // 件数に意味が無いので数えない。
+                    Service::NetworkMap => Ok(0),
                     Service::Disk => {
                         sacloud
                             .count_cloud_resources(&zone, CloudResourceKind::Disk)
@@ -4432,6 +4454,7 @@ impl App {
             Service::SshKey => self.ssh_key.keys.ready()?.len(),
             Service::PacketFilter => self.packet_filter.filters.ready()?.len(),
             Service::Switch => self.switch.switches.get(&self.zone)?.ready()?.len(),
+            Service::NetworkMap => return None,
             Service::Disk
             | Service::Archive
             | Service::IsoImage
@@ -4635,6 +4658,7 @@ impl App {
             Pane::SshKeys => self.visible_ssh_keys().ready().map_or(0, Vec::len),
             Pane::Nics => self.visible_nics().len(),
             Pane::PacketFilters => self.visible_packet_filters().ready().map_or(0, Vec::len),
+            Pane::NetworkMap => self.visible_network_map().ready().map_or(0, Vec::len),
             Pane::PacketFilterRules => self.visible_packet_filter_rules().len(),
             Pane::Switches => self.visible_switches().ready().map_or(0, Vec::len),
             Pane::CloudResources => self.visible_cloud_resources().ready().map_or(0, Vec::len),
@@ -4757,6 +4781,7 @@ impl App {
             Pane::SshKeys => Some(&mut self.ssh_key.state),
             Pane::Nics => Some(&mut self.server.nic_state),
             Pane::PacketFilters => Some(&mut self.packet_filter.filter_state),
+            Pane::NetworkMap => Some(&mut self.network_map.state),
             Pane::PacketFilterRules => Some(&mut self.packet_filter.rule_state),
             Pane::Switches => Some(&mut self.switch.switch_state),
             Pane::CloudResources => Some(&mut self.cloud_resources.state),
@@ -4912,6 +4937,7 @@ impl App {
                     nic.ip_address
                 }
             }),
+            Pane::NetworkMap => self.selected_map_server().map(|(id, _)| id.to_string()),
             Pane::PacketFilters => self
                 .selected_packet_filter()
                 .map(|filter| filter.id.to_string()),
@@ -4996,6 +5022,7 @@ impl App {
             Service::SshKey => self.ssh_key_refresh(),
             Service::PacketFilter => self.packet_filter_refresh(),
             Service::Switch => self.switch_refresh(),
+            Service::NetworkMap => self.network_map_refresh(),
             Service::Disk
             | Service::Archive
             | Service::IsoImage
@@ -5217,6 +5244,7 @@ impl App {
         self.cloud_resources.state.select(None);
         self.packet_filter_invalidate();
         self.ssh_key_invalidate();
+        self.network_map_invalidate();
         self.managed_resources.items.clear();
         self.managed_resources.state.select(None);
         self.api_gateway = ApiGatewayView::default();
@@ -6995,17 +7023,21 @@ mod tests {
 
     #[test]
     fn service_picker_moves_within_category() {
-        let switch = Service::ALL
-            .iter()
-            .position(|service| *service == Service::Switch)
-            .unwrap();
-        let internet = Service::ALL
-            .iter()
-            .position(|service| *service == Service::Internet)
-            .unwrap();
-        assert_eq!(move_service_within_category(switch, 1), internet);
+        let at = |want: Service| {
+            Service::ALL
+                .iter()
+                .position(|service| *service == want)
+                .unwrap()
+        };
         assert_eq!(
-            Service::ALL[move_service_within_category(switch, -1)],
+            move_service_within_category(at(Service::Switch), 1),
+            at(Service::Internet)
+        );
+        // 分類の先頭から上へ動かすと末尾へ回る。先頭の顔ぶれが変わっても
+        // 壊れないよう、決め打ちせず一覧から取る。
+        let first = Category::Network.services().next().unwrap();
+        assert_eq!(
+            Service::ALL[move_service_within_category(at(first), -1)],
             Category::Network.services().last().unwrap()
         );
     }
@@ -7126,6 +7158,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "network-map",
                 "switch",
                 "internet",
                 "packet-filter",

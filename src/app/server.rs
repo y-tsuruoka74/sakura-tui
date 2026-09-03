@@ -71,6 +71,8 @@ pub struct ServerView {
     pub focus: ListFocus,
     /// 引き直しの理由が操作の完了なら、件数のお知らせで上書きしない。
     pub quiet_reload: bool,
+    /// 一覧が届いたときに選び直したいサーバー。接続マップから飛ぶのに使う。
+    pub reselect: Option<ResourceId>,
     /// 作成フォームで使う選択肢。ゾーンごとに違うので都度引く。
     pub plans: Loadable<Vec<ServerPlan>>,
     pub disk_plans: Loadable<Vec<DiskPlan>>,
