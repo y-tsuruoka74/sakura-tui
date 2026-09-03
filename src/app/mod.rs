@@ -7252,30 +7252,37 @@ mod tests {
         assert_eq!(Service::from_arg("seg"), Some(Service::Seg));
     }
 
-    /// ネットワーク分類の並び。DNS の後、ウェブアクセラレータの前。
+    /// ネットワークと負荷分散・配信の並び。
+    ///
+    /// 一覧が縦に伸びすぎると行間の空行が入らず詰まって見えるので、
+    /// 接続まわりと負荷分散・配信で分けている。
     #[test]
-    fn network_category_lists_seg_after_dns() {
-        let names: Vec<&str> = Category::Network
-            .services()
-            .map(Service::arg_name)
-            .collect();
+    fn network_and_delivery_categories_are_split() {
+        let names = |category: Category| -> Vec<&'static str> {
+            category.services().map(Service::arg_name).collect()
+        };
         assert_eq!(
-            names,
+            names(Category::Network),
             vec![
                 "network-map",
                 "switch",
                 "internet",
                 "packet-filter",
                 "bridge",
-                "loadbalancer",
-                "enhanced-loadbalancer",
                 "vpcrouter",
-                "gslb",
-                "mobile-gateway",
                 "local-router",
-                "dns",
+                "mobile-gateway",
                 "seg",
                 "networking-suite",
+            ]
+        );
+        assert_eq!(
+            names(Category::Delivery),
+            vec![
+                "loadbalancer",
+                "enhanced-loadbalancer",
+                "gslb",
+                "dns",
                 "webaccel",
             ]
         );

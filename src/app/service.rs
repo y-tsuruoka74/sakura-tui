@@ -40,6 +40,7 @@ pub enum Category {
     Ai,
     Integration,
     Network,
+    Delivery,
     Storage,
     Security,
     Ops,
@@ -48,12 +49,13 @@ pub enum Category {
 
 impl Category {
     /// 表示順。サービス一覧の並びもこの順に揃える。
-    pub const ALL: [Category; 9] = [
+    pub const ALL: [Category; 10] = [
         Category::Compute,
         Category::Container,
         Category::Ai,
         Category::Integration,
         Category::Network,
+        Category::Delivery,
         Category::Storage,
         Category::Security,
         Category::Ops,
@@ -67,6 +69,7 @@ impl Category {
             Category::Ai => "AI",
             Category::Integration => "アプリケーション連携",
             Category::Network => "ネットワーク",
+            Category::Delivery => "負荷分散・配信",
             Category::Storage => "ストレージ・データ",
             Category::Security => "セキュリティ",
             Category::Ops => "運用・監視",
@@ -168,15 +171,16 @@ impl Service {
         Service::Internet,
         Service::PacketFilter,
         Service::Bridge,
-        Service::LoadBalancer,
-        Service::EnhancedLoadBalancer,
         Service::VpcRouter,
-        Service::Gslb,
-        Service::MobileGateway,
         Service::LocalRouter,
-        Service::Dns,
+        Service::MobileGateway,
         Service::Seg,
         Service::NetworkingSuite,
+        // 負荷分散・配信
+        Service::LoadBalancer,
+        Service::EnhancedLoadBalancer,
+        Service::Gslb,
+        Service::Dns,
         Service::WebAccel,
         // ストレージ・データ
         Service::Disk,
@@ -353,7 +357,7 @@ impl Service {
                 zoned: true,
             },
             Service::LoadBalancer => ServiceMeta {
-                category: Category::Network,
+                category: Category::Delivery,
                 title: "ロードバランサ",
                 arg_name: "loadbalancer",
                 countable_label: Some("ロードバランサ"),
@@ -361,7 +365,7 @@ impl Service {
                 zoned: true,
             },
             Service::EnhancedLoadBalancer => ServiceMeta {
-                category: Category::Network,
+                category: Category::Delivery,
                 title: "エンハンスドロードバランサ",
                 arg_name: "enhanced-loadbalancer",
                 countable_label: None,
@@ -377,7 +381,7 @@ impl Service {
                 zoned: true,
             },
             Service::Gslb => ServiceMeta {
-                category: Category::Network,
+                category: Category::Delivery,
                 title: "GSLB",
                 arg_name: "gslb",
                 countable_label: None,
@@ -467,7 +471,7 @@ impl Service {
                 zoned: false,
             },
             Service::WebAccel => ServiceMeta {
-                category: Category::Network,
+                category: Category::Delivery,
                 title: "ウェブアクセラレータ",
                 arg_name: "webaccel",
                 countable_label: None,
@@ -475,7 +479,7 @@ impl Service {
                 zoned: false,
             },
             Service::Dns => ServiceMeta {
-                category: Category::Network,
+                category: Category::Delivery,
                 title: "DNS",
                 arg_name: "dns",
                 countable_label: None,
