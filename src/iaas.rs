@@ -957,8 +957,10 @@ pub struct DiskCreateInput {
     pub description: String,
     pub plan_id: u32,
     pub size_mb: u32,
-    /// OS テンプレートのタグ。空ならブランクディスク。
+    /// OS テンプレートのタグ。空なら OS テンプレートは使わない。
     pub os_tags: Vec<String>,
+    /// 元にするアーカイブ。`os_tags` とどちらか一方だけ使う。
+    pub source_archive: Option<ResourceId>,
 }
 
 /// スタートアップスクリプト（API 上は Note）。
@@ -1548,6 +1550,65 @@ impl SacloudClient {
             .await
     }
 
+    /// 自分で作ったアーカイブ。ディスクの作成元に選べるもの。
+    ///
+    /// 共有のもの（OS テンプレート）は [`OS_CHOICES`] から引くので出さない。
+    pub async fn list_own_archives(&self, zone: &str) -> Result<Vec<OsTemplate>> {
+        let body = json!({
+            "Filter": { "Scope": ["user"] },
+            "Count": 1000,
+            "Sort": ["-CreatedAt"],
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::GET, "archive", Some(body))
+            .await?;
+        let archives: Vec<NakedArchive> = value
+            .get("Archives")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(archives
+            .into_iter()
+            .map(|a| OsTemplate {
+                id: a.id,
+                name: a.name,
+                size_mb: a.size_mb,
+            })
+            .collect())
+    }
+
+    /// ディスクからアーカイブを取る。
+    ///
+    /// コピーが走るので、使えるようになるまで時間がかかる。ここでは待たない。
+    pub async fn create_archive(
+        &self,
+        zone: &str,
+        name: &str,
+        description: &str,
+        source_disk_id: ResourceId,
+    ) -> Result<ResourceId> {
+        let body = json!({
+            "Archive": {
+                "Name": name,
+                "Description": description,
+                "SourceDisk": { "ID": source_disk_id.0 },
+            }
+        });
+        let value: serde_json::Value = self
+            .request_in_zone(zone, Method::POST, "archive", Some(body))
+            .await?;
+        value
+            .pointer("/Archive/ID")
+            .and_then(|v| serde_json::from_value::<ResourceId>(v.clone()).ok())
+            .ok_or_else(|| anyhow::anyhow!("アーカイブの作成応答にIDがありませんでした"))
+    }
+
+    pub async fn delete_archive(&self, zone: &str, id: ResourceId) -> Result<()> {
+        let _: serde_json::Value = self
+            .request_in_zone(zone, Method::DELETE, &format!("archive/{id}"), None)
+            .await?;
+        Ok(())
+    }
+
     /// スタートアップスクリプト（Note）の一覧。
     pub async fn list_startup_scripts(&self, zone: &str) -> Result<Vec<StartupScript>> {
         let body = json!({ "Count": 1000, "Sort": ["Name"] });
@@ -1699,9 +1760,14 @@ impl SacloudClient {
             "SizeMB": input.size_mb,
             "Connection": "virtio",
         });
-        if !input.os_tags.is_empty() {
-            let template = self.find_os_template(zone, &input.os_tags).await?;
-            disk["SourceArchive"] = json!({ "ID": template.id.0 });
+        // 元にするものは1つだけ。タグから引くか、指定された ID をそのまま使う。
+        let source = match input.source_archive {
+            Some(id) => Some(id),
+            None if input.os_tags.is_empty() => None,
+            None => Some(self.find_os_template(zone, &input.os_tags).await?.id),
+        };
+        if let Some(id) = source {
+            disk["SourceArchive"] = json!({ "ID": id.0 });
         }
         let value: serde_json::Value = self
             .request_in_zone(zone, Method::POST, "disk", Some(json!({ "Disk": disk })))

@@ -250,6 +250,10 @@ pub enum Message {
     },
     DiskPlans {
         result: Result<Vec<crate::iaas::DiskPlan>, String>,
+        archives: Result<Vec<crate::iaas::OsTemplate>, String>,
+    },
+    ArchiveSources {
+        result: Result<Vec<(ResourceId, String)>, String>,
     },
     DiskCreated {
         name: String,
@@ -851,6 +855,17 @@ pub enum ConfirmAction {
         id: ResourceId,
         name: String,
     },
+    CreateArchive {
+        zone: String,
+        name: String,
+        description: String,
+        disk_id: ResourceId,
+    },
+    DeleteArchive {
+        zone: String,
+        id: ResourceId,
+        name: String,
+    },
     DisconnectDisk {
         zone: String,
         id: ResourceId,
@@ -1039,6 +1054,7 @@ pub enum Overlay {
     SshKeyForm(SshKeyForm),
     DiskCreateForm(DiskCreateForm),
     DiskServerPicker(DiskServerPicker),
+    ArchiveForm(ArchiveForm),
     /// SSH 公開鍵の取得元と一覧。選び終えたら戻すので、呼び出し元ごと預かる。
     SshKeyPicker {
         back: Box<SshKeyReturn>,
@@ -2090,9 +2106,13 @@ impl App {
                     self.set_status(err, StatusKind::Error);
                 }
             },
-            Message::DiskPlans { result } => {
+            Message::DiskPlans { result, archives } => {
                 self.disk.plans = self.store_result(result);
+                self.disk.archives = self.store_result(archives);
                 self.disk_plans_arrived();
+            }
+            Message::ArchiveSources { result } => {
+                self.disk.sources = self.store_result(result);
             }
             Message::DiskTargetServers { result } => self.disk_target_servers_arrived(result),
             Message::DiskCreated {
@@ -3635,8 +3655,8 @@ impl App {
             Service::PacketFilter => self.on_key_packet_filter(key),
             Service::Switch => self.on_key_switch(key),
             Service::Disk => self.on_key_disk(key),
-            Service::Archive
-            | Service::IsoImage
+            Service::Archive => self.on_key_archive(key),
+            Service::IsoImage
             | Service::Internet
             | Service::Bridge
             | Service::LoadBalancer
@@ -5638,6 +5658,15 @@ impl App {
                 self.run_delete_packet_filter_rule(id, index)
             }
             ConfirmAction::DeleteNic { zone, id, name } => self.run_delete_nic(zone, id, name),
+            ConfirmAction::CreateArchive {
+                zone,
+                name,
+                description,
+                disk_id,
+            } => self.run_create_archive(zone, name, description, disk_id),
+            ConfirmAction::DeleteArchive { zone, id, name } => {
+                self.run_delete_archive(zone, id, name)
+            }
             ConfirmAction::DisconnectDisk {
                 zone,
                 id,
@@ -6364,8 +6393,18 @@ impl App {
                 KeyCode::Enter => self.submit_disk_create_form(form),
                 _ => {
                     let plans = self.disk_plan_choices();
-                    edit_disk_create_form(&mut form, key, &plans);
+                    let archives = self.disk_archive_choices();
+                    edit_disk_create_form(&mut form, key, &plans, &archives);
                     self.overlay = Some(Overlay::DiskCreateForm(form));
+                }
+            },
+            Overlay::ArchiveForm(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_archive_form(form),
+                _ => {
+                    let sources = self.archive_source_choices().len();
+                    edit_archive_form(&mut form, key, sources);
+                    self.overlay = Some(Overlay::ArchiveForm(form));
                 }
             },
             Overlay::DiskServerPicker(mut picker) => match key.code {

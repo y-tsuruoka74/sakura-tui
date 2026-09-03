@@ -6,22 +6,31 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::{
-    App, ConfirmAction, DiskCreateForm, DiskServerPicker, Loadable, Message, Overlay, StatusKind,
-    fmt_error,
+    App, ArchiveForm, ConfirmAction, DiskCreateForm, DiskServerPicker, Loadable, Message, Overlay,
+    StatusKind, fmt_error,
 };
-use crate::cloud_resources::CloudResource;
-use crate::iaas::{DiskCreateInput, DiskPlan, PowerStatus};
+use crate::cloud_resources::{CloudResource, CloudResourceKind};
+use crate::iaas::{DiskCreateInput, DiskPlan, OsTemplate, PowerStatus};
 use crate::sacloud::ResourceId;
 
 #[derive(Debug, Default)]
 pub struct DiskView {
     /// 作成フォームで使う選択肢。ゾーンごとに違うので都度引く。
     pub plans: Loadable<Vec<DiskPlan>>,
+    /// 作成元に選べる、自分で取ったアーカイブ。
+    pub archives: Loadable<Vec<OsTemplate>>,
+    /// アーカイブの元にできるディスク。
+    pub sources: Loadable<Vec<(ResourceId, String)>>,
 }
 
 impl App {
     pub fn disk_plan_choices(&self) -> Vec<DiskPlan> {
         self.disk.plans.ready().cloned().unwrap_or_default()
+    }
+
+    /// 作成元に選べるアーカイブ。まだ届いていなければ空。
+    pub fn disk_archive_choices(&self) -> Vec<OsTemplate> {
+        self.disk.archives.ready().cloned().unwrap_or_default()
     }
 
     pub(super) fn on_key_disk(&mut self, key: KeyEvent) {
@@ -39,13 +48,15 @@ impl App {
             return;
         }
         self.disk.plans = Loadable::Loading;
+        self.disk.archives = Loadable::Loading;
         self.inflight += 1;
         let client = self.sacloud.clone();
         let tx = self.tx.clone();
         let zone = self.zone.clone();
         tokio::spawn(async move {
             let result = client.list_disk_plans(&zone).await.map_err(fmt_error);
-            let _ = tx.send(Message::DiskPlans { result });
+            let archives = client.list_own_archives(&zone).await.map_err(fmt_error);
+            let _ = tx.send(Message::DiskPlans { result, archives });
         });
     }
 
@@ -86,13 +97,24 @@ impl App {
             .iter()
             .find(|p| p.id == form.plan_id)
             .map_or_else(String::new, |p| p.name.clone());
+        let archives = self.disk_archive_choices();
+        // 中身を選ぶ種類なのに選べていないなら、空のディスクを作ってしまう前に止める。
+        let source_archive = form.source_archive(&archives);
+        let os_tags = form.os_tags();
+        if form.kind().needs_source() && os_tags.is_empty() && source_archive.is_none() {
+            self.overlay = Some(Overlay::DiskCreateForm(form));
+            self.set_status("元にするものを選んでください", StatusKind::Error);
+            return;
+        }
+        let source_label = form.source_label(&archives);
 
         let input = DiskCreateInput {
             name: name.clone(),
             description: form.description.trim().to_string(),
             plan_id: form.plan_id,
             size_mb: form.size_mb,
-            os_tags: form.os_tags(),
+            os_tags,
+            source_archive,
         };
 
         // ディスクは作成した時点から課金される。実行前に一度止める。
@@ -106,7 +128,7 @@ impl App {
                 self.zone,
                 plan_name,
                 form.size_mb / 1024,
-                form.source_label(),
+                source_label,
             ),
             verify: None,
             typed: String::new(),
@@ -122,8 +144,8 @@ impl App {
         let client = self.sacloud.clone();
         let tx = self.tx.clone();
         let name = input.name.clone();
-        // OS テンプレートを指定するとコピーが走るので、待ち時間があることを伝える。
-        let copying = !input.os_tags.is_empty();
+        // 元にするものがあるとコピーが走るので、待ち時間があることを伝える。
+        let copying = !input.os_tags.is_empty() || input.source_archive.is_some();
         self.set_status(
             format!("ディスク「{name}」を作成しています…"),
             StatusKind::Info,
@@ -319,6 +341,151 @@ impl App {
             let _ = tx.send(Message::DiskChanged {
                 what: format!("ディスク「{name}」をサーバー「{server}」から切断しました"),
                 failed: "ディスクの切断に失敗しました".to_string(),
+                result: result.map_err(fmt_error),
+            });
+        });
+    }
+
+    // --- アーカイブ ---
+
+    pub(super) fn on_key_archive(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('n') => self.open_archive_form(),
+            KeyCode::Char('D') => self.confirm_delete_archive(),
+            _ => {}
+        }
+    }
+
+    /// ディスクからアーカイブを取るフォームを開く。
+    fn open_archive_form(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        self.load_archive_sources();
+        self.overlay = Some(Overlay::ArchiveForm(ArchiveForm::default()));
+    }
+
+    /// 元にできるディスクの一覧を引く。
+    fn load_archive_sources(&mut self) {
+        if !self.disk.sources.is_idle() {
+            return;
+        }
+        self.disk.sources = Loadable::Loading;
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        let zone = self.zone.clone();
+        tokio::spawn(async move {
+            let result = client
+                .list_cloud_resources(&zone, CloudResourceKind::Disk)
+                .await
+                .map(|disks| disks.into_iter().map(|d| (d.id, d.name)).collect())
+                .map_err(fmt_error);
+            let _ = tx.send(Message::ArchiveSources { result });
+        });
+    }
+
+    /// アーカイブの元にできるディスク。
+    pub fn archive_source_choices(&self) -> Vec<(ResourceId, String)> {
+        self.disk.sources.ready().cloned().unwrap_or_default()
+    }
+
+    pub(super) fn submit_archive_form(&mut self, form: ArchiveForm) {
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            self.overlay = Some(Overlay::ArchiveForm(form));
+            self.set_status("名前を入力してください", StatusKind::Error);
+            return;
+        }
+        let sources = self.archive_source_choices();
+        let Some((disk_id, disk_name)) = sources.get(form.source).cloned() else {
+            self.overlay = Some(Overlay::ArchiveForm(form));
+            self.set_status("元にするディスクを選んでください", StatusKind::Error);
+            return;
+        };
+        let description = form.description.trim().to_string();
+
+        // ディスクは動いたまま取ると中身が壊れることがある。手前で注意を出す。
+        self.overlay = Some(Overlay::Confirm {
+            title: "アーカイブの作成".to_string(),
+            body: format!(
+                "ディスク「{disk_name}」からアーカイブ「{name}」を作ります。\n\n\
+                 コピーが終わるまで数分から数十分かかります。\
+                 接続先のサーバーが起動していると、取ったアーカイブの中身が\
+                 壊れていることがあります。先に停止してください。"
+            ),
+            verify: None,
+            typed: String::new(),
+            action: ConfirmAction::CreateArchive {
+                zone: self.zone.clone(),
+                name,
+                description,
+                disk_id,
+            },
+        });
+    }
+
+    pub(super) fn run_create_archive(
+        &mut self,
+        zone: String,
+        name: String,
+        description: String,
+        disk_id: ResourceId,
+    ) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        self.set_status(
+            format!("アーカイブ「{name}」を作成しています…"),
+            StatusKind::Info,
+        );
+        tokio::spawn(async move {
+            let result = client
+                .create_archive(&zone, &name, &description, disk_id)
+                .await;
+            let _ = tx.send(Message::DiskChanged {
+                what: format!(
+                    "アーカイブ「{name}」の作成を始めました（コピーが終わるまでしばらくかかります）"
+                ),
+                failed: "アーカイブの作成に失敗しました".to_string(),
+                result: result.map(|_| ()).map_err(fmt_error),
+            });
+        });
+    }
+
+    fn confirm_delete_archive(&mut self) {
+        if !self.require_write() {
+            return;
+        }
+        let Some(archive) = self.selected_cloud_resource() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Confirm {
+            title: "アーカイブの削除".to_string(),
+            body: format!(
+                "アーカイブ「{}」({}) を削除します。\n\
+                 元に戻せません。実行するには名前を入力してください。",
+                archive.name, self.zone
+            ),
+            verify: Some(archive.name.clone()),
+            typed: String::new(),
+            action: ConfirmAction::DeleteArchive {
+                zone: self.zone.clone(),
+                id: archive.id,
+                name: archive.name,
+            },
+        });
+    }
+
+    pub(super) fn run_delete_archive(&mut self, zone: String, id: ResourceId, name: String) {
+        self.inflight += 1;
+        let client = self.sacloud.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = client.delete_archive(&zone, id).await;
+            let _ = tx.send(Message::DiskChanged {
+                what: format!("アーカイブ「{name}」を削除しました"),
+                failed: "アーカイブの削除に失敗しました".to_string(),
                 result: result.map_err(fmt_error),
             });
         });

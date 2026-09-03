@@ -710,8 +710,13 @@ fn hints_for(app: &App) -> Vec<&'static str> {
                 }
             }
         }
-        Service::Archive
-        | Service::IsoImage
+        Service::Archive => {
+            hints.push("z ゾーン");
+            if app.mode == Mode::Write {
+                hints.extend(["n ディスクから作成", "D 削除"]);
+            }
+        }
+        Service::IsoImage
         | Service::Internet
         | Service::Bridge
         | Service::LoadBalancer

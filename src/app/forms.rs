@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::{Loadable, matches};
 use crate::commonservice::{DnsRecord, DnsZone, SimpleMonitor};
 use crate::config::IamCredentials;
-use crate::iaas::{DiskPlan, Nic, ServerPlan, StartupScript, Zone};
+use crate::iaas::{DiskPlan, Nic, OsTemplate, ServerPlan, StartupScript, Zone};
 use crate::monitoring::{
     AlertProject, AlertRule, AlertRuleInput, DashboardProject, LogMeasureRule, LogMeasureRuleInput,
     LogRouting, LogRoutingInput, MetricsRouting, MetricsRoutingInput, NotificationRouting,
@@ -1307,27 +1307,20 @@ pub(super) fn edit_rule_form(form: &mut RuleForm, key: KeyEvent) {
     }
 }
 
-/// ディスクの作成フォーム。
-///
-/// プラン（SSD / HDD）とサイズとソースは選択式。選べるサイズはプランごとに
-/// 違うので、サーバー作成のコア数とメモリと同じく値そのものを持つ。
+/// ディスクからアーカイブを取るフォーム。
 #[derive(Debug, Clone, Default)]
-pub struct DiskCreateForm {
+pub struct ArchiveForm {
     pub name: String,
     pub description: String,
-    /// ディスクプランの ID。一覧が届くまでは 0。
-    pub plan_id: u32,
-    pub size_mb: u32,
-    /// ソースの添字。0 はブランク、以降は [`crate::iaas::OS_CHOICES`]。
+    /// 元にするディスクの添字。
     pub source: usize,
     pub field: usize,
 }
 
-impl DiskCreateForm {
-    pub const LABELS: [&'static str; 5] = ["名前", "説明", "プラン", "サイズ", "ソース"];
-    pub const CHOICE_FIELDS: [usize; 3] = [2, 3, 4];
-    /// ブランクを先頭に置くぶん、OS の選択肢は1つずれる。
-    pub const SOURCE_COUNT: usize = crate::iaas::OS_CHOICES.len() + 1;
+impl ArchiveForm {
+    pub const LABELS: [&'static str; 3] = ["名前", "説明", "元のディスク"];
+    /// 元のディスクを選ぶ欄。ここでだけ左右キーが効く。
+    pub const SOURCE_FIELD: usize = 2;
 
     pub fn value(&self, index: usize) -> &str {
         match index {
@@ -1344,29 +1337,208 @@ impl DiskCreateForm {
             _ => None,
         }
     }
+}
 
-    pub fn is_choice(index: usize) -> bool {
-        Self::CHOICE_FIELDS.contains(&index)
+pub(super) fn edit_archive_form(form: &mut ArchiveForm, key: KeyEvent, sources: usize) {
+    let fields = ArchiveForm::LABELS.len();
+    match key.code {
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Left | KeyCode::Right if form.field == ArchiveForm::SOURCE_FIELD => {
+            form.source = cycle(form.source, sources, key.code == KeyCode::Right);
+        }
+        KeyCode::Backspace => {
+            if let Some(value) = form.value_mut(form.field) {
+                value.pop();
+            }
+        }
+        KeyCode::Char(c) if form.field != ArchiveForm::SOURCE_FIELD => {
+            let field = form.field;
+            if let Some(value) = form.value_mut(field) {
+                value.push(c);
+            }
+        }
+        _ => {}
     }
+}
 
-    /// 選んだソースの表示名。
-    pub fn source_label(&self) -> &'static str {
-        match self.source.checked_sub(1) {
-            None => "ブランク（空のディスク）",
-            Some(os) => crate::iaas::OS_CHOICES[os.min(crate::iaas::OS_CHOICES.len() - 1)].label,
+/// ディスクの元にするもの。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiskSourceKind {
+    /// 何も入っていないディスク。
+    #[default]
+    Blank,
+    /// さくらが用意している OS テンプレート。
+    Os,
+    /// 自分で取ったアーカイブ。
+    Archive,
+}
+
+impl DiskSourceKind {
+    pub const ALL: [DiskSourceKind; 3] = [Self::Blank, Self::Os, Self::Archive];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blank => "ブランク（空のディスク）",
+            Self::Os => "OS テンプレート",
+            Self::Archive => "自分のアーカイブ",
         }
     }
 
-    /// OS テンプレートのタグ。ブランクなら空。
-    pub fn os_tags(&self) -> Vec<String> {
-        match self.source.checked_sub(1) {
-            None => Vec::new(),
-            Some(os) => crate::iaas::OS_CHOICES[os.min(crate::iaas::OS_CHOICES.len() - 1)]
-                .tags
+    /// 中身を選ぶ欄が要るか。ブランクだけは要らない。
+    pub fn needs_source(self) -> bool {
+        self != Self::Blank
+    }
+}
+
+/// ディスクの作成フォームの入力欄。
+///
+/// 元にするものの種類で、中身を選ぶ欄が出たり消えたりする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskField {
+    Name,
+    Description,
+    Plan,
+    Size,
+    SourceKind,
+    Source,
+}
+
+impl DiskField {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "名前",
+            Self::Description => "説明",
+            Self::Plan => "プラン",
+            Self::Size => "サイズ",
+            Self::SourceKind => "元にするもの",
+            Self::Source => "中身",
+        }
+    }
+
+    pub fn is_choice(self) -> bool {
+        matches!(
+            self,
+            Self::Plan | Self::Size | Self::SourceKind | Self::Source
+        )
+    }
+}
+
+/// ディスクの作成フォーム。
+///
+/// プランとサイズと元にするものは選択式。選べるサイズはプランごとに
+/// 違うので、サーバー作成のコア数とメモリと同じく値そのものを持つ。
+#[derive(Debug, Clone, Default)]
+pub struct DiskCreateForm {
+    pub name: String,
+    pub description: String,
+    /// ディスクプランの ID。一覧が届くまでは 0。
+    pub plan_id: u32,
+    pub size_mb: u32,
+    pub source_kind: usize,
+    /// 中身の添字。OS なら [`crate::iaas::OS_CHOICES`]、アーカイブなら一覧。
+    pub source: usize,
+    pub field: usize,
+}
+
+impl DiskCreateForm {
+    pub fn kind(&self) -> DiskSourceKind {
+        DiskSourceKind::ALL[self.source_kind.min(DiskSourceKind::ALL.len() - 1)]
+    }
+
+    /// 今出ている欄。
+    pub fn fields(&self) -> Vec<DiskField> {
+        let mut fields = vec![
+            DiskField::Name,
+            DiskField::Description,
+            DiskField::Plan,
+            DiskField::Size,
+            DiskField::SourceKind,
+        ];
+        if self.kind().needs_source() {
+            fields.push(DiskField::Source);
+        }
+        fields
+    }
+
+    pub fn current(&self) -> DiskField {
+        self.fields()
+            .get(self.field)
+            .copied()
+            .unwrap_or(DiskField::Name)
+    }
+
+    pub fn value(&self, field: DiskField) -> &str {
+        match field {
+            DiskField::Name => &self.name,
+            DiskField::Description => &self.description,
+            _ => "",
+        }
+    }
+
+    fn value_mut(&mut self, field: DiskField) -> Option<&mut String> {
+        match field {
+            DiskField::Name => Some(&mut self.name),
+            DiskField::Description => Some(&mut self.description),
+            _ => None,
+        }
+    }
+
+    /// 中身の選択肢。ブランクなら空。
+    pub fn source_rows(&self, archives: &[OsTemplate]) -> Vec<ChoiceRow> {
+        match self.kind() {
+            DiskSourceKind::Blank => Vec::new(),
+            DiskSourceKind::Os => crate::iaas::OS_CHOICES
                 .iter()
-                .map(|t| t.to_string())
+                .enumerate()
+                .map(|(position, os)| ChoiceRow {
+                    position,
+                    label: os.label.to_string(),
+                    detail: String::new(),
+                    note: os.tags.join(" "),
+                })
+                .collect(),
+            DiskSourceKind::Archive => archives
+                .iter()
+                .enumerate()
+                .map(|(position, archive)| ChoiceRow {
+                    position,
+                    label: archive.name.clone(),
+                    detail: format!("{} GB", archive.size_mb / 1024),
+                    note: archive.id.to_string(),
+                })
                 .collect(),
         }
+    }
+
+    /// 中身の表示名。
+    pub fn source_label(&self, archives: &[OsTemplate]) -> String {
+        let rows = self.source_rows(archives);
+        match rows.get(self.source) {
+            Some(row) => row.label.clone(),
+            None if self.kind() == DiskSourceKind::Blank => "—".to_string(),
+            None => "選べるものがありません".to_string(),
+        }
+    }
+
+    /// OS テンプレートのタグ。OS を選んでいないなら空。
+    pub fn os_tags(&self) -> Vec<String> {
+        if self.kind() != DiskSourceKind::Os {
+            return Vec::new();
+        }
+        crate::iaas::OS_CHOICES[self.source.min(crate::iaas::OS_CHOICES.len() - 1)]
+            .tags
+            .iter()
+            .map(|t| t.to_string())
+            .collect()
+    }
+
+    /// 元にするアーカイブ。アーカイブを選んでいないなら `None`。
+    pub fn source_archive(&self, archives: &[OsTemplate]) -> Option<ResourceId> {
+        if self.kind() != DiskSourceKind::Archive {
+            return None;
+        }
+        archives.get(self.source).map(|a| a.id)
     }
 
     /// プラン一覧が届いた時点で、まだ選んでいない欄を埋める。
@@ -1402,15 +1574,21 @@ fn default_disk_size(sizes: &[u32]) -> u32 {
         .unwrap_or(0)
 }
 
-pub(super) fn edit_disk_create_form(form: &mut DiskCreateForm, key: KeyEvent, plans: &[DiskPlan]) {
-    let fields = DiskCreateForm::LABELS.len();
+pub(super) fn edit_disk_create_form(
+    form: &mut DiskCreateForm,
+    key: KeyEvent,
+    plans: &[DiskPlan],
+    archives: &[OsTemplate],
+) {
+    let count = form.fields().len();
+    let current = form.current();
     match key.code {
-        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
-        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+        KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % count,
+        KeyCode::BackTab | KeyCode::Up => form.field = (form.field + count - 1) % count,
         KeyCode::Left | KeyCode::Right => {
             let forward = key.code == KeyCode::Right;
-            match form.field {
-                2 => {
+            match current {
+                DiskField::Plan => {
                     let ids: Vec<u32> = plans.iter().map(|p| p.id).collect();
                     form.plan_id = step(&ids, form.plan_id, forward);
                     // プランごとに選べるサイズが違うので、近いものへ寄せ直す。
@@ -1423,19 +1601,34 @@ pub(super) fn edit_disk_create_form(form: &mut DiskCreateForm, key: KeyEvent, pl
                             .unwrap_or(form.size_mb);
                     }
                 }
-                3 => form.size_mb = step(sizes_of(plans, form.plan_id), form.size_mb, forward),
-                4 => form.source = cycle(form.source, DiskCreateForm::SOURCE_COUNT, forward),
+                DiskField::Size => {
+                    form.size_mb = step(sizes_of(plans, form.plan_id), form.size_mb, forward)
+                }
+                DiskField::SourceKind => {
+                    form.source_kind = cycle(form.source_kind, DiskSourceKind::ALL.len(), forward);
+                    // 種類が変われば中身の一覧も変わるので、先頭に戻す。
+                    form.source = 0;
+                    // 中身の欄が増減するので、選択位置をこの行に留める。
+                    form.field = form
+                        .fields()
+                        .iter()
+                        .position(|f| *f == DiskField::SourceKind)
+                        .unwrap_or(form.field);
+                }
+                DiskField::Source => {
+                    let len = form.source_rows(archives).len();
+                    form.source = cycle(form.source, len, forward);
+                }
                 _ => {}
             }
         }
         KeyCode::Backspace => {
-            if let Some(value) = form.value_mut(form.field) {
+            if let Some(value) = form.value_mut(current) {
                 value.pop();
             }
         }
-        KeyCode::Char(c) if !DiskCreateForm::is_choice(form.field) => {
-            let field = form.field;
-            if let Some(value) = form.value_mut(field) {
+        KeyCode::Char(c) if !current.is_choice() => {
+            if let Some(value) = form.value_mut(current) {
                 value.push(c);
             }
         }
@@ -3512,15 +3705,32 @@ mod tests {
         ]
     }
 
-    /// 既定は SSD の 20GB。
+    fn archives() -> Vec<OsTemplate> {
+        vec![
+            OsTemplate {
+                id: ResourceId(11),
+                name: "web-backup".to_string(),
+                size_mb: 20480,
+            },
+            OsTemplate {
+                id: ResourceId(12),
+                name: "db-backup".to_string(),
+                size_mb: 40960,
+            },
+        ]
+    }
+
+    /// 既定は SSD の 20GB、ブランク。
     #[test]
     fn a_new_disk_starts_at_ssd_20gb() {
         let mut form = DiskCreateForm::default();
         form.apply_defaults(&disk_plans());
         assert_eq!((form.plan_id, form.size_mb), (4, 20480));
-        // ソースの既定はブランク。
-        assert_eq!(form.source, 0);
+        assert_eq!(form.kind(), DiskSourceKind::Blank);
         assert!(form.os_tags().is_empty());
+        assert!(form.source_archive(&archives()).is_none());
+        // ブランクでは中身を選ぶ欄を出さない。
+        assert!(!form.fields().contains(&DiskField::Source));
     }
 
     /// プランを変えたら、そのプランで選べるサイズへ寄ること。
@@ -3528,30 +3738,70 @@ mod tests {
     #[test]
     fn changing_the_disk_plan_moves_the_size_into_range() {
         let plans = disk_plans();
-        let mut form = DiskCreateForm {
-            field: 2,
-            ..DiskCreateForm::default()
-        };
+        let mut form = DiskCreateForm::default();
         form.apply_defaults(&plans);
-        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans);
+        form.field = form
+            .fields()
+            .iter()
+            .position(|f| *f == DiskField::Plan)
+            .unwrap();
+        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans, &[]);
         assert_eq!(form.plan_id, 2);
         assert_eq!(form.size_mb, 40960, "HDD で選べる一番近いサイズへ寄る");
     }
 
-    /// ソースはブランクを先頭に、OS の選択肢が続くこと。
+    /// 元にするものの種類を変えると、中身の欄が出入りすること。
     #[test]
-    fn the_source_list_puts_blank_first() {
+    fn choosing_a_source_kind_shows_the_matching_list() {
         let plans = disk_plans();
-        let mut form = DiskCreateForm {
-            field: 4,
-            ..DiskCreateForm::default()
-        };
-        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans);
-        assert_eq!(form.source, 1);
+        let archives = archives();
+        let mut form = DiskCreateForm::default();
+        form.field = form
+            .fields()
+            .iter()
+            .position(|f| *f == DiskField::SourceKind)
+            .unwrap();
+
+        // ブランク → OS テンプレート。
+        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans, &archives);
+        assert_eq!(form.kind(), DiskSourceKind::Os);
+        assert!(form.fields().contains(&DiskField::Source));
         assert_eq!(form.os_tags(), crate::iaas::OS_CHOICES[0].tags);
-        // 端で折り返す。
-        edit_disk_create_form(&mut form, press(KeyCode::Left), &plans);
-        assert_eq!(form.source_label(), "ブランク（空のディスク）");
+        // 欄が増えても選択位置は種類の行に残る。
+        assert_eq!(form.current(), DiskField::SourceKind);
+
+        // OS → アーカイブ。中身の選択は先頭に戻す。
+        edit_disk_create_form(&mut form, press(KeyCode::Right), &plans, &archives);
+        assert_eq!(form.kind(), DiskSourceKind::Archive);
+        assert_eq!(form.source, 0);
+        assert!(
+            form.os_tags().is_empty(),
+            "アーカイブなら OS タグは送らない"
+        );
+        assert_eq!(form.source_archive(&archives), Some(ResourceId(11)));
+    }
+
+    /// 中身の一覧は、選んだ種類のものだけを出すこと。
+    #[test]
+    fn the_source_list_follows_the_kind() {
+        let archives = archives();
+        let mut form = DiskCreateForm::default();
+        assert!(
+            form.source_rows(&archives).is_empty(),
+            "ブランクは選ばせない"
+        );
+
+        form.source_kind = 1;
+        assert_eq!(
+            form.source_rows(&archives).len(),
+            crate::iaas::OS_CHOICES.len()
+        );
+
+        form.source_kind = 2;
+        let rows = form.source_rows(&archives);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "web-backup");
+        assert_eq!(rows[1].detail, "40 GB");
     }
 
     /// プラン変更でもコア数を変えたらメモリが追従すること。

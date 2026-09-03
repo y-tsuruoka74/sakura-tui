@@ -914,12 +914,13 @@ pub(super) fn draw_disk_create_form(
     app: &crate::app::App,
 ) {
     let plans = app.disk_plan_choices();
+    let archives = app.disk_archive_choices();
     let loading = app.disk.plans.ready().is_none();
     let sizes = crate::app::sizes_of(&plans, form.plan_id);
 
     let choice_row =
         |label: &str, text: String, pos: Option<usize>, total: usize, focused: bool| {
-            // スタートアップスクリプト名などは長い。折り返して行がずれないよう切る。
+            // 長い名前で折り返して行がずれないよう切る。
             let text = clip(&text, CHOICE_TEXT_WIDTH);
             let shown = if focused {
                 format!("‹ {text} ›")
@@ -965,19 +966,15 @@ pub(super) fn draw_disk_create_form(
         Some(plan) => plan.name.clone(),
         None => unknown(),
     };
+    let sources = form.source_rows(&archives);
 
     let mut lines: Vec<Line> = Vec::new();
-    for (i, label) in DiskCreateForm::LABELS.iter().enumerate() {
+    for (i, field) in form.fields().iter().enumerate() {
         let focused = form.field == i;
-        match i {
-            2 => lines.push(choice_row(
-                label,
-                plan_text.clone(),
-                plan_pos,
-                plans.len(),
-                focused,
-            )),
-            3 => lines.push(choice_row(
+        let label = field.label();
+        lines.push(match field {
+            DiskField::Plan => choice_row(label, plan_text.clone(), plan_pos, plans.len(), focused),
+            DiskField::Size => choice_row(
                 label,
                 if sizes.is_empty() {
                     unknown()
@@ -987,23 +984,32 @@ pub(super) fn draw_disk_create_form(
                 sizes.iter().position(|mb| *mb == form.size_mb),
                 sizes.len(),
                 focused,
-            )),
-            4 => lines.push(choice_row(
+            ),
+            DiskField::SourceKind => choice_row(
                 label,
-                form.source_label().to_string(),
-                Some(form.source),
-                DiskCreateForm::SOURCE_COUNT,
+                form.kind().label().to_string(),
+                Some(form.source_kind),
+                DiskSourceKind::ALL.len(),
                 focused,
-            )),
-            _ => lines.push(input_line(label, form.value(i), focused, false)),
-        }
+            ),
+            DiskField::Source => choice_row(
+                label,
+                form.source_label(&archives),
+                (!sources.is_empty()).then_some(form.source),
+                sources.len(),
+                focused,
+            ),
+            _ => input_line(label, form.value(*field), focused, false),
+        });
     }
 
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "OSを選ぶとテンプレートのコピーが走り、使えるまで数分かかります。",
-        Style::default().fg(DIM),
-    )));
+    if form.kind().needs_source() {
+        lines.push(Line::from(Span::styled(
+            "元にするものがあるとコピーが走り、使えるまで数分かかります。",
+            Style::default().fg(DIM),
+        )));
+    }
     lines.push(Line::from(Span::styled(
         "ディスクは作成した時点から課金されます。",
         Style::default().fg(DIM),
@@ -1029,6 +1035,83 @@ pub(super) fn draw_disk_create_form(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .block(dialog("ディスクの作成", accent())),
+        area,
+    );
+}
+
+/// ディスクからアーカイブを取るフォーム。
+pub(super) fn draw_archive_form(frame: &mut Frame, form: &ArchiveForm, app: &crate::app::App) {
+    let sources = app.archive_source_choices();
+    let loading = app.disk.sources.ready().is_none();
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, label) in ArchiveForm::LABELS.iter().enumerate() {
+        let focused = form.field == i;
+        if i == ArchiveForm::SOURCE_FIELD {
+            let text = match sources.get(form.source) {
+                Some((_, name)) => clip(name, CHOICE_TEXT_WIDTH),
+                None if loading => "読み込み中…".to_string(),
+                None => "このゾーンにディスクがありません".to_string(),
+            };
+            let shown = if focused {
+                format!("‹ {text} ›")
+            } else {
+                format!("  {text}  ")
+            };
+            let style = if focused {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let mut spans = vec![
+                Span::styled(
+                    crate::ui::pad(label, 14),
+                    if focused {
+                        style
+                    } else {
+                        Style::default().fg(DIM)
+                    },
+                ),
+                Span::styled(crate::ui::pad(&shown, 30), style),
+            ];
+            if sources.len() > 1 {
+                spans.push(Span::styled(
+                    format!("{}/{}", form.source + 1, sources.len()),
+                    Style::default().fg(DIM),
+                ));
+            }
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(input_line(label, form.value(i), focused, false));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "起動中のサーバーに繋がったディスクから取ると、中身が壊れていることがあります。",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 項目移動   "),
+        Span::styled("←→", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" ディスク   "),
+        Span::styled(
+            "Enter",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" 確認へ   "),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" 中止"),
+    ]));
+
+    let area = centered(frame, 74, dialog_height(&lines, 74));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(dialog("アーカイブの作成", accent())),
         area,
     );
 }
