@@ -6,7 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, Tabs, Wrap};
 
-use super::{DIM, accent, border_style, field, format_datetime, placeholder};
+use super::{
+    DIM, accent, border_style, draw_error, draw_message, draw_pending, field, format_datetime,
+    placeholder,
+};
 use crate::app::{App, Loadable, NoSqlTab};
 use crate::nosql::NoSqlDatabase;
 
@@ -474,25 +477,4 @@ fn draw_table<const N: usize>(
         )
         .block(block);
     frame.render_stateful_widget(table, area, state);
-}
-
-fn draw_pending(frame: &mut Frame, area: Rect, title: &str) {
-    draw_message(frame, area, title, "読み込み中…");
-}
-
-fn draw_error(frame: &mut Frame, area: Rect, title: &str, err: &str) {
-    frame.render_widget(
-        Paragraph::new(err.to_string())
-            .style(Style::default().fg(Color::Red))
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title(format!(" {title} "))),
-        area,
-    );
-}
-
-fn draw_message(frame: &mut Frame, area: Rect, title: &str, message: &str) {
-    frame.render_widget(
-        placeholder(message).block(Block::bordered().title(format!(" {title} "))),
-        area,
-    );
 }

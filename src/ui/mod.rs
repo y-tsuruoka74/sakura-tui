@@ -966,6 +966,40 @@ pub fn placeholder(text: &str) -> Paragraph<'static> {
         .wrap(ratatui::widgets::Wrap { trim: false })
 }
 
+/// ペインが読み込み中のときの表示。枠は読み込み後と同じ色にして、
+/// 読み終わった瞬間に色が飛ばないようにする。
+pub fn draw_pending(frame: &mut Frame, area: Rect, title: &str) {
+    draw_message(frame, area, title, "読み込み中…");
+}
+
+/// ペインに案内文だけを出す（親が未選択のときなど）。
+pub fn draw_message(frame: &mut Frame, area: Rect, title: &str, message: &str) {
+    frame.render_widget(
+        placeholder(message).block(
+            Block::bordered()
+                .title(format!(" {title} "))
+                .border_style(border_style(true)),
+        ),
+        area,
+    );
+}
+
+/// ペインの中に収まる失敗表示。全幅版と同じ赤で揃える。
+pub fn draw_error(frame: &mut Frame, area: Rect, title: &str, err: &str) {
+    frame.render_widget(
+        error_paragraph(err).block(
+            Block::bordered()
+                .title(Span::styled(
+                    format!(" {title} "),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(Color::Red))
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        area,
+    );
+}
+
 /// 一覧そのものの取得に失敗したときは、狭いペインに押し込めず画面幅いっぱいに出す。
 /// （権限エラーの案内など、複数行のメッセージが読めなくなるため）
 pub fn draw_full_width_error(frame: &mut Frame, area: Rect, title: &str, err: &str) {
