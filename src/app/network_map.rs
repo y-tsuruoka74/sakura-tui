@@ -153,19 +153,16 @@ impl App {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             // 3つそろって初めて図になるので、1つでも失敗したら失敗にする。
-            let result = async {
-                let servers = client.list_servers(&zone).await?;
-                let switches = client.list_switches(&zone).await?;
-                let routers = client
-                    .list_cloud_resources(&zone, CloudResourceKind::Internet)
-                    .await?;
-                Ok::<_, anyhow::Error>(MapData {
-                    servers,
-                    switches,
-                    routers,
-                })
-            }
-            .await
+            let result = tokio::try_join!(
+                client.list_servers(&zone),
+                client.list_switches(&zone),
+                client.list_cloud_resources(&zone, CloudResourceKind::Internet),
+            )
+            .map(|(servers, switches, routers)| MapData {
+                servers,
+                switches,
+                routers,
+            })
             .map_err(fmt_error);
             let _ = tx.send(Message::NetworkMap { zone, result });
         });
@@ -178,6 +175,28 @@ impl App {
 
     pub(super) fn network_map_invalidate(&mut self) {
         self.network_map = NetworkMapView::default();
+    }
+
+    pub(super) fn move_network_map_selection(&mut self, delta: i32) {
+        let rows = self
+            .visible_network_map()
+            .ready()
+            .cloned()
+            .unwrap_or_default();
+        let next = move_selectable_row(&rows, self.network_map.state.selected(), delta);
+        self.network_map.state.select(next);
+        self.after_selection_change(self.active_pane());
+    }
+
+    pub(super) fn jump_network_map_selection(&mut self, to_top: bool) {
+        let rows = self
+            .visible_network_map()
+            .ready()
+            .cloned()
+            .unwrap_or_default();
+        let next = jump_selectable_row(&rows, to_top);
+        self.network_map.state.select(next);
+        self.after_selection_change(self.active_pane());
     }
 
     pub(super) fn on_key_network_map(&mut self, key: KeyEvent) {
@@ -375,6 +394,44 @@ fn mark_last(row: MapRow, is_last: bool) -> MapRow {
     }
 }
 
+fn selectable_row_indices(rows: &[MapRow]) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| row.is_selectable().then_some(index))
+        .collect()
+}
+
+fn move_selectable_row(rows: &[MapRow], current: Option<usize>, delta: i32) -> Option<usize> {
+    let selectable = selectable_row_indices(rows);
+    if selectable.is_empty() {
+        return None;
+    }
+    if delta == 0 {
+        return current
+            .filter(|index| rows.get(*index).is_some_and(MapRow::is_selectable))
+            .or_else(|| jump_selectable_row(rows, true));
+    }
+    let target = if delta > 0 {
+        let start = current.map_or(0, |index| selectable.partition_point(|&i| i <= index)) as i32;
+        start + delta - 1
+    } else {
+        let start = current.map_or(selectable.len(), |index| {
+            selectable.partition_point(|&i| i < index)
+        }) as i32;
+        start + delta
+    }
+    .clamp(0, selectable.len() as i32 - 1) as usize;
+    Some(selectable[target])
+}
+
+fn jump_selectable_row(rows: &[MapRow], to_top: bool) -> Option<usize> {
+    if to_top {
+        rows.iter().position(MapRow::is_selectable)
+    } else {
+        rows.iter().rposition(MapRow::is_selectable)
+    }
+}
+
 /// ルータ＋スイッチが持つスイッチの ID。
 fn switch_id_of(router: &CloudResource) -> Option<ResourceId> {
     router
@@ -469,6 +526,39 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn nic_row(id: u64, name: &str) -> MapRow {
+        MapRow::Nic {
+            server_id: ResourceId(id),
+            server: name.to_string(),
+            power: PowerStatus::Up,
+            nic: "eth0".to_string(),
+            ip: format!("192.168.0.{id}"),
+            filter: None,
+            last: false,
+        }
+    }
+
+    fn sample_rows() -> Vec<MapRow> {
+        vec![
+            MapRow::Network {
+                kind: NetworkKind::Shared,
+                name: "共有セグメント".to_string(),
+                note: String::new(),
+                nics: 2,
+                appliances: 0,
+            },
+            MapRow::Empty,
+            nic_row(1, "web-01"),
+            MapRow::Appliances {
+                count: 1,
+                last: false,
+            },
+            nic_row(2, "web-02"),
+            MapRow::Spacer,
+            nic_row(3, "db-01"),
+        ]
     }
 
     /// ネットワークごとにまとめ、外に近いものから並べること。
@@ -590,6 +680,37 @@ mod tests {
                 last: true
             }
         )));
+    }
+
+    #[test]
+    fn move_selection_steps_through_nic_rows_only() {
+        let rows = sample_rows();
+        assert_eq!(move_selectable_row(&rows, Some(2), 1), Some(4));
+        assert_eq!(move_selectable_row(&rows, Some(4), -1), Some(2));
+        assert_eq!(move_selectable_row(&rows, Some(2), 10), Some(6));
+        assert_eq!(move_selectable_row(&rows, Some(6), -10), Some(2));
+    }
+
+    #[test]
+    fn move_selection_recovers_from_non_selectable_current_row() {
+        let rows = sample_rows();
+        assert_eq!(move_selectable_row(&rows, Some(0), 1), Some(2));
+        assert_eq!(move_selectable_row(&rows, Some(5), -1), Some(4));
+    }
+
+    #[test]
+    fn jump_selection_targets_first_and_last_nic_rows() {
+        let rows = sample_rows();
+        assert_eq!(jump_selectable_row(&rows, true), Some(2));
+        assert_eq!(jump_selectable_row(&rows, false), Some(6));
+    }
+
+    #[test]
+    fn no_selectable_rows_leave_selection_empty() {
+        let rows = vec![MapRow::Spacer, MapRow::Empty];
+        assert_eq!(move_selectable_row(&rows, None, 1), None);
+        assert_eq!(jump_selectable_row(&rows, true), None);
+        assert_eq!(jump_selectable_row(&rows, false), None);
     }
 
     /// 選べるのは NIC の行だけ。見出しや空行に止まらないようにする。

@@ -5298,6 +5298,10 @@ impl App {
     /// 現在フォーカスしているリストの選択を動かす。
     fn move_selection(&mut self, delta: i32) {
         let pane = self.active_pane();
+        if pane == Pane::NetworkMap {
+            self.move_network_map_selection(delta);
+            return;
+        }
         let len = self.visible_len(pane);
         let Some(state) = self.list_state(pane) else {
             return;
@@ -5313,6 +5317,10 @@ impl App {
 
     fn jump_selection(&mut self, to_top: bool) {
         let pane = self.active_pane();
+        if pane == Pane::NetworkMap {
+            self.jump_network_map_selection(to_top);
+            return;
+        }
         let len = self.visible_len(pane);
         let Some(state) = self.list_state(pane) else {
             return;
