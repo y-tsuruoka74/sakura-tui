@@ -59,6 +59,9 @@ pub use switch::SwitchView;
 
 use crate::account::AuthStatus;
 use crate::ai_engine::AiEngineClient;
+use crate::ai_engine_cloud::{
+    AiEngineCloudClient, CloudAuth, CloudBill, CloudDocumentUsage, CloudModel, CloudUsage,
+};
 use crate::ai_rag::{RagChunk, RagDocument};
 use crate::api_gateway::{
     ApiGatewayClient, ApiGatewayGroup, ApiGatewayService, ApiGatewayUser, Certificate, Domain,
@@ -192,6 +195,22 @@ pub enum Message {
     AiEngineChunks {
         document_id: String,
         result: Result<Vec<RagChunk>, String>,
+    },
+    AiEngineCloudAuth {
+        result: Result<CloudAuth, String>,
+    },
+    AiEngineCloudModels {
+        result: Result<Vec<CloudModel>, String>,
+    },
+    AiEngineCloudUsages {
+        result: Result<Vec<CloudUsage>, String>,
+    },
+    AiEngineCloudDocumentUsages {
+        result: Result<Vec<CloudDocumentUsage>, String>,
+    },
+    AiEngineCloudBill {
+        month: String,
+        result: Result<CloudBill, String>,
     },
     RagDocumentUploaded {
         result: Result<RagDocument, String>,
@@ -622,6 +641,8 @@ pub enum Pane {
     Switches,
     CloudResources,
     ManagedResources,
+    // AI Engine
+    AiEngineModels,
     // API Gateway
     ApiGatewaySubscriptions,
     ApiGatewayServices,
@@ -1163,6 +1184,7 @@ pub struct App {
     monitoring_client: Arc<MonitoringClient>,
     api_gateway_client: Arc<ApiGatewayClient>,
     ai_engine_client: Option<Arc<AiEngineClient>>,
+    ai_engine_cloud_client: Arc<AiEngineCloudClient>,
     tx: Tx,
     pub config: Config,
     pub registry_clients: RegistryClients,
@@ -1255,6 +1277,7 @@ impl App {
             monitoring_client: clients.monitoring,
             api_gateway_client: clients.api_gateway,
             ai_engine_client: None,
+            ai_engine_cloud_client: clients.ai_engine_cloud,
             tx,
             config,
             registry_clients: RegistryClients::default(),
@@ -1578,9 +1601,12 @@ impl App {
             | Service::EnhancedDb
             | Service::AutoBackup => Pane::ManagedResources,
             Service::AiEngine => match self.ai_engine.tab {
-                // モデル一覧はマネージドリソースの枠をそのまま使う。
+                // コントロールパネルAPIが使えないときは推論API側の一覧に落ちるので、
+                // 実際に描いている方のペインを返す。絞り込みとコピーの対象がずれる。
+                AiEngineTab::Models if self.ai_engine_shows_cloud_models() => Pane::AiEngineModels,
                 AiEngineTab::Models => Pane::ManagedResources,
                 AiEngineTab::Documents => Pane::AiEngineDocuments,
+                AiEngineTab::Usage | AiEngineTab::Billing | AiEngineTab::Account => Pane::None,
             },
             Service::NetworkingSuite => match self.networking_suite.tab {
                 NetworkingSuiteTab::Groups => Pane::NetworkingSuiteGroups,
@@ -1984,6 +2010,24 @@ impl App {
             } => {
                 let loadable = self.store_result(result);
                 self.ai_engine.chunks.insert(document_id, loadable);
+            }
+            Message::AiEngineCloudAuth { result } => {
+                self.ai_engine.cloud_auth = self.store_result(result);
+                self.ai_engine_ensure_loaded();
+            }
+            Message::AiEngineCloudModels { result } => {
+                self.ai_engine.cloud_models = self.store_result(result);
+                self.fill_selection(Pane::AiEngineModels);
+            }
+            Message::AiEngineCloudUsages { result } => {
+                self.ai_engine.usages = self.store_result(result);
+            }
+            Message::AiEngineCloudDocumentUsages { result } => {
+                self.ai_engine.document_usages = self.store_result(result);
+            }
+            Message::AiEngineCloudBill { month, result } => {
+                let loadable = self.store_result(result);
+                self.ai_engine.bills.insert(month, loadable);
             }
             Message::RagDocumentUploaded { result } => match result {
                 Ok(document) => {
@@ -4688,6 +4732,10 @@ impl App {
                 .visible_api_gateway_certificates()
                 .ready()
                 .map_or(0, Vec::len),
+            Pane::AiEngineModels => self
+                .visible_ai_engine_cloud_models()
+                .ready()
+                .map_or(0, Vec::len),
             Pane::AiEngineDocuments => self
                 .visible_ai_engine_documents()
                 .ready()
@@ -4793,6 +4841,7 @@ impl App {
             Pane::ApiGatewayGroups => Some(&mut self.api_gateway.group_state),
             Pane::ApiGatewayDomains => Some(&mut self.api_gateway.domain_state),
             Pane::ApiGatewayCertificates => Some(&mut self.api_gateway.certificate_state),
+            Pane::AiEngineModels => Some(&mut self.ai_engine.model_state),
             Pane::AiEngineDocuments => Some(&mut self.ai_engine.document_state),
             Pane::NetworkingSuiteGroups => Some(&mut self.networking_suite.group_state),
             Pane::NetworkingSuiteSubnets => Some(&mut self.networking_suite.subnet_state),
@@ -4860,8 +4909,15 @@ impl App {
             self.selected_registry()
                 .map(|registry| registry.host().to_string())
         };
+        let inert_ai_engine = self.service == Service::AiEngine
+            && matches!(
+                self.ai_engine.tab,
+                AiEngineTab::Usage | AiEngineTab::Billing | AiEngineTab::Account
+            );
         match self.active_pane() {
-            Pane::Registries | Pane::None => host(),
+            Pane::Registries => host(),
+            Pane::None if inert_ai_engine => None,
+            Pane::None => host(),
             Pane::Users => self.selected_user().map(|user| user.username),
             Pane::Repositories => Some(format!("{}/{}", host()?, self.selected_repository()?)),
             Pane::Tags => Some(format!(
@@ -4968,6 +5024,8 @@ impl App {
             Pane::ApiGatewayCertificates => self
                 .selected_api_gateway_certificate()
                 .map(|resource| resource.id),
+            // 推論APIに渡すのは連番ではなくモデル名なので、そちらをコピーする。
+            Pane::AiEngineModels => self.selected_ai_engine_cloud_model().map(|model| model.id),
             Pane::AiEngineDocuments => self
                 .selected_ai_engine_document()
                 .map(|resource| resource.id),
@@ -6929,6 +6987,44 @@ mod tests {
         assert_eq!(availability_reason("connection closed"), "取得できず");
     }
 
+    fn test_app() -> App {
+        use std::sync::Arc;
+
+        let creds = ApiCredentials {
+            token: "token".to_string(),
+            secret: "secret".to_string(),
+            source: CredentialSource::Env,
+            zone: None,
+            api_root: None,
+        };
+        let clients = crate::Clients {
+            sacloud: Arc::new(crate::sacloud::SacloudClient::new(&creds).unwrap()),
+            apprun: Arc::new(crate::apprun::AppRunClient::new(&creds).unwrap()),
+            dedicated: Arc::new(crate::apprun_dedicated::DedicatedClient::new(&creds).unwrap()),
+            monitoring: Arc::new(crate::monitoring::MonitoringClient::new(&creds).unwrap()),
+            api_gateway: Arc::new(crate::api_gateway::ApiGatewayClient::new(&creds).unwrap()),
+            ai_engine_cloud: Arc::new(
+                crate::ai_engine_cloud::AiEngineCloudClient::new(&creds).unwrap(),
+            ),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(
+            clients,
+            Tx::new(tx),
+            Config::default(),
+            CredentialSource::Env,
+            false,
+        )
+    }
+
+    fn ai_engine_app(tab: AiEngineTab) -> App {
+        let mut app = test_app();
+        app.service = Service::AiEngine;
+        app.ai_engine.tab = tab;
+        app.managed_resources.state.select(Some(1));
+        app
+    }
+
     /// `--service` に渡す名前が重複していないこと。
     #[test]
     fn arg_names_are_unique() {
@@ -7190,6 +7286,27 @@ mod tests {
     fn ai_category_has_a_single_merged_service() {
         let names: Vec<&str> = Category::Ai.services().map(Service::arg_name).collect();
         assert_eq!(names, vec!["ai-engine"]);
+
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut app = ai_engine_app(AiEngineTab::Usage);
+        assert_eq!(app.active_pane(), Pane::None);
+        assert_eq!(app.copy_text(), None);
+
+        let before = app.managed_resources.state.selected();
+        app.on_key_common(KeyEvent::from(KeyCode::Char('/')));
+        app.on_key_common(KeyEvent::from(KeyCode::Char('y')));
+        app.on_key_common(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.managed_resources.state.selected(), before);
+        assert!(!app.filtering);
+        assert_eq!(app.active_filter(), "");
+
+        let mut billing = ai_engine_app(AiEngineTab::Billing);
+        billing.ai_engine.billing_month = "202401".to_string();
+        billing.on_key_ai_engine(KeyEvent::from(KeyCode::Char(']')));
+        assert_eq!(billing.ai_engine.billing_month, "202402");
+        billing.on_key_ai_engine(KeyEvent::from(KeyCode::Char('[')));
+        assert_eq!(billing.ai_engine.billing_month, "202401");
     }
 
     #[test]

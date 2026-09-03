@@ -4,6 +4,7 @@
 
 mod account;
 mod ai_engine;
+mod ai_engine_cloud;
 mod ai_rag;
 mod api_gateway;
 mod app;
@@ -253,6 +254,7 @@ pub struct Clients {
     pub dedicated: Arc<apprun_dedicated::DedicatedClient>,
     pub monitoring: Arc<monitoring::MonitoringClient>,
     pub api_gateway: Arc<api_gateway::ApiGatewayClient>,
+    pub ai_engine_cloud: Arc<ai_engine_cloud::AiEngineCloudClient>,
 }
 
 impl Clients {
@@ -263,6 +265,7 @@ impl Clients {
             dedicated: Arc::new(apprun_dedicated::DedicatedClient::new(credentials)?),
             monitoring: Arc::new(monitoring::MonitoringClient::new(credentials)?),
             api_gateway: Arc::new(api_gateway::ApiGatewayClient::new(credentials)?),
+            ai_engine_cloud: Arc::new(ai_engine_cloud::AiEngineCloudClient::new(credentials)?),
         })
     }
 }

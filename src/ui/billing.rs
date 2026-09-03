@@ -6,26 +6,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Row, Table, Tabs};
 
-use super::{DIM, accent, border_style, error_paragraph, format_datetime, placeholder};
+use super::{DIM, accent, border_style, error_paragraph, format_datetime, placeholder, yen};
 use crate::app::{App, BillingFocus, BillingTab, Loadable};
-
-/// 金額を 3 桁区切りで円表示にする。
-fn yen(amount: i64) -> String {
-    let negative = amount < 0;
-    let digits = amount.abs().to_string();
-    let mut grouped = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(c);
-    }
-    if negative {
-        format!("-¥{grouped}")
-    } else {
-        format!("¥{grouped}")
-    }
-}
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
     // 請求一覧そのものが取れないときは、案内を読めるよう全幅で出す。

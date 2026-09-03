@@ -540,7 +540,13 @@ fn hints_for(app: &App) -> Vec<&'static str> {
             hints.push("←→/hl タブ");
         }
         Service::AiEngine => {
-            hints.extend(["←→/hl タブ", "J/K 本文", "t トークン管理"]);
+            hints.extend(["←→/hl・1-5 タブ", "t トークン管理"]);
+            if app.ai_engine.tab == AiEngineTab::Documents {
+                hints.push("J/K 本文");
+            }
+            if app.ai_engine.tab == AiEngineTab::Billing {
+                hints.push("[/] 請求月");
+            }
             // 書き込み系のキーは、書き込みモードのときだけ案内する。
             if app.mode == Mode::Write && app.ai_engine.tab == AiEngineTab::Documents {
                 hints.extend(["n アップロード", "e 編集", "d 削除"]);
@@ -934,6 +940,24 @@ pub fn field(label: &str, value: &str) -> Line<'static> {
         Span::styled(pad(label, 14), Style::default().fg(DIM)),
         Span::raw(value.to_string()),
     ])
+}
+
+/// 金額を 3 桁区切りで円表示にする。
+pub fn yen(amount: i64) -> String {
+    let negative = amount < 0;
+    let digits = amount.abs().to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    if negative {
+        format!("-¥{grouped}")
+    } else {
+        format!("¥{grouped}")
+    }
 }
 
 pub fn placeholder(text: &str) -> Paragraph<'static> {

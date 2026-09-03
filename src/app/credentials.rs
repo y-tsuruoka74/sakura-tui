@@ -513,9 +513,10 @@ impl App {
             DedicatedClient::new(&credentials),
             MonitoringClient::new(&credentials),
             ApiGatewayClient::new(&credentials),
+            AiEngineCloudClient::new(&credentials),
         );
-        let (sacloud, apprun, dedicated, monitoring, api_gateway) = match clients {
-            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e)) => (a, b, c, d, e),
+        let (sacloud, apprun, dedicated, monitoring, api_gateway, ai_engine_cloud) = match clients {
+            (Ok(a), Ok(b), Ok(c), Ok(d), Ok(e), Ok(f)) => (a, b, c, d, e, f),
             _ => {
                 self.show_error(
                     "クライアントを初期化できませんでした",
@@ -536,6 +537,7 @@ impl App {
         self.monitoring_client = Arc::new(monitoring);
         self.api_gateway_client = Arc::new(api_gateway);
         self.ai_engine_client = None;
+        self.ai_engine_cloud_client = Arc::new(ai_engine_cloud);
         self.credential_source = source;
         self.has_credentials = true;
 
